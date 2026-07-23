@@ -1,0 +1,93 @@
+name: Viewer bug
+description: Report a reproducible rendering, compatibility, performance, or Viewer UI problem.
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve DocViewKit Viewer. Do not attach confidential documents, credentials, license tokens, private keys, or personal data.
+  - type: input
+    id: version
+    attributes:
+      label: Viewer version
+      description: Use the exact version shown by npm, the release, or the online demo.
+      placeholder: 0.2.15
+    validations:
+      required: true
+  - type: dropdown
+    id: distribution
+    attributes:
+      label: Distribution
+      options:
+        - npm package
+        - GitHub Release
+        - GitHub Pages demo
+        - docviewkit.com demo
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Browser and operating system
+      placeholder: Chrome 138 on macOS 15.5
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Document format
+      options:
+        - DOCX
+        - XLSX
+        - PPTX
+        - PDF
+        - ODF
+        - iWork
+        - Legacy Office
+        - CSV or RTF
+        - Markdown
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: size
+    attributes:
+      label: Approximate file size
+      placeholder: 2.4 MB
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Describe the smallest deterministic sequence that shows the problem.
+      placeholder: |
+        1. Open ...
+        2. Navigate to ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics and console output
+      description: Remove tokens, private URLs, document contents, and personal data.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I confirm that this report and its attachments contain no confidential or personal data.
+          required: true

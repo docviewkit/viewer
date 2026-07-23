@@ -1,0 +1,148 @@
+name: Publish verified Viewer release
+
+on:
+  repository_dispatch:
+    types: [release-ready]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+      release_id:
+        description: Existing draft release database ID
+        required: true
+        type: string
+
+concurrency:
+  group: public-release-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify assets and publish npm
+    runs-on: ubuntu-latest
+    environment: npm-production
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Validate the draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+          RELEASE_ID: ${{ github.event.client_payload.release_id || inputs.release_id }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          actual_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .tag_name)"
+          draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq .draft)"
+          test "$actual_tag" = "$RELEASE_TAG"
+          test "$draft" = "true"
+          version="${RELEASE_TAG#v}"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          mkdir incoming
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+            --jq '.[] | [.id, .name] | @tsv' |
+          while IFS=$'\t' read -r asset_id asset_name; do
+            gh api \
+              -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "incoming/$asset_name"
+          done
+      - name: Verify checksums and release metadata
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          cd incoming
+          sha256sum -c PUBLIC_SHA256SUMS
+          node -e '
+            const fs = require("node:fs");
+            const release = JSON.parse(fs.readFileSync("release.json", "utf8"));
+            if (release.tag !== process.env.RELEASE_TAG || release.version !== process.env.RELEASE_VERSION) {
+              throw new Error("Release metadata does not match the dispatch");
+            }
+          '
+          test -f "docviewkit-viewer-$RELEASE_VERSION.tgz"
+          test -f "docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz"
+      - name: Publish public npm package
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if npm view "@docviewkit/viewer@$RELEASE_VERSION" version >/dev/null 2>&1; then
+            echo "@docviewkit/viewer@$RELEASE_VERSION already exists; continuing the idempotent release."
+            exit 0
+          fi
+          npm_tag=latest
+          if [ "$PRERELEASE" = "true" ]; then npm_tag=next; fi
+          npm publish "incoming/docviewkit-viewer-$RELEASE_VERSION.tgz" \
+            --access public \
+            --tag "$npm_tag"
+      - name: Prepare Pages artifact
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          mkdir pages
+          tar -xzf "incoming/docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" -C pages
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: pages
+
+  deploy-pages:
+    name: Deploy latest Viewer to Pages
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  finalize:
+    name: Publish GitHub Release
+    needs: [publish, deploy-pages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.publish.outputs.release_id }}
+          PRERELEASE: ${{ needs.publish.outputs.prerelease }}
+        run: |
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false \
+            -F prerelease="$PRERELEASE"
