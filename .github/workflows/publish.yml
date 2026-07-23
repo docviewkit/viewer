@@ -93,16 +93,20 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           PRERELEASE: ${{ steps.release.outputs.prerelease }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if npm view "@docviewkit/viewer@$RELEASE_VERSION" version >/dev/null 2>&1; then
             echo "@docviewkit/viewer@$RELEASE_VERSION already exists; continuing the idempotent release."
             exit 0
           fi
+          if [ -n "$NPM_TOKEN" ]; then
+            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          fi
           npm_tag=latest
           if [ "$PRERELEASE" = "true" ]; then npm_tag=next; fi
           npm publish "incoming/docviewkit-viewer-$RELEASE_VERSION.tgz" \
             --access public \
+            --provenance \
             --tag "$npm_tag"
       - name: Prepare Pages artifact
         env:
