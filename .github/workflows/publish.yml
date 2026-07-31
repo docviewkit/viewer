@@ -104,7 +104,7 @@ jobs:
           fi
           npm_tag=latest
           if [ "$PRERELEASE" = "true" ]; then npm_tag=next; fi
-          npm publish "incoming/docviewkit-viewer-$RELEASE_VERSION.tgz" \
+          npm publish "./incoming/docviewkit-viewer-$RELEASE_VERSION.tgz" \
             --access public \
             --provenance \
             --tag "$npm_tag"
