@@ -24,6 +24,7 @@ await viewer.open(file);
 - **Lightweight by design:** the compact core and optional format packs keep unused capabilities out of the startup path.
 - **Broad compatibility:** one Viewer covers modern and legacy document formats across major browser engines.
 - **Fast and responsive:** local processing, lazy loading, and incremental rendering keep viewing interactions immediate.
+- **Frontend-only:** the component runs entirely in the browser and requires no backend service.
 - **Private by default:** normal viewing never uploads document bytes.
 
 ## Licensing
