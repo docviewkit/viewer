@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Office Viewer browser integration</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: light; font: 14px system-ui, sans-serif; }
+  body { margin: 24px; background: #f3f5f7; color: #17202a; }
+  main { max-width: 1000px; margin: auto; }
+  canvas { display: block; max-width: 100%; margin-top: 16px; background: white; box-shadow: 0 8px 30px #26323820; }
+  pre { white-space: pre-wrap; padding: 12px; border-radius: 8px; background: #e8edf2; }
+  [data-state="pass"] { background: #dff7e8; color: #155b31; }
+  [data-state="fail"] { background: #ffe4e4; color: #8a1c1c; }
+</style>
+<main>
+  <h1>Office Viewer browser integration</h1>
+  <pre id="status" data-state="loading">Running Worker + Wasm + OffscreenCanvas…</pre>
+  <canvas id="surface"></canvas>
+</main>
+<script type="module">
+  import { createOfficeEngine } from "../dist/engine.js";
+
+  const encoder = new TextEncoder();
+  const u16 = (value) => Uint8Array.of(value & 255, value >>> 8 & 255);
+  const u32 = (value) => Uint8Array.of(value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255);
+  const concat = (parts) => {
+    const result = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+    let offset = 0;
+    for (const part of parts) { result.set(part, offset); offset += part.length; }
+    return result;
+  };
+  const crc32 = (bytes) => {
+    let crc = 0xffffffff;
+    for (const byte of bytes) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) crc = crc >>> 1 ^ (0xedb88320 & -(crc & 1));
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const zip = (entries) => {
+    const locals = [];
+    const centrals = [];
+    let offset = 0;
+    for (const [name, text] of Object.entries(entries)) {
+      const nameBytes = encoder.encode(name);
+      const bytes = encoder.encode(text);
+      const checksum = crc32(bytes);
+      const local = concat([
+        u32(0x04034b50), u16(20), u16(0x0800), u16(0), u16(0), u16(0),
+        u32(checksum), u32(bytes.length), u32(bytes.length), u16(nameBytes.length), u16(0),
+        nameBytes, bytes,
+      ]);
+      locals.push(local);
+      centrals.push(concat([
+        u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(0), u16(0), u16(0),
+        u32(checksum), u32(bytes.length), u32(bytes.length), u16(nameBytes.length),
+        u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), nameBytes,
+      ]));
+      offset += local.length;
+    }
+    const central = concat(centrals);
+    return concat([
+      ...locals, central, u32(0x06054b50), u16(0), u16(0), u16(centrals.length),
+      u16(centrals.length), u32(central.length), u32(offset), u16(0),
+    ]);
+  };
+
+  const bytes = zip({
+    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`,
+    "_rels/.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>`,
+    "ppt/presentation.xml": `<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`,
+    "ppt/_rels/presentation.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>`,
+    "ppt/slides/slide1.xml": `<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Greeting"/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:p><a:r><a:rPr sz="3200" b="1"/><a:t>Browser-local render</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`,
+  });
+
+  const status = document.querySelector("#status");
+  const canvas = document.querySelector("#surface");
+  let engine;
+  let officeDocument;
+  try {
+    engine = await createOfficeEngine();
+    officeDocument = await engine.open(bytes, { timeoutMs: 10_000 });
+    const frame = await officeDocument.render({ unitIndex: 0, scale: 0.5, pixelRatio: 1 });
+    canvas.width = frame.pixelWidth;
+    canvas.height = frame.pixelHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.drawImage(frame.bitmap, 0, 0);
+    frame.bitmap.close();
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let nonWhite = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] < 245 || pixels[index + 1] < 245 || pixels[index + 2] < 245) nonWhite += 1;
+    }
+    const hits = await officeDocument.hitTest({ unitIndex: 0, x: 120, y: 120 });
+    const object = await officeDocument.getObject("object:0");
+    if (frame.pixelWidth !== 480 || frame.pixelHeight !== 360 || frame.renderedObjectCount !== 1) throw new Error("unexpected frame geometry");
+    if (nonWhite === 0) throw new Error("render contains no visible foreground pixels");
+    if (hits[0]?.object.source.shapeId !== 2 || object?.text !== "Browser-local render") throw new Error("source mapping or hit test mismatch");
+    status.dataset.state = "pass";
+    status.textContent = `PASS\nformat=${officeDocument.info.format}\nworker=true\nframe=${frame.pixelWidth}×${frame.pixelHeight}\nforegroundPixels=${nonWhite}\nshapeId=${hits[0].object.source.shapeId}`;
+    document.title = "PASS - Office Viewer browser integration";
+  } catch (error) {
+    status.dataset.state = "fail";
+    status.textContent = `FAIL\n${error?.stack ?? error}`;
+    document.title = "FAIL - Office Viewer browser integration";
+  } finally {
+    officeDocument?.close();
+    engine?.close();
+  }
+</script>

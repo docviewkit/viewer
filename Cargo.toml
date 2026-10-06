@@ -1,0 +1,50 @@
+[package]
+name = "office-viewer-core"
+version = "0.2.75"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+repository = "https://github.com/docviewkit/viewer"
+description = "WebAssembly core for the OfficeViewer rendering engine"
+
+[lib]
+path = "core/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+brotli-decompressor = { version = "=5.0.3", optional = true }
+encoding_rs = { version = "=0.8.35", default-features = false, features = ["alloc"], optional = true }
+hayro-jbig2 = { version = "=0.3.0", default-features = false, optional = true }
+hayro-ccitt = { version = "=0.3.0", default-features = false, optional = true }
+hayro-cmap = { version = "=0.1.0", optional = true }
+ironcalc_base = { version = "=0.8.2", features = ["mock_time"], optional = true }
+jpeg-decoder = { version = "=0.3.2", default-features = false, optional = true }
+skrifa = { version = "=0.44.0", default-features = false, features = ["std"], optional = true }
+sha2 = { version = "=0.10.9", default-features = false }
+sm2 = { version = "=0.13.3", default-features = false, features = ["dsa"], optional = true }
+sm3 = { version = "=0.4.2", default-features = false, optional = true }
+stringprep = { version = "=0.1.5", default-features = false }
+
+[features]
+default = ["native-formats"]
+native-formats = []
+calculation-service = ["dep:ironcalc_base"]
+odf-formats = []
+iwork-formats = ["dep:encoding_rs", "dep:hayro-jbig2"]
+legacy-office-formats = []
+pdf-formats = ["dep:brotli-decompressor", "dep:encoding_rs", "dep:hayro-ccitt", "dep:hayro-cmap", "dep:hayro-jbig2", "dep:jpeg-decoder", "dep:skrifa"]
+xps-formats = ["dep:encoding_rs", "dep:skrifa"]
+ofd-formats = ["dep:sm2", "dep:sm3"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release.package.ironcalc_base]
+opt-level = 3
+
+[patch.crates-io]
+ironcalc_base = { path = "third_party/ironcalc_base" }

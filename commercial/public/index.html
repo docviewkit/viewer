@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="DocViewKit 是轻量级纯前端文档预览 SDK，可快速集成到普通 OA 附件预览、审批、CRM、ERP、网盘、企业 SaaS 和 AI 知识库。支持 Office、WPS、PDF、OFD 等格式，按需加载、本地解析，轻松嵌入现有应用。">
+  <meta name="theme-color" content="#f7f7f5">
+  <title>Office、WPS、PDF、OFD 文档预览 SDK｜DocViewKit</title>
+  <link rel="canonical" href="https://docviewkit.com/en/">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css?v=20261002-3">
+  <script type="module" src="/assets/site.js?v=20261002-3"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header">
+    <nav class="site-nav container" aria-label="主导航">
+      <a class="brand" href="/" aria-label="DocViewKit 首页">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M7 4.5h13l5 5V27.5H7z" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M20 4.5v6h5M11 16h10M11 21h7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+          <circle cx="22.5" cy="22.5" r="5" fill="var(--surface)" stroke="currentColor" stroke-width="2"/>
+          <path d="m26 26 3 3" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+        </svg>
+        <span>DocViewKit</span>
+      </a>
+      <div class="nav-links" id="primary-nav">
+        <a class="nav-link" href="/for-ide/">For IDE</a>
+        <a class="nav-link" href="/for-browser/">For Browser</a>
+        <a class="nav-link" href="/demo/">Demo</a>
+        <a class="nav-link" href="/docs/quickstart/">文档</a>
+      </div>
+      <div class="nav-actions">
+        <button class="language-toggle" type="button" data-language-toggle aria-label="Switch to English">EN</button>
+        <button class="icon-button" type="button" data-theme-toggle aria-label="切换深浅主题">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2m-3.64-5.36 1.42-1.42M5.22 18.78l1.42-1.42m0-10.72L5.22 5.22m13.56 13.56-1.42-1.42"/><circle cx="12" cy="12" r="4"/></svg>
+        </button>
+        <a class="nav-link" href="#plans">专业服务</a>
+        <button class="menu-button" type="button" data-menu-toggle aria-controls="primary-nav" aria-expanded="false" aria-label="打开导航菜单">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <h1>轻量预览，<br><span>快速集成，<br>融入每一种业务。</span></h1>
+          <p class="lede">DocViewKit 是适用于普通 OA 到企业应用的轻量文档预览组件，快速集成，在前端本地完成解析与呈现。</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="/demo/">
+              验证真实文件
+              <svg class="inline-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </a>
+          </div>
+          <p class="small">Viewer 和 Engine 源码采用 Apache-2.0。 <a href="https://github.com/docviewkit/viewer" target="_blank" rel="noopener noreferrer">GitHub 源码</a></p>
+          <div class="hero-note" aria-label="产品特性摘要">
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>全部格式免费</span>
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>高性能本地渲染</span>
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>轻量按需加载</span>
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>多种前端环境兼容</span>
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/></svg>纯前端，轻松部署</span>
+          </div>
+        </div>
+
+        <div class="product-stage" role="img" aria-label="DocViewKit Viewer 展示原文并定位引用区域的界面示意">
+          <div class="stage-bar">
+            <div class="stage-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="stage-title">answer-source.docx</span>
+            <span class="small">前端本地</span>
+          </div>
+          <div class="viewer-mock">
+            <div class="viewer-rail" aria-hidden="true">
+              <span class="rail-icon active"><svg class="inline-icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
+              <span class="rail-icon"><svg class="inline-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></span>
+              <span class="rail-icon"><svg class="inline-icon" viewBox="0 0 24 24"><path d="M5 5h14v14H5zM9 9h6v6H9z"/></svg></span>
+            </div>
+            <div class="viewer-canvas">
+              <div class="document-page" aria-hidden="true">
+                <div class="line title"></div>
+                <div class="line"></div><div class="line"></div><div class="line short"></div>
+                <div class="line"></div><div class="line"></div><div class="line"></div>
+                <div class="line short"></div><div class="line"></div><div class="line"></div>
+              </div>
+              <div class="source-highlight" aria-hidden="true"></div>
+              <div class="source-callout">
+                <strong>引用已定位</strong>
+                <span>page 6 · paragraph 42</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="proof-strip" aria-label="产品优势">
+      <div class="container proof-grid">
+        <div class="proof-item"><strong>免费支持全部格式</strong><span>开源 Viewer 与 Engine 支持全部可用格式，按 Apache-2.0 使用与定制</span></div>
+        <div class="proof-item"><strong>高性能本地渲染</strong><span>解析、渲染与搜索均在前端本地完成，文件就地处理，交互快速响应</span></div>
+        <div class="proof-item"><strong>轻量按需加载</strong><span>只加载当前文档需要的功能，打开更快、资源占用更低</span></div>
+        <div class="proof-item"><strong>广泛兼容</strong><span>覆盖多种现代与传统格式，可用于浏览器和跨平台应用</span></div>
+        <div class="proof-item"><strong>轻松部署</strong><span>随应用部署静态资源，即可在前端完成文档解析与呈现</span></div>
+      </div>
+    </section>
+
+    <section class="section section-soft" id="formats">
+      <div class="container">
+        <div class="section-heading">
+          <div><h2>支持哪些文档格式？</h2></div>
+          <p class="lede">本地解析 Office、WPS、PDF、OFD、OpenDocument 和 iWork，覆盖新版与旧版 Office，让多格式文档使用同一套预览体验。</p>
+        </div>
+        <div class="integration-grid">
+          <article class="integration-card"><h3>新版 Microsoft Office</h3><p>Word（.docx、.docm、.dotx、.dotm）；Excel（.xlsx、.xlsm、.xltx、.xltm）；PowerPoint（.pptx、.pptm、.ppsx、.ppsm、.potx、.potm）。</p></article>
+          <article class="integration-card"><h3>旧版 Microsoft Office</h3><p>Word（.doc）、Excel（.xls）、PowerPoint（.ppt）文档预览。</p></article>
+          <article class="integration-card"><h3>WPS Office</h3><p>WPS 文字（.wps）、WPS 表格（.et）、WPS 演示（.dps）。</p></article>
+          <article class="integration-card"><h3>PDF、OFD 与 XPS</h3><p>固定版式文档预览：.pdf、.ofd、.xps、.oxps。</p></article>
+          <article class="integration-card"><h3>OpenDocument（ODF）</h3><p>文本文档（.odt、.ott、.fodt）、电子表格（.ods、.ots、.fods）、演示文稿（.odp、.otp、.fodp）、绘图（.odg、.otg、.fodg）。</p></article>
+          <article class="integration-card"><h3>Apple iWork</h3><p>Pages（.pages）、Numbers（.numbers）、Keynote（.key）单文件文档包。</p></article>
+          <article class="integration-card"><h3>CSV 与 RTF</h3><p>CSV 表格（.csv）与 RTF 富文本文档（.rtf）。</p></article>
+        </div>
+        <p>查看支持格式与功能说明，选择你的文档开始体验。</p>
+        <a href="/docs/supported-formats/">支持格式与边界</a>
+      </div>
+    </section>
+
+    <section class="section" id="product">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <h2>为什么日常附件预览也适合用 DocViewKit？</h2>
+          </div>
+          <p class="lede">把文档预览和原文定位直接嵌入你的产品；用户权限、答案和业务流程仍由你的系统管理。</p>
+        </div>
+        <div class="integration-grid">
+          <article class="integration-card">
+            <span class="card-index">01</span>
+            <h3>轻量体现在哪里？</h3>
+            <p>1 个 Viewer 组件复用多种格式；扩展格式按需加载，让应用启动更轻盈。</p>
+            <a href="/docs/performance/">查看按需加载与测量方法</a>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">02</span>
+            <h3>如何随现有应用部署？</h3>
+            <p>静态资源随应用托管，文档在前端本地解析，附件继续使用现有业务系统的存储与权限。</p>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">03</span>
+            <h3>如何快速定位原文？</h3>
+            <p>从搜索结果或业务系统跳转到对应页面和区域，快速核对内容与引用。</p>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">04</span>
+            <h3>如何添加文字水印？</h3>
+            <p>Viewer 与 Engine 可通过一个配置为页面、缩略图和打印结果添加文字水印，保留源文档原貌。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-soft">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <h2>如何快速接入所有主流前端框架？</h2>
+          </div>
+          <p class="lede">只需导入组件、放置 Viewer、调用 open(file) 这 3 步即可挂载预览界面。原生 JavaScript、React、Vue、Angular 等项目均可复用；上线时还需配置静态资源托管和附件鉴权。</p>
+        </div>
+        <p><a href="/docs/quickstart/">查看完整接入与私有附件示例</a></p>
+        <div class="hero-actions framework-actions" aria-label="框架集成指南">
+          <a class="button button-secondary" href="/react-office-viewer/">React 与 Next.js 集成</a>
+          <a class="button button-secondary" href="/vue-office-viewer/">Vue 集成</a>
+          <a class="button button-secondary" href="/angular-office-viewer/">Angular 集成</a>
+        </div>
+        <div class="code-window">
+          <div class="code-window-bar">
+            <span>viewer.ts</span>
+            <button class="copy-button" type="button" data-copy-target="hero-code">复制代码</button>
+          </div>
+          <pre id="hero-code"><code><span class="code-key">import</span> <span class="code-string">'@docviewkit/viewer'</span>;
+
+<span class="code-key">const</span> viewer = document.querySelector(<span class="code-string">'docviewkit-viewer'</span>);
+
+<span class="code-key">await</span> viewer.open(file);</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <h2>预览之外，还有哪些现成功能？</h2>
+          </div>
+          <p class="lede">除了只读预览，还提供搜索、文字选择、对象定位和原文跳转，方便用户核对内容与引用。</p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
+            <h3>浏览器与跨平台应用能共用一套 Viewer 吗？</h3>
+            <p>可用于浏览器及 Electron、Tauri、Ionic 和 Capacitor 的兼容 WebView。React Native、Flutter 等应用也可通过 WebView 接入，宿主需提供所需 Web 能力。 <a href="/docs/browser-compatibility/">查看运行环境要求</a></p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></span>
+            <h3>如何把搜索结果带回原文？</h3>
+            <p>把搜索结果或 AI 回答直接带回原文，定位到相关页面、对象和区域。</p>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.5 8 8 9 4.5-1 8-4 8-9V7zM9 12l2 2 4-5"/></svg></span>
+            <h3>如何处理文档中的主动内容？</h3>
+            <p>通过只读预览、主动内容隔离和资源管理，让用户专注查看文档；兼容信息可在诊断面板中查看。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-soft" id="scenarios">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <h2>普通 OA 和专业业务都能用吗？</h2>
+          </div>
+          <p class="lede">从日常附件预览到专业文档审阅，把多格式预览嵌入各类业务系统；需要时再接入搜索与原文定位。</p>
+        </div>
+        <div class="integration-grid scenario-grid">
+          <article class="integration-card">
+            <span class="card-index">01</span>
+            <h3>OA 与日常附件预览</h3>
+            <p>普通 OA、审批流、后台管理与内部工具，嵌入组件即可拥有本地附件预览。</p>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">02</span>
+            <h3>内容与知识管理</h3>
+            <p>网盘、企业 SaaS 与 AI 知识库中的文档预览，也适用于合同审阅、VDR 预览、法律、审计与金融风控。</p>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">03</span>
+            <h3>企业业务系统</h3>
+            <p>CRM、ERP 与人力资源系统中的档案、附件和业务文档预览。</p>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">04</span>
+            <h3>政务与合规</h3>
+            <p>电子政务与合规系统中的材料查阅、依据核验与原文定位。</p>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">05</span>
+            <h3>产业与贸易协作</h3>
+            <p>工业、建筑与供应链管理，以及电子商务与跨境贸易。</p>
+          </article>
+          <article class="integration-card">
+            <span class="card-index">06</span>
+            <h3>教育与培训</h3>
+            <p>教育与在线学习平台中的课件、资料和作业预览。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="plans">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <h2>开源软件与专业服务如何选择？</h2>
+          </div>
+          <p class="lede">Viewer 与 Engine 全部能力按 Apache-2.0 提供；付费服务覆盖支持、定制和企业交付。</p>
+        </div>
+        <p><a href="/docs/licensing/">查看开源许可与服务范围</a></p>
+        <div class="plan-grid">
+          <article class="plan-card">
+            <span class="plan-label">开源软件</span>
+            <h3>DocViewKit Viewer</h3>
+            <p>适合直接嵌入文档预览或使用 Engine API，按 Apache-2.0 免费商用、修改和再分发。</p>
+            <div class="plan-price">免费</div>
+            <ul class="plan-list">
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>支持全部可用文件格式</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>高性能、轻量级前端 Viewer</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>文档始终在前端本地处理</li>
+            </ul>
+            <a class="button button-secondary" href="/docs/quickstart/">开始免费使用</a>
+          </article>
+          <article class="plan-card featured">
+            <span class="plan-label">专业服务</span>
+            <h3>支持与定制</h3>
+            <p>按你的应用与真实文件提供接入支持、兼容性诊断和定制开发。</p>
+            <div class="plan-price">按服务范围报价</div>
+            <ul class="plan-list">
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>集成指导与兼容性诊断</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>业务界面与渲染流程定制</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>专项保真修复与真实 Case 回归</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>约定交付范围与验收标准</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>约定响应时间与升级协助</li>
+            </ul>
+            <a class="button button-primary" href="mailto:novalag778@gmail.com?subject=DocViewKit%20Support%20and%20Customization">联系支持与定制</a>
+          </article>
+          <article class="plan-card">
+            <span class="plan-label">企业交付</span>
+            <h3>企业交付</h3>
+            <p>适合需要部署验证、性能定制、验收材料和 SLA 的企业产品。</p>
+            <div class="plan-price">联系我们</div>
+            <ul class="plan-list">
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>部署验证、培训与 SLA</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>按业务需求定制现有文件格式</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>企业性能优化定制：按实际格式裁剪未使用模块，缩小交付体积并优化首开性能</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>单独开发并交付新的文件格式</li>
+              <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2"/></svg>定制服务端渲染</li>
+            </ul>
+            <a class="button button-secondary enterprise-contact" href="mailto:novalag778@gmail.com?subject=DocViewKit%20Enterprise"><span>联系企业交付</span><span class="small">novalag778@gmail.com</span></a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-soft">
+      <div class="container">
+        <div class="section-heading">
+          <div>
+            <h2>常见问题</h2>
+          </div>
+        </div>
+        <div class="faq-list" id="faq">
+          <details><summary>普通 OA 系统的附件预览适合用 DocViewKit 吗？</summary><p>适合。普通 OA、审批、后台管理和 CRM/ERP 附件都是主要场景，企业 SaaS、AI 知识库和专业审阅也可使用同一组件。现成 Viewer 集成了预览界面，直接嵌入即可使用。</p></details>
+          <details><summary>快速集成需要哪些步骤？</summary><p>挂载界面只需 3 步：导入组件、放置 Viewer、调用 open(file)。open() 支持 File、Blob、ArrayBuffer、Uint8Array 这 4 类输入，并配有现成预览工具栏。完整接入文档涵盖静态资源部署和附件鉴权。</p></details>
+          <details><summary>如何获得轻量、流畅的预览体验？</summary><p>复用 1 个 Viewer 组件，按需加载格式，并利用浏览器缓存。性能指南提供首开优化和冷、热启动测量方法，帮助你结合实际文件与运行环境优化体验。</p></details>
+          <details><summary>如何预览业务系统中的私有附件？</summary><p>沿用现有权限体系。你的应用完成鉴权并获取附件，再交给 Viewer 在本地解析。接入指南提供私有附件示例，并说明跨域资源的 CORS 配置，让预览融入已有业务流程。</p></details>
+          <details><summary>开源软件支持哪些格式？</summary><p>开源 Viewer 与 Engine 包含当前提供的全部格式，如 Office、WPS、PDF、OFD、OpenDocument 和 iWork，支持界面定制、极简模式和文字水印。在线 Demo 可直接体验你的文档，支持格式页提供详细功能说明。</p></details>
+          <details><summary>什么时候需要专业服务？</summary><p>Viewer、Engine API、界面定制、极简模式和水印均可按 Apache-2.0 使用。需要接入协助、专项兼容修复、性能优化或企业 SLA 时，可选择支持、定制和企业交付服务。</p></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="final-cta">
+      <div class="container final-cta-grid">
+        <div>
+          <h2>如何确认适合你的实际文件？</h2>
+          <p>先用你的真实文件确认格式、版面、搜索和原文定位效果，再选择合适的专业服务。</p>
+        </div>
+        <a class="button button-primary" href="/demo/">打开在线 Demo</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div>
+          <a class="brand" href="/">DocViewKit</a>
+          <p class="small">让软件产品在前端本地展示原文、搜索内容并定位引用。</p>
+        </div>
+        <div><h3>产品</h3><div class="footer-links"><a href="/for-ide/">For IDE</a><a href="/for-browser/">For Browser</a><a href="/demo/">在线 Demo</a></div></div>
+        <div><h3>开发者</h3><div class="footer-links"><a href="/docs/quickstart/">文档</a><a href="/llms.txt">llms.txt</a><a href="/llm-full.txt">llm-full.txt</a></div></div>
+        <div><h3>联系与服务</h3><div class="footer-links"><a href="mailto:novalag778@gmail.com">novalag778@gmail.com</a><a href="/privacy/docviewkit-omni/">Omni 隐私政策</a><a href="/license/docviewkit-omni/">Omni 使用许可</a><a href="https://github.com/docviewkit/viewer/issues/new/choose" target="_blank" rel="noopener noreferrer">报告问题</a></div></div>
+      </div>
+      <div class="footer-bottom"><span>© <span data-year></span> DocViewKit.</span></div>
+    </div>
+  </footer>
+</body>
+</html>

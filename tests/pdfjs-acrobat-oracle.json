@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "files": {
+    "bug1020226.pdf": {
+      "outcome": "damaged",
+      "detail": "Acrobat cannot repair the unterminated 184-byte PDF stream."
+    },
+    "encrypted-attachment.pdf": {
+      "outcome": "password-required",
+      "detail": "Acrobat requests a File Attachment Open Password."
+    },
+    "Pages-tree-refs.pdf": {
+      "outcome": "rendered",
+      "pageCount": 2,
+      "detail": "Acrobat renders the cyclic page tree as two pages."
+    },
+    "poppler-395-0-fuzzed.pdf": {
+      "outcome": "damaged",
+      "detail": "Acrobat reports a problem reading the document (109)."
+    },
+    "poppler-742-0-fuzzed.pdf": {
+      "outcome": "damaged",
+      "detail": "Acrobat reports that the damaged file could not be repaired."
+    },
+    "poppler-937-0-fuzzed.pdf": {
+      "outcome": "damaged",
+      "detail": "Acrobat reports a problem reading the document (14)."
+    },
+    "pr6531_1.pdf": {
+      "outcome": "password-required",
+      "detail": "Acrobat requests a Document Open Password."
+    },
+    "pr6531_2.pdf": {
+      "outcome": "password-required",
+      "detail": "Acrobat requests a Document Open Password."
+    },
+    "REDHAT-1531897-0.pdf": {
+      "outcome": "damaged",
+      "detail": "Acrobat rejects the invalid root and xref structure."
+    }
+  }
+}

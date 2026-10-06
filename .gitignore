@@ -1,0 +1,38 @@
+# Dependencies and build artifacts
+node_modules/
+commercial/data/*
+!commercial/data/.gitkeep
+dist/
+!third_party/emf-converter/dist/
+!third_party/emf-converter/dist/**
+target/
+coverage/
+output/
+release-output/
+tmp/
+
+# Local test and tool state
+.playwright-cli/
+.cache/
+.worktrees/
+tests/external/pdfjs/
+*.tsbuildinfo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Persistent local native visual references (retain across batch cleanup)
+/reference-library/

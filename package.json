@@ -1,0 +1,125 @@
+{
+  "name": "@docviewkit/sdk",
+  "version": "0.2.75",
+  "private": true,
+  "description": "Frontend-local Office, PDF and OFD viewer with independently lazy-loaded format packs",
+  "type": "module",
+  "sideEffects": [
+    "./dist/viewer.js"
+  ],
+  "files": [
+    "dist/*.js",
+    "dist/*.d.ts",
+    "!dist/image-codecs.js",
+    "!dist/image-codecs.d.ts",
+    "!dist/metafile-safety.js",
+    "!dist/metafile-safety.d.ts",
+    "!dist/worker-protocol.js",
+    "!dist/worker-protocol.d.ts",
+    "dist/*.wasm",
+    "dist/*.txt",
+    "dist/Caladea-*.ttf",
+    "dist/Carlito-*.ttf",
+    "dist/THIRD_PARTY_NOTICES.md",
+    "dist/third-party-licenses",
+    "README.md",
+    "docs/SECURITY.md",
+    "docs/SUPPORT.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./viewer": {
+      "types": "./dist/viewer.d.ts",
+      "import": "./dist/viewer.js"
+    },
+    "./accuracy": {
+      "types": "./dist/accuracy.d.ts",
+      "import": "./dist/accuracy.js"
+    },
+    "./extended-formats": {
+      "types": "./dist/extended-formats.d.ts",
+      "import": "./dist/extended-formats.js"
+    },
+    "./wps-formats": {
+      "types": "./dist/wps-formats.d.ts",
+      "import": "./dist/wps-formats.js"
+    },
+    "./xps-formats": {
+      "types": "./dist/xps-formats.d.ts",
+      "import": "./dist/xps-formats.js"
+    },
+    "./ofd-formats": {
+      "types": "./dist/ofd-formats.d.ts",
+      "import": "./dist/ofd-formats.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "generate:symbol-font-mappings": "node scripts/generate-symbol-font-mappings.mjs",
+    "build:core": "node scripts/build-core.mjs",
+    "build:js": "tsc -p tsconfig.json --incremental false && node scripts/bundle-runtime.mjs && node scripts/bundle-image-codec.mjs && node scripts/generate-third-party-notices.mjs",
+    "build": "npm run generate:symbol-font-mappings && npm run clean && npm run build:core && npm run build:js",
+    "inspect": "node scripts/serve.mjs --host 0.0.0.0",
+    "test:server": "bash scripts/test-server.sh",
+    "test:browsers:install": "node node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit",
+    "test:browsers": "node scripts/run-browser-matrix.mjs",
+    "test:core": "cargo test -p office-viewer-core && cargo test -p office-viewer-core --no-default-features --features calculation-service && cargo test -p office-viewer-core --no-default-features --features odf-formats && cargo test -p office-viewer-core --no-default-features --features iwork-formats && cargo test -p office-viewer-core --no-default-features --features legacy-office-formats && cargo test -p office-viewer-core --no-default-features --features pdf-formats && cargo test -p office-viewer-core --no-default-features --features xps-formats && cargo test -p office-viewer-core --no-default-features --features ofd-formats",
+    "test": "npm run build && npm run test:core && node --test tests/*.test.mjs",
+    "test:accuracy": "npm run build && node --test tests/accuracy*.test.mjs",
+    "accuracy": "npm run build && node scripts/run-accuracy-suite.mjs",
+    "performance": "npm run build && node scripts/run-performance-suite.mjs",
+    "performance:pdfjs": "npm run build && node scripts/run-pdfjs-performance-comparison.mjs",
+    "visual:fixture": "node scripts/create-visual-fixtures.mjs",
+    "visual:reference": "node scripts/export-native-reference.mjs",
+    "visual:native:reference": "node scripts/export-native-reference.mjs",
+    "visual:native:capture": "npm run build && node scripts/capture-native-visual-suite.mjs",
+    "visual:native:release": "npm run build && node scripts/run-native-visual-release.mjs",
+    "visual:pdf-preview": "npm run build && node scripts/run-pdf-preview-suite.mjs",
+    "visual:pdfjs-reference-corpus": "node scripts/run-pdfjs-reference-corpus.mjs --resume",
+    "visual:pdfjs-alignment-corpus": "node scripts/run-pdfjs-alignment-corpus.mjs --resume",
+    "visual:pdf-corpus": "npm run build && node scripts/run-pdf-corpus.mjs --visual",
+    "visual:pdf-corpus:full": "npm run build && node scripts/run-pdf-corpus.mjs --visual-full",
+    "test:native-visual": "npm run build && node --test tests/native-*.test.mjs tests/accuracy-visual-runner.test.mjs tests/visual-harness.test.mjs",
+    "test:corpus": "npm run build && node scripts/run-official-corpus.mjs",
+    "test:corpus:full": "npm run build && node scripts/run-official-corpus.mjs --full --quiet",
+    "test:pdf-corpus": "npm run build && node scripts/run-pdf-corpus.mjs",
+    "test:pdf-corpus:full": "npm run build && node scripts/run-pdf-corpus.mjs --full --quiet",
+    "check": "node scripts/generate-symbol-font-mappings.mjs --check && tsc -p tsconfig.json --noEmit",
+    "verify:api": "npm run build && node scripts/verify-api-snapshot.mjs",
+    "verify:package": "npm run build && node scripts/verify-package.mjs",
+    "release:verify": "node scripts/prepare-release.mjs --verify-only",
+    "release:prepare": "node scripts/prepare-release.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@discourse/jxr": "^1.0.0",
+    "@embedpdf/fonts-sc": "1.0.0",
+    "@resvg/resvg-wasm": "2.6.2",
+    "binaryen": "131.0.0",
+    "emf-converter": "file:third_party/emf-converter",
+    "esbuild": "0.25.6",
+    "mtx-decompressor": "1.6.0",
+    "pako": "1.0.11",
+    "playwright-core": "1.61.1",
+    "typescript": "^5.9.0",
+    "utif2": "4.1.0"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@kittl/little-cms": "^1.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/docviewkit/viewer.git"
+  }
+}

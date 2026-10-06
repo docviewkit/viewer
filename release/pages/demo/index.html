@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="docviewkit-version" content="__DOCVIEWKIT_VERSION__">
+  <title>Online Demo — DocViewKit Viewer</title>
+  <link rel="stylesheet" href="../styles.css">
+  <script type="module" src="./demo.js"></script>
+</head>
+<body class="demo-page">
+  <header>
+    <a href="../">DocViewKit Viewer</a>
+    <span>v__DOCVIEWKIT_VERSION__</span>
+  </header>
+  <main>
+    <div class="demo-toolbar">
+      <label class="primary">Choose a local file <input id="file" type="file"></label>
+      <span id="status" role="status">Starting Viewer…</span>
+    </div>
+    <docviewkit-viewer id="viewer" lang="en"></docviewkit-viewer>
+  </main>
+</body>
+</html>

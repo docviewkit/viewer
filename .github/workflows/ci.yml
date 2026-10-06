@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: rustup show
+      - run: npm ci
+      - run: npm run check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features
+      - run: npm test
+      - run: npm --prefix commercial run verify
+      - run: node scripts/verify-api-snapshot.mjs
+      - run: node scripts/verify-package.mjs
+      - run: npm audit --audit-level=high
+
+  browsers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: rustup show
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:browsers:install
+      - run: npm run test:browsers
+      - run: node scripts/test-pptx-text-extrusion.mjs

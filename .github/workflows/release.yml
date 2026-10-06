@@ -1,0 +1,262 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to resume
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: Verify and build release
+    if: github.repository == 'docviewkit/viewer'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Validate tag, version files, and main ancestry
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor HEAD origin/main
+          release_json="$(node scripts/prepare-release.mjs --tag "$RELEASE_TAG" --verify-only)"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -e 'const value=JSON.parse(process.argv[1]); process.stdout.write(value.version)' "$release_json")" >> "$GITHUB_OUTPUT"
+      - run: rustup show
+      - run: npm ci
+      - run: npm run check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features
+      - run: npm test
+      - run: npm --prefix commercial run verify
+      - run: node scripts/verify-api-snapshot.mjs
+      - run: node scripts/verify-package.mjs
+      - name: Validate reviewed native goldens when available
+        id: native_visual
+        run: |
+          if test -f suites/native/office-release.json \
+            && test -f suites/native/iwork-release.json \
+            && test -f suites/native/wps-release.json; then
+            node scripts/run-native-visual-release.mjs --validate-only
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+          else
+            node scripts/run-native-visual-release.mjs --validate-only --allow-missing
+            echo "status=not-certified" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare Apache-2.0 Viewer, SDK, Pages, and official-site artifacts
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          NATIVE_VISUAL_STATUS: ${{ steps.native_visual.outputs.status }}
+        run: |
+          node scripts/prepare-release.mjs --tag "$RELEASE_TAG" \
+            --native-visual-status "$NATIVE_VISUAL_STATUS"
+          npm sbom --sbom-format cyclonedx > "release-output/docviewkit-sdk-$RELEASE_VERSION.cdx.json"
+          tar -C release-output/pages -czf "release-output/docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" .
+          tar -C release-output/official-site -czf "release-output/docviewkit-official-site-$RELEASE_VERSION.tar.gz" .
+          cd release-output
+          shasum -a 256 \
+            "docviewkit-viewer-$RELEASE_VERSION.tgz" \
+            "docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" > PUBLIC_SHA256SUMS
+          shasum -a 256 \
+            "docviewkit-viewer-$RELEASE_VERSION.tgz" \
+            "docviewkit-sdk-$RELEASE_VERSION.tgz" \
+            "docviewkit-sdk-$RELEASE_VERSION.cdx.json" \
+            "docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" \
+            "docviewkit-official-site-$RELEASE_VERSION.tar.gz" > SHA256SUMS
+      - name: Determine GitHub provenance attestation availability
+        id: provenance
+        env:
+          ENABLE_GITHUB_ATTESTATIONS: ${{ vars.ENABLE_GITHUB_ATTESTATIONS }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPOSITORY_PRIVATE" = "true" ] \
+            && [ "$ENABLE_GITHUB_ATTESTATIONS" != "true" ]; then
+            echo "status=unavailable" >> "$GITHUB_OUTPUT"
+            echo "::warning title=GitHub provenance attestation unavailable::Private repositories skip GitHub-hosted attestations unless ENABLE_GITHUB_ATTESTATIONS is explicitly true. SHA256SUMS and the CycloneDX SBOM remain release artifacts."
+          else
+            echo "status=enabled" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/attest-build-provenance@v4
+        if: steps.provenance.outputs.status == 'enabled'
+        with:
+          subject-path: |
+            release-output/docviewkit-viewer-*.tgz
+            release-output/docviewkit-viewer-pages-*.tar.gz
+            release-output/docviewkit-sdk-*.tgz
+            release-output/docviewkit-official-site-*.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ steps.release.outputs.tag }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            release-output/*.tgz
+            release-output/*.tar.gz
+            release-output/*.json
+            release-output/*SHA256SUMS
+      - name: Create or update source-tag draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          NATIVE_VISUAL_STATUS: ${{ steps.native_visual.outputs.status }}
+        run: |
+          if [ "$NATIVE_VISUAL_STATUS" = "passed" ]; then
+            native_visual_note="Native visual acceptance: passed under native-visual-v1."
+          else
+            native_visual_note="Native visual acceptance: not certified; reviewed release suites were unavailable."
+          fi
+          provenance_note="GitHub-hosted provenance attestation: ${{ steps.provenance.outputs.status }}. SHA256SUMS and CycloneDX SBOM are attached."
+          release_notes="Apache-2.0 Viewer and Engine build from source tag $RELEASE_TAG. Online demo, npm package, checksums and CycloneDX SBOM accompany this release. $native_visual_note $provenance_note"
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --draft --verify-tag \
+              --title "DocViewKit Viewer $RELEASE_VERSION" \
+              --notes "$release_notes"
+          else
+            draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+            if [ "$draft" != "true" ]; then
+              echo "$RELEASE_TAG is already public; preserving published release assets."
+              exit 0
+            fi
+            gh release edit "$RELEASE_TAG" --title "DocViewKit Viewer $RELEASE_VERSION" \
+              --notes "$release_notes"
+          fi
+          gh release upload "$RELEASE_TAG" --clobber \
+            "release-output/docviewkit-viewer-$RELEASE_VERSION.tgz" \
+            "release-output/docviewkit-sdk-$RELEASE_VERSION.tgz" \
+            "release-output/docviewkit-sdk-$RELEASE_VERSION.cdx.json" \
+            "release-output/docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" \
+            "release-output/docviewkit-official-site-$RELEASE_VERSION.tar.gz" \
+            release-output/SHA256SUMS \
+            release-output/PUBLIC_SHA256SUMS \
+            release-output/release.json
+
+  publish-public:
+    name: Publish verified Viewer release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    permissions:
+      contents: write
+    steps:
+      - name: Dispatch verified publication
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          release_id="$(gh release view "$RELEASE_TAG" --json databaseId --jq .databaseId)"
+          if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
+              -f event_type=release-ready \
+              -F "client_payload[tag]=$RELEASE_TAG" \
+              -F "client_payload[release_id]=$release_id"
+          else
+            echo "$RELEASE_TAG is already public; skipping duplicate publication dispatch."
+          fi
+      - name: Wait for npm, Pages, and public Release
+        env:
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          for attempt in $(seq 1 90); do
+            if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = "false" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Public release did not complete within 15 minutes" >&2
+          exit 1
+  deploy-official-demo:
+    name: Deploy official Demo
+    if: vars.DOCVIEWKIT_DEPLOY_WEBSITE == 'true'
+    needs: [build, publish-public]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: website-production
+      cancel-in-progress: false
+    environment:
+      name: website-production
+      url: https://docviewkit.com/demo/
+    env:
+      SSH_HOST: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_HOST }}
+      SSH_USER: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_USER }}
+      SSH_PRIVATE_KEY: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_KNOWN_HOSTS }}
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+      RELEASE_TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - name: Require production deployment adapter
+        run: |
+          test -n "$SSH_HOST"
+          test -n "$SSH_USER"
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.build.outputs.tag }}
+          sparse-checkout: scripts/deploy-official-site.sh
+          sparse-checkout-cone-mode: false
+          path: deployment
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-${{ needs.build.outputs.tag }}
+          path: release-output
+      - name: Configure production SSH
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/docviewkit-production"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/docviewkit-production" "$HOME/.ssh/known_hosts"
+      - name: Deploy the exact release artifact
+        run: |
+          archive="docviewkit-official-site-$RELEASE_VERSION.tar.gz"
+          (cd release-output && grep "  $archive$" SHA256SUMS | shasum -a 256 -c -)
+          ssh_args=(-i "$HOME/.ssh/docviewkit-production" -p 21098 -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          scp_args=(-i "$HOME/.ssh/docviewkit-production" -P 21098 -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          ssh "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" 'mkdir -p "$HOME/apps/docviewkit/uploads"'
+          scp "${scp_args[@]}" "release-output/$archive" "$SSH_USER@$SSH_HOST:apps/docviewkit/uploads/$archive"
+          ssh "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" \
+            "DOCVIEWKIT_DEPLOY_ROOT=\"\$HOME/apps/docviewkit\" bash -s -- '$RELEASE_TAG' '$RELEASE_VERSION' '$archive'" \
+            < deployment/scripts/deploy-official-site.sh
+      - name: Verify official Demo switched versions
+        run: |
+          for attempt in $(seq 1 60); do
+            live_version="$(curl --fail --silent --show-error -H 'Cache-Control: no-cache' https://docviewkit.com/sdk/version.json | node -e 'let value=""; process.stdin.on("data", chunk => value += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(value).version ?? ""))' || true)"
+            if [ "$live_version" = "$RELEASE_VERSION" ]; then
+              curl --fail --silent --show-error https://docviewkit.com/demo/ >/dev/null
+              curl --fail --silent --show-error https://docviewkit.com/sdk/office-viewer-xps.wasm >/dev/null
+              curl --fail --silent --show-error "https://docviewkit.com/sdk/v$RELEASE_VERSION/office-viewer-xps.wasm" >/dev/null
+              curl --fail --silent --show-error https://docviewkit.com/sdk/office-viewer-ofd.wasm >/dev/null
+              curl --fail --silent --show-error "https://docviewkit.com/sdk/v$RELEASE_VERSION/office-viewer-ofd.wasm" >/dev/null
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Official Demo did not switch to $RELEASE_VERSION within 10 minutes" >&2
+          exit 1
