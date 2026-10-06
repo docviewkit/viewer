@@ -12,7 +12,7 @@ body:
     attributes:
       label: Viewer version
       description: Use the exact version shown by npm, the release, or the online demo.
-      placeholder: 0.2.15
+      placeholder: 0.2.75
     validations:
       required: true
   - type: dropdown
