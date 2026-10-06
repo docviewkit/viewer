@@ -3,6 +3,6 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/docviewkit/viewer/security/advisories/new
     about: Report vulnerabilities privately. Do not open a public issue.
-  - name: Free license
-    url: https://docviewkit.com/portal/
-    about: Obtain or renew a free Viewer license.
+  - name: Support and enterprise services
+    url: https://docviewkit.com/
+    about: Discuss paid support, customization, or enterprise delivery.
