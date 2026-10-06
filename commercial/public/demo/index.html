@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="在浏览器中直接体验 DocViewKit 文档预览、搜索和来源定位，文件在本地处理。">
+  <meta name="theme-color" content="#f7f7f5">
+  <title>在线 Demo — DocViewKit</title>
+  <link rel="canonical" href="https://docviewkit.com/en/demo/">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css?v=20261002-3">
+  <script type="module" src="/assets/site.js?v=20261002-3"></script>
+  <script type="module" src="/assets/demo.js?v=20261002-3"></script>
+</head>
+<body>
+  <a class="skip-link" href="#demo-main">跳到主要内容</a>
+  <header class="site-header">
+    <nav class="site-nav container" aria-label="主导航">
+      <a class="brand" href="/" aria-label="DocViewKit 首页">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M7 4.5h13l5 5V27.5H7z" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M20 4.5v6h5M11 16h10M11 21h7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+          <circle cx="22.5" cy="22.5" r="5" fill="var(--surface)" stroke="currentColor" stroke-width="2"/>
+          <path d="m26 26 3 3" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
+        </svg>
+        <span>DocViewKit</span>
+      </a>
+      <div class="nav-links" id="primary-nav">
+        <a class="nav-link" href="/">产品</a>
+        <a class="nav-link" href="/docs/quickstart/">文档</a>
+        <a class="nav-link" href="/demo/" aria-current="page">Demo</a>
+      </div>
+      <div class="nav-actions">
+        <button class="language-toggle" type="button" data-language-toggle aria-label="Switch to English">EN</button>
+        <button class="icon-button" type="button" data-theme-toggle aria-label="切换深浅主题">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v2m0 14v2M3 12h2m14 0h2m-3.64-5.36 1.42-1.42M5.22 18.78l1.42-1.42m0-10.72L5.22 5.22m13.56 13.56-1.42-1.42"/><circle cx="12" cy="12" r="4"/></svg>
+        </button>
+        <a class="button button-primary" href="mailto:novalag778@gmail.com?subject=DocViewKit%20Services">联系服务</a>
+        <button class="menu-button" type="button" data-menu-toggle aria-controls="primary-nav" aria-expanded="false" aria-label="打开导航菜单">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <main class="demo-page" id="demo-main">
+    <section class="container demo-intro">
+      <div>
+        <h1>在浏览器中打开一个真实文档。</h1>
+        <p class="lede">选择本地文件，直接体验预览、页面导航和全文搜索。文件只在当前浏览器标签页中处理。</p>
+      </div>
+      <div class="demo-privacy-note">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.5 8 8 9 4.5-1 8-4 8-9V7zM9 12l2 2 4-5"/></svg>
+        <div><strong>文件在本地处理</strong><span>在当前浏览器中完成解析与预览。</span></div>
+      </div>
+    </section>
+
+    <section class="container demo-shell" aria-label="DocViewKit 在线 Demo">
+      <header class="demo-toolbar">
+        <div class="demo-file-actions">
+          <label class="button button-primary demo-file-button" for="demo-file-input">
+            选择本地文件
+            <input id="demo-file-input" type="file" accept=".pptx,.ppt,.odp,.fodp,.xlsx,.xls,.ods,.fods,.docx,.doc,.odt,.fodt,.pdf,.xps,.oxps,.ofd,.pages,.numbers,.key,.csv,.rtf" disabled>
+          </label>
+          <button class="button button-quiet" id="demo-sample-button" type="button" disabled>打开示例</button>
+        </div>
+        <div class="demo-document-summary">
+          <span class="demo-format" id="demo-format">准备中</span>
+          <span class="demo-document-copy"><strong id="demo-file-name">DocViewKit-visual-sample.pptx</strong><span id="demo-file-meta">浏览器本地</span></span>
+          <span class="demo-host-status" id="demo-status" role="status" aria-live="polite">正在初始化本地 Viewer…</span>
+        </div>
+      </header>
+
+      <div class="demo-viewer-host" id="demo-viewer-host" data-dragging="false">
+        <docviewkit-viewer id="demo-viewer" theme="auto" lang="zh-CN"></docviewkit-viewer>
+        <div class="demo-drag-overlay" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v5h14v-5"/></svg>
+          <strong>将文件拖到 Viewer 中打开</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="container demo-supported">
+      <strong>可以使用自己的文件</strong>
+      <p>支持 Office、PDF、OFD、ODF、iWork、CSV 和 RTF 等格式。带上你的实际文件，体验文档的字体、分页、图表与搜索效果。</p>
+      <a href="/docs/supported-formats/">查看格式边界</a>
+    </section>
+  </main>
+</body>
+</html>

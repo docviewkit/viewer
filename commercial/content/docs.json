@@ -1,0 +1,538 @@
+{
+  "product": "DocViewKit",
+  "updatedAt": "2026-10-02",
+  "description": "Lightweight, frontend-local document viewing with quick integration for everyday OA attachments, business apps, enterprise SaaS, and AI knowledge bases.",
+  "groups": [
+    { "id": "start", "label": "Get started" },
+    { "id": "integrate", "label": "Integrate" },
+    { "id": "frameworks", "label": "Framework integrations" },
+    { "id": "evidence", "label": "Compatibility evidence" },
+    { "id": "operate", "label": "Operate safely" }
+  ],
+  "docs": [
+    {
+      "slug": "overview",
+      "group": "start",
+      "title": "What DocViewKit is",
+      "summary": "DocViewKit adds lightweight, read-only previews to everyday OA attachments and enterprise apps. Quick integration uses one Viewer component, with on-demand formats and no conversion server.",
+      "sections": [
+        {
+          "id": "boundary",
+          "title": "Can I use it for everyday OA attachments?",
+          "blocks": [
+            { "type": "p", "text": "Yes. OA attachments, approvals, admin portals, CRM/ERP records, and cloud drives are primary use cases. The same Viewer also serves enterprise SaaS, AI knowledge bases, legal review, and financial audit. A basic preview needs neither Engine API integration nor an Office server. Search and source location are available when the workflow needs them." },
+            { "type": "callout", "tone": "note", "title": "Deliberate boundary", "text": "DocViewKit does not provide document editing, collaboration, OCR, RAG, embeddings, model calls, or AI answers. AI knowledge-base and document-Q&A products are target integrations, not features inside the SDK." }
+          ]
+        },
+        {
+          "id": "integration-facts",
+          "title": "What makes integration quick and lightweight?",
+          "blocks": [
+            { "type": "table", "headers": ["Verified integration fact", "What it means", "Boundary"], "rows": [["1 Viewer component", "Import, mount, and call open(file): three UI integration steps.", "Production still needs static assets, host authorization, and compatibility checks."], ["4 input types", "File, Blob, ArrayBuffer, and Uint8Array use the same open() method.", "A remote URL is fetched by the host, not passed directly to open()."], ["0 conversion services", "Parsing and rendering run in the frontend.", "The application still serves assets and controls document access."], ["On-demand format packs", "Unused optional parsers stay out of the initial download.", "Download size varies by version and format; measure bytes transferred, not only npm archive size."]] },
+            { "type": "links", "items": [{ "label": "Integration code and private-attachment example", "href": "/docs/quickstart/" }, { "label": "Resource loading and reproducible performance measurement", "href": "/docs/performance/" }] }
+          ]
+        },
+        {
+          "id": "why-local",
+          "title": "Do private attachments leave my application?",
+          "blocks": [
+            { "type": "list", "items": ["Document bytes stay in the host frontend during normal viewing.", "The host does not need to operate a document-conversion cluster.", "JS, Worker, Wasm, fonts, and codecs can be self-hosted with the application.", "Macros, scripts, launch actions, and active external content are not executed."] },
+            { "type": "p", "text": "No third-party upload is required. Your host authorizes and fetches the attachment before passing its bytes to open(). Private URLs do not need to become public. Same-origin cookies, cross-origin CORS rules, and server-side permission checks remain the host responsibility." }
+          ]
+        },
+        {
+          "id": "acceptance",
+          "title": "How do I verify fidelity and first-open speed?",
+          "blocks": [
+            { "type": "p", "text": "Use your actual documents. Check fonts, line wrapping, pagination, tables, charts, search, and diagnostics. Support for a file extension does not imply identical rendering of every feature. Read-only viewing does not include editing, co-editing, or AI answers." },
+            { "type": "p", "text": "For speed, record the release version, file bytes and page count, browser, device, fonts, network, and cold versus warm cache. Measure transferred bytes and time to first visible content separately from complete-document processing. No single duration applies to every file or device." },
+            { "type": "links", "items": [{ "label": "Supported formats and feature boundaries", "href": "/docs/supported-formats/" }, { "label": "Browser and WebView requirements", "href": "/docs/browser-compatibility/" }, { "label": "Test your file in the local-processing demo", "href": "/en/demo/" }] }
+          ]
+        },
+        {
+          "id": "artifacts",
+          "title": "Viewer or Engine API?",
+          "blocks": [
+            { "type": "table", "headers": ["Artifact", "Access", "Purpose"], "rows": [["@docviewkit/viewer", "Apache-2.0", "Framework-independent Viewer with every supported format."], ["@docviewkit/viewer/engine", "Apache-2.0", "Engine APIs for custom rendering and source-object access."]] },
+            { "type": "p", "text": "Use the ready-made Viewer for embedded previews or the Engine API for custom document experiences. Both include UI customization, minimal mode and watermarks without runtime licenses or mandatory branding. Optional services cover support, customization and enterprise delivery." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "quickstart",
+      "group": "start",
+      "title": "Viewer quickstart",
+      "summary": "Install the public Viewer, host its assets, and open a local document.",
+      "sections": [
+        {
+          "id": "install",
+          "title": "Install",
+          "blocks": [
+            { "type": "code", "language": "sh", "content": "npm install @docviewkit/viewer" },
+            { "type": "p", "text": "The package is designed for customer-hosted static assets. Do not load production Worker or Wasm files from an unpinned public CDN." }
+          ]
+        },
+        {
+          "id": "mount",
+          "title": "Mount the Web Component",
+          "blocks": [
+            { "type": "code", "language": "html", "content": "<script type=\"module\">\n  import '@docviewkit/viewer';\n</script>\n\n<docviewkit-viewer id=\"document-viewer\"></docviewkit-viewer>" },
+            { "type": "code", "language": "ts", "content": "const viewer = document.querySelector('#document-viewer');\nconst file = document.querySelector('input[type=file]').files[0];\n\ntry {\n  await viewer.open(file);\n} catch (error) {\n  if (error.code !== 'PDF_PASSWORD_REQUIRED') throw error;\n  await viewer.open(file, { password: await requestPassword() });\n}" }
+          ]
+        },
+        {
+          "id": "private-attachments",
+          "title": "How do I preview an authenticated OA attachment?",
+          "blocks": [
+            { "type": "p", "text": "Fetch it through your own authorized attachment endpoint, then pass a File or document bytes to open(). The example endpoint belongs to your application, not DocViewKit. Preserve the actual filename, especially for WPS formats; replace report.docx with the attachment metadata from your server. Cross-origin requests still require a deliberate credentials and CORS policy." },
+            { "type": "code", "language": "ts", "content": "// Your server must verify that the current user may read this attachment.\nconst response = await fetch('/api/attachments/42/content', {\n  credentials: 'same-origin',\n});\nif (!response.ok) throw new Error(`Attachment request failed: ${response.status}`);\nconst attachment = new File([await response.blob()], 'report.docx');\nawait viewer.open(attachment);" },
+            { "type": "p", "text": "Mount the component first and host the version-matched Worker, Wasm, font, and codec assets with your application. Configure optional format packs before opening those formats. A small integration snippet is not a substitute for deployment and authorization." },
+            { "type": "links", "items": [{ "label": "Configure optional formats and first-open loading", "href": "/docs/performance/" }, { "label": "Deployment and security responsibilities", "href": "/docs/security/" }] }
+          ]
+        },
+        {
+          "id": "commercial-preview",
+          "title": "Open source usage",
+          "blocks": [
+            {"type": "p", "text": "Viewer and Engine use Apache-2.0. No runtime license is required for production use, UI customization, minimal mode or watermarks. Preserve the included license, notices and third-party licenses. Optional paid service scope and response times are agreed separately."}
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "react-office-viewer",
+      "path": "/react-office-viewer/",
+      "pageTitle": "React Office Document Viewer | DocViewKit",
+      "group": "frameworks",
+      "title": "React Office Document Viewer",
+      "summary": "Open DOCX, XLSX, PPTX, PDF, OFD, and other supported documents in React and Next.js without uploading the source file to a conversion service.",
+      "sections": [
+        {
+          "id": "overview",
+          "title": "Use the framework-independent Viewer in React",
+          "blocks": [
+            { "type": "p", "text": "DocViewKit exposes a native docviewkit-viewer custom element. React renders that element directly and a ref calls its open(), close(), reveal(), and destroy() methods; no React-specific rendering engine or wrapper package is required." },
+            { "type": "table", "headers": ["Concern", "React integration"], "rows": [["Document input", "Pass a File, Blob, ArrayBuffer, or Uint8Array to open()."], ["Rendering", "The Viewer parses and renders in browser JavaScript, Workers, and WebAssembly."], ["Privacy", "Normal viewing does not send document bytes to a third-party conversion service."], ["Lifecycle", "Call close() when replacing a document and destroy() only when permanently removing the Viewer."]] }
+          ]
+        },
+        {
+          "id": "react",
+          "title": "React component",
+          "blocks": [
+            { "type": "code", "language": "sh", "content": "npm install @docviewkit/viewer" },
+            { "type": "code", "language": "jsx", "content": "import { useEffect, useRef } from 'react';\nimport '@docviewkit/viewer';\n\nexport function OfficeViewer({ file }) {\n  const viewer = useRef(null);\n\n  useEffect(() => {\n    if (file) void viewer.current?.open(file);\n    return () => { void viewer.current?.close(); };\n  }, [file]);\n\n  return <docviewkit-viewer ref={viewer} />;\n}" },
+            { "type": "p", "text": "Keep the Viewer mounted when switching documents so the host can reuse its initialized runtime. Handle open() errors in the host when the application needs password prompts or task-specific recovery UI." }
+          ]
+        },
+        {
+          "id": "nextjs",
+          "title": "Next.js client component",
+          "blocks": [
+            { "type": "p", "text": "The Viewer depends on browser custom-element APIs. In a Next.js App Router project, register it from a client effect so the module is not evaluated during server rendering." },
+            { "type": "code", "language": "jsx", "content": "'use client';\n\nimport { useEffect, useRef } from 'react';\n\nexport function OfficeViewer({ file }) {\n  const viewer = useRef(null);\n\n  useEffect(() => {\n    let active = true;\n    void import('@docviewkit/viewer').then(() => {\n      if (active && file) return viewer.current?.open(file);\n    });\n    return () => {\n      active = false;\n      void viewer.current?.close();\n    };\n  }, [file]);\n\n  return <docviewkit-viewer ref={viewer} />;\n}" },
+            { "type": "callout", "tone": "note", "title": "Self-host production assets", "text": "Pin and deploy the Viewer entry, Worker, Wasm, fonts, codecs, and optional format packs together. Do not depend on an unpinned public CDN for production document processing." }
+          ]
+        },
+        {
+          "id": "resources",
+          "title": "Verify the complete integration",
+          "blocks": [
+            { "type": "links", "items": [{ "label": "Viewer quickstart", "href": "/docs/quickstart/" }, { "label": "Supported formats and boundaries", "href": "/docs/supported-formats/" }, { "label": "Try a real file in the online demo", "href": "/en/demo/" }, { "label": "React custom HTML elements", "href": "https://react.dev/reference/react-dom/components#custom-html-elements" }] }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "vue-office-viewer",
+      "path": "/vue-office-viewer/",
+      "pageTitle": "Vue Office Document Viewer | DocViewKit",
+      "group": "frameworks",
+      "title": "Vue Office Document Viewer",
+      "summary": "Open DOCX, XLSX, PPTX, PDF, OFD, and other supported documents in Vue 3 with one frontend-local Web Component and no document-conversion backend.",
+      "sections": [
+        {
+          "id": "overview",
+          "title": "Use the native custom element in Vue",
+          "blocks": [
+            { "type": "p", "text": "Vue 3 can consume the docviewkit-viewer custom element directly. Configure the template compiler to treat the tag as a custom element, keep a template ref to the DOM element, and call open() when the host file changes." },
+            { "type": "p", "text": "The same Viewer package, document model, diagnostics, and frontend-local processing path are used in Vue, React, Angular, and vanilla JavaScript." }
+          ]
+        },
+        {
+          "id": "vite",
+          "title": "Configure Vue and Vite",
+          "blocks": [
+            { "type": "code", "language": "sh", "content": "npm install @docviewkit/viewer" },
+            { "type": "code", "language": "js", "content": "// vite.config.js\nimport vue from '@vitejs/plugin-vue';\n\nexport default {\n  plugins: [\n    vue({\n      template: {\n        compilerOptions: {\n          isCustomElement: (tag) => tag === 'docviewkit-viewer'\n        }\n      }\n    })\n  ]\n};" }
+          ]
+        },
+        {
+          "id": "component",
+          "title": "Vue single-file component",
+          "blocks": [
+            { "type": "code", "language": "vue", "content": "<script setup lang=\"ts\">\nimport { ref, watchEffect } from 'vue';\nimport '@docviewkit/viewer';\n\ntype ViewerElement = HTMLElement & {\n  open(file: File): Promise<unknown>;\n};\n\nconst props = defineProps<{ file?: File }>();\nconst viewer = ref<ViewerElement>();\n\nwatchEffect(() => {\n  if (props.file && viewer.value) {\n    void viewer.value.open(props.file);\n  }\n});\n</script>\n\n<template>\n  <docviewkit-viewer ref=\"viewer\" />\n</template>" },
+            { "type": "callout", "tone": "note", "title": "SSR boundary", "text": "For Nuxt or another server-rendered Vue host, import and register the Viewer only in client code because custom elements, Workers, and Canvas are browser APIs." }
+          ]
+        },
+        {
+          "id": "resources",
+          "title": "Verify the complete integration",
+          "blocks": [
+            { "type": "links", "items": [{ "label": "Viewer quickstart", "href": "/docs/quickstart/" }, { "label": "Architecture and privacy", "href": "/docs/architecture-privacy/" }, { "label": "Try a real file in the online demo", "href": "/en/demo/" }, { "label": "Vue and Web Components", "href": "https://vuejs.org/guide/extras/web-components.html#using-custom-elements-in-vue" }] }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "angular-office-viewer",
+      "path": "/angular-office-viewer/",
+      "pageTitle": "Angular Office Document Viewer | DocViewKit",
+      "group": "frameworks",
+      "title": "Angular Office Document Viewer",
+      "summary": "Open DOCX, XLSX, PPTX, PDF, OFD, and other supported documents in Angular through a frontend-local custom element without a server-side conversion service.",
+      "sections": [
+        {
+          "id": "overview",
+          "title": "Use the Viewer as an Angular custom element",
+          "blocks": [
+            { "type": "p", "text": "Angular supports Web Platform custom elements through CUSTOM_ELEMENTS_SCHEMA. Register the DocViewKit package once, query the docviewkit-viewer element, and pass the selected document to its open() method." },
+            { "type": "p", "text": "CUSTOM_ELEMENTS_SCHEMA keeps Angular's normal template validation while allowing dash-named custom elements. NO_ERRORS_SCHEMA is not required." }
+          ]
+        },
+        {
+          "id": "component",
+          "title": "Standalone Angular component",
+          "blocks": [
+            { "type": "code", "language": "sh", "content": "npm install @docviewkit/viewer" },
+            { "type": "code", "language": "ts", "content": "import '@docviewkit/viewer';\nimport {\n  AfterViewInit, Component, CUSTOM_ELEMENTS_SCHEMA,\n  ElementRef, Input, ViewChild\n} from '@angular/core';\n\ntype ViewerElement = HTMLElement & {\n  open(file: File): Promise<unknown>;\n  close(): Promise<void>;\n};\n\n@Component({\n  selector: 'app-office-viewer',\n  standalone: true,\n  schemas: [CUSTOM_ELEMENTS_SCHEMA],\n  template: '<docviewkit-viewer #viewer />'\n})\nexport class OfficeViewerComponent implements AfterViewInit {\n  @ViewChild('viewer') viewer?: ElementRef<ViewerElement>;\n  #file?: File;\n\n  @Input() set file(file: File | undefined) {\n    this.#file = file;\n    void this.open();\n  }\n\n  ngAfterViewInit() { void this.open(); }\n\n  private async open() {\n    if (this.#file && this.viewer) {\n      await this.viewer.nativeElement.open(this.#file);\n    }\n  }\n}" },
+            { "type": "p", "text": "The host component owns file selection, permissions, error presentation, and business workflow. DocViewKit owns document parsing, viewing, search, navigation, and structured diagnostics." }
+          ]
+        },
+        {
+          "id": "resources",
+          "title": "Verify the complete integration",
+          "blocks": [
+            { "type": "links", "items": [{ "label": "Viewer quickstart", "href": "/docs/quickstart/" }, { "label": "Viewer API", "href": "/docs/viewer-api/" }, { "label": "Try a real file in the online demo", "href": "/en/demo/" }, { "label": "Angular custom-element schema", "href": "https://angular.dev/api/core/CUSTOM_ELEMENTS_SCHEMA" }] }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "viewer-api",
+      "group": "integrate",
+      "title": "Viewer API",
+      "summary": "The small cross-format surface for opening, locating, observing, and releasing documents.",
+      "sections": [
+        {
+          "id": "surface",
+          "title": "Stable surface",
+          "blocks": [
+            { "type": "code", "language": "ts", "content": "interface DocViewKitViewerElement extends HTMLElement {\n  open(source: File | Blob | ArrayBuffer | Uint8Array): Promise<DocumentInfo>;\n  reveal(target: ViewerTarget): Promise<RevealResult>;\n  close(): Promise<void>;\n  destroy(): void;\n  readonly state: Readonly<ViewerState>;\n}" },
+            { "type": "p", "text": "The API uses capability-driven targets instead of separate navigation methods for pages, slides, and worksheets. Framework adapters remain thin wrappers around this element." }
+          ]
+        },
+        {
+          "id": "events",
+          "title": "Events",
+          "blocks": [
+            { "type": "table", "headers": ["Event", "When to use it"], "rows": [["docviewkit-ready", "Assets and runtime are ready for a document."], ["docviewkit-statechange", "Navigation, selection, or capability state changed."], ["docviewkit-diagnostic", "A bounded, approximate, omitted, or blocked path was observed."], ["docviewkit-error", "Opening or rendering cannot continue."]] },
+            { "type": "callout", "tone": "warning", "title": "Do not infer support from file extensions", "text": "Use DocumentInfo capabilities and structured diagnostics. A file opening successfully is not proof that every authored feature was rendered." }
+          ]
+        },
+        {
+          "id": "watermark",
+          "title": "Add a text watermark",
+          "blocks": [
+            { "type": "code", "language": "ts", "content": "viewer.config = {\n  ...viewer.config,\n  watermark: 'Confidential'\n};\n\nawait viewer.open(file);" },
+            { "type": "p", "text": "The optional 1–256 character watermark is painted into Viewer pages, thumbnails, and print output without modifying the source document, object list, search results, hit testing, or source mapping. Viewer and Engine integrations can use it without a runtime license." }
+          ]
+        },
+        {
+          "id": "customize",
+          "title": "Customization boundary",
+          "blocks": [
+            { "type": "code", "language": "ts", "content": "viewer.config = {\n  ...viewer.config,\n  features: {\n    ...viewer.config.features,\n    interactionModeSwitcher: true, // false by default\n    print: true,\n    fullscreen: true\n  }\n};" },
+            { "type": "p", "text": "The Viewer can expose object location, display-only, and text selection as one segmented toolbar control. The switcher is hidden by default; print and fullscreen remain independently configurable, and hidden controls do not leave empty toolbar separators." },
+            { "type": "list", "items": ["Design tokens control color, typography, spacing, radius, and surface treatment.", "Stable ::part hooks expose bounded regions such as the toolbar and search panel.", "A small slot set supports host actions and business panels.", "Applications that replace the information architecture should use DocViewKit SDK Engine APIs."] }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "source-location",
+      "group": "integrate",
+      "title": "Source location",
+      "summary": "Open an original document beside an answer and reveal the authored source region.",
+      "sections": [
+        {
+          "id": "target",
+          "title": "Use one target model",
+          "blocks": [
+            { "type": "code", "language": "ts", "content": "await viewer.reveal({\n  kind: 'source',\n  unitIndex: 6,\n  objectId: 'paragraph-42',\n  region: { x: 96, y: 412, width: 510, height: 88 }\n});" },
+            { "type": "p", "text": "A target may resolve to a page, slide, worksheet, object, or bounded region. When exact object mapping is unavailable, the Viewer uses the most reliable page-level fallback and emits a diagnostic." }
+          ]
+        },
+        {
+          "id": "ai-products",
+          "title": "Integration with AI products",
+          "blocks": [
+            { "type": "p", "text": "The host product owns retrieval, answer generation, permissions, citation choice, and business workflow. DocViewKit owns document presentation and navigation to a source reference." },
+            { "type": "callout", "tone": "note", "title": "Keep facts deterministic", "text": "Pass the citation target produced by your retrieval pipeline. Do not ask the Viewer to infer which passage an answer used." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "supported-formats",
+      "group": "evidence",
+      "title": "Supported formats",
+      "summary": "Accepted document families, content-based detection, optional format packs, and explicit support boundaries.",
+      "sections": [
+        {
+          "id": "accepted-inputs",
+          "title": "Accepted inputs",
+          "blocks": [
+            { "type": "table", "headers": ["Family", "Accepted file extensions", "Runtime path"], "rows": [["OOXML presentations", ".pptx, .pptm, .ppsx, .ppsm, .potx, .potm", "Core"], ["OOXML spreadsheets", ".xlsx, .xlsm, .xltx, .xltm", "Core"], ["OOXML text documents", ".docx, .docm, .dotx, .dotm", "Core"], ["Flat documents", ".csv, .rtf", "Core"], ["OpenDocument", ".odp, .otp, .fodp, .odg, .otg, .fodg, .ods, .ots, .fods, .odt, .ott, .fodt", "ODF pack"], ["iWork single-file packages", ".pages, .numbers, .key", "iWork pack"], ["Legacy Office", ".doc, .xls, .ppt", "Legacy Office pack"], ["WPS Office", ".wps, .et, .dps", "WPS pack"], ["Fixed layout", ".pdf, .xps, .oxps", "PDF or XPS pack"], ["OFD fixed layout", ".ofd", "OFD pack"]] },
+            { "type": "p", "text": "TXT, standalone HTML or HTM, XLSB, and unsupported top-level formats return an explicit unsupported-format result rather than being guessed from their file extension." }
+          ]
+        },
+        {
+          "id": "detection",
+          "title": "Content-based detection",
+          "blocks": [
+            { "type": "p", "text": "DocViewKit identifies packages from bounded content probes such as OPC content types, ODF mimetype and manifest data, CFB records, PDF headers, XPS relationships, OFD.xml package structure, and iWork IWA identity. A filename hint is used only to isolate a structurally recognized WPS-family input." },
+            { "type": "callout", "tone": "warning", "title": "Extensions are not capability claims", "text": "Opening a family does not imply that every authored feature is exact. Applications must read DocumentInfo capabilities and structured diagnostics." }
+          ]
+        },
+        {
+          "id": "ofd",
+          "title": "OFD support boundary",
+          "blocks": [
+            { "type": "p", "text": "OFD 1.0 and 1.1 fixed-layout documents use a dedicated on-demand pack. The implemented subset includes positioned searchable text, browser-supported embedded fonts and raster images, vector paths and composite graphics, common solid and gradient paints, drawing parameters, transforms, opacity, geometry clips, templates, static annotations, vector OFD seals, outlines, and local SM3/SM2 signature-integrity checks." },
+            { "type": "callout", "tone": "warning", "title": "Best-effort scope", "text": "Other patterns, complex or post-1.1 clip transforms, non-OFD seal appearances, attachments, and interactive actions are incomplete or inactive. A valid signature check does not establish certificate trust, revocation, timestamp status, signer identity, or regulatory compliance; unavailable checks are reported through diagnostics." }
+          ]
+        },
+        {
+          "id": "active-content",
+          "title": "Read-only and inactive by design",
+          "blocks": [
+            { "type": "p", "text": "Macro-enabled packages are parsed as their document family, but VBA, scripts, ActiveX, PDF actions, launch targets, and other active content never execute. External resources are blocked unless the host explicitly provides a safe local resource path." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "browser-compatibility",
+      "group": "evidence",
+      "title": "Frontend runtime compatibility",
+      "summary": "Runtime requirements for browsers and cross-platform WebView hosts, including the checks required before release.",
+      "sections": [
+        {
+          "id": "browser-contract",
+          "title": "One Web Component across major engines",
+          "blocks": [
+            { "type": "p", "text": "The Viewer runs in frontend environments that provide DOM/Custom Elements, module Workers, WebAssembly, Canvas/OffscreenCanvas, ImageBitmap, and FontFace. These include browsers and compatible WebView hosts in Electron, Tauri, Ionic and Capacitor. React Native and Flutter applications can embed it through a WebView that provides the same APIs; their native rendering layers do not run the Web Component directly. Validate the actual host engine, asset loading, CSP, fonts, and required interactions on each target platform. Browser hosts include Chrome, Edge, Firefox and Safari. The host supplies a File, Blob, ArrayBuffer, or Uint8Array; the Viewer owns parsing, rendering, search, navigation, and diagnostics." },
+            { "type": "p", "text": "Compatibility means the documented API and bounded viewing workflow remain available across the supported engines. It does not mean every browser uses identical font shaping, media codecs, color management, canvas limits, or print behavior." }
+          ]
+        },
+        {
+          "id": "release-checks",
+          "title": "Release checks",
+          "blocks": [
+            { "type": "list", "items": ["Open a real document through the public Viewer entry point.", "Verify navigation, search, zoom, close and reopen, diagnostics, and source location.", "Run the same interaction contract in Chromium, Firefox, and WebKit.", "Treat a browser-specific omission or degraded path as a release failure or a published diagnostic boundary."] }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "architecture-privacy",
+      "group": "evidence",
+      "title": "Architecture and privacy",
+      "summary": "Where document bytes are processed, which runtime assets are loaded, and when network or support flows occur.",
+      "sections": [
+        {
+          "id": "local-processing",
+          "title": "Normal viewing stays in the host frontend",
+          "blocks": [
+            { "type": "p", "text": "During normal viewing, document bytes are passed to browser JavaScript, Workers, and WebAssembly from the host application. DocViewKit does not send the source document to a third-party conversion service and does not require a document-processing backend." },
+            { "type": "list", "items": ["The customer hosts the Viewer entry, Worker, Wasm, fonts, codecs, and optional format packs.", "Optional format packs load only when configured and needed by the current document.", "Viewing requires no runtime license verification.", "The official support flow excludes source bytes, file names, paths, text, screenshots, and hashes by default."] }
+          ]
+        },
+        {
+          "id": "host-boundary",
+          "title": "The host still owns its security boundary",
+          "blocks": [
+            { "type": "p", "text": "The embedding application remains responsible for authentication, authorization, upload policy, content security policy, size limits, trusted asset hosting, telemetry choices, and incident response. Browser-local processing does not make untrusted documents harmless." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "accuracy-fidelity",
+      "group": "evidence",
+      "title": "Accuracy and fidelity",
+      "summary": "How DocViewKit distinguishes parser success, visible approximation, and native visual acceptance.",
+      "sections": [
+        {
+          "id": "acceptance-levels",
+          "title": "Three different claims",
+          "blocks": [
+            { "type": "table", "headers": ["Level", "What it proves", "What it does not prove"], "rows": [["Parser and protocol", "The input produces bounded document objects and source references", "Native visual fidelity"], ["Browser render", "The public Viewer draws usable content and interactions", "Pixel identity with an Office application"], ["Native visual acceptance", "Reviewed pages or local regions match a named native application under a recorded environment", "Universal fidelity for every producer and feature"]] },
+            { "type": "callout", "tone": "warning", "title": "Open is not a fidelity result", "text": "A document opening successfully is not proof that every authored object, style, page break, formula, animation, or embedded resource was rendered." }
+          ]
+        },
+        {
+          "id": "diagnostics",
+          "title": "Best-effort rendering stays observable",
+          "blocks": [
+            { "type": "p", "text": "An isolated unknown or incompatible resource should not hide otherwise usable document content. Supported fallbacks remain source-mapped and emit approximate or omitted diagnostics; structural corruption, unsafe expansion, or a document with no meaningful output may still fail the open." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "performance",
+      "group": "evidence",
+      "title": "Performance optimization",
+      "summary": "Configure first-open module loading, preserve on-demand work, reuse the Viewer, and measure frontend-local performance reproducibly.",
+      "sections": [
+        {
+          "id": "first-open",
+          "title": "Warm the configured format dispatcher",
+          "blocks": [
+            { "type": "p", "text": "Set viewer.config.engine.formatPack before the first open(). Create and memoize the dynamic-import promise when the application knows optional formats are allowed; creating the promise starts the small JavaScript dispatcher download without waiting for the first document." },
+            { "type": "code", "language": "ts", "content": "import '@docviewkit/viewer';\n\nconst formatPack = import('@docviewkit/viewer/extended-formats')\n  .then(({ extendedFormatPack }) => extendedFormatPack);\n\nconst viewer = document.querySelector('docviewkit-viewer');\nviewer.config = {\n  engine: {\n    formatPack: () => formatPack\n  }\n};\n\nawait viewer.open(file);" },
+            { "type": "callout", "tone": "note", "title": "Dispatcher warm-up is selective", "text": "Importing extended-formats does not fetch every Wasm binary. Bounded content detection selects one matching ODF, PDF/iWork, legacy Office/WPS, XPS, or OFD module. If the product accepts only WPS, XPS, or OFD, use the dedicated wps-formats, xps-formats, or ofd-formats subpath." }
+          ]
+        },
+        {
+          "id": "loading-boundaries",
+          "title": "Keep on-demand work out of startup",
+          "blocks": [
+            { "type": "table", "headers": ["Resource or operation", "First-open behavior"], "rows": [["Viewer JavaScript and core runtime", "Required when the first document opens"], ["Optional format dispatcher", "May be imported early and memoized"], ["Optional family Wasm", "Load only after content detection selects that family"], ["Pages, slides, sheets, and thumbnails", "Materialize or render on demand"], ["Document-wide search and all-object queries", "Start only when the product needs complete-document results"], ["Host fonts", "Provide common static faces or a bounded lazy provider; do not fetch the full catalog first"]] },
+            { "type": "list", "items": ["Serve versioned Worker, Wasm, codec, and font assets with normal HTTP caching from the same controlled deployment as the Viewer.", "Keep one Viewer instance across documents and call close() between them. destroy() also releases the reusable Engine and is intended for removing the component.", "Do not preload every optional Wasm binary or render every unit before first paint; that defeats the format and unit lazy-loading boundaries.", "Keep authorization and document acquisition ahead of open(), but avoid unrelated application initialization on the critical path."] }
+          ]
+        },
+        {
+          "id": "measurement",
+          "title": "Publish measurements with their environment",
+          "blocks": [
+            { "type": "p", "text": "A reproducible result records the DocViewKit version, browser and version, operating system, hardware, cold or warm cache, input format and bytes, page or unit count, time to open, time to first visible content, peak memory where available, and emitted diagnostics." },
+            { "type": "callout", "tone": "note", "title": "No context-free speed claims", "text": "A single fastest-file number is not a product guarantee. Compare the same artifact, environment, cache state, and completion boundary." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "licensing",
+      "group": "operate",
+      "title": "Apache-2.0 and paid services",
+      "summary": "Open source usage rights, optional support, customization and enterprise delivery.",
+      "sections": [
+        {
+          "id": "plans",
+          "title": "Software and service boundary",
+          "blocks": [
+            { "type": "callout", "tone": "note", "title": "Open source release", "text": "Viewer and Engine source is available at https://github.com/docviewkit/viewer under Apache-2.0 from v0.2.75; previously published packages retain their included licenses." },
+            {
+              "type": "table",
+              "headers": [
+                "Offering",
+                "What it provides"
+              ],
+              "rows": [
+                [
+                  "Open source software",
+                  "Viewer, Engine API, every supported format, UI slots, CSS parts, minimal mode with only the document rendering workspace, and watermarks under Apache-2.0. No runtime license or mandatory branding."
+                ],
+                [
+                  "Support",
+                  "Integration guidance, compatibility diagnosis and agreed response times."
+                ],
+                [
+                  "Customization",
+                  "Services include contract-scoped performance customization and document fidelity or integration work. A format-specific build can omit unused format modules, reduce delivered assets, and optimize first-open and target-document paths."
+                ],
+                [
+                  "Enterprise delivery",
+                  "Deployment validation, reproducible builds, acceptance evidence, training and an agreed SLA."
+                ]
+              ]
+            },
+            {
+              "type": "p",
+              "text": "Apache-2.0 allows commercial use, modification and redistribution subject to its notice and license conditions. Third-party components and fonts retain their own licenses. Paid services do not replace or restrict the software license; DocViewKit trademarks are separate."
+            }
+          ]
+        },
+        {
+          "id": "protection",
+          "title": "Service requests",
+          "blocks": [
+            { "type": "p", "text": "Contact novalag778@gmail.com for support, customization or enterprise delivery. Include your use case, DocViewKit version, target environment and delivery timeline; scope, quotation and acceptance criteria are agreed by email. No website account or application registration is required." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "issue-reporting",
+      "group": "operate",
+      "title": "Report a document problem",
+      "summary": "Create a machine-readable diagnostic bundle without uploading source document content.",
+      "sections": [
+        {
+          "id": "bundle",
+          "title": "Diagnostic bundle",
+          "blocks": [
+            { "type": "code", "language": "ts", "content": "interface IssueBundle {\n  schemaVersion: string;\n  issueId: string;\n  sdkVersion: string;\n  buildHash: string;\n  format: string;\n  browser: string;\n  operatingSystem: string;\n  viewerConfig: Record<string, unknown>;\n  diagnostics: Diagnostic[];\n  currentLocation?: SourceRef;\n  reproductionSteps?: string;\n  expectedBehavior?: string;\n  actualBehavior?: string;\n}" },
+            { "type": "p", "text": "The default bundle excludes document bytes, file names, paths, text, screenshots, and hashes. Screenshots and source files require explicit user selection." }
+          ]
+        },
+        {
+          "id": "private-files",
+          "title": "Private files are disabled",
+          "blocks": [
+            { "type": "callout", "tone": "warning", "title": "Private support files", "text": "Keep confidential documents out of public issues and diagnostic bundles. Share source files only through a separately agreed customer channel with an agreed retention policy." }
+          ]
+        },
+        {
+          "id": "states",
+          "title": "Submit on GitHub",
+          "blocks": [
+            { "type": "p", "text": "Submit public bug reports through https://github.com/docviewkit/viewer/issues/new/choose. Do not attach confidential documents or sensitive diagnostics to a public issue; use a separately agreed customer channel when private handling is required." }
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "security",
+      "group": "operate",
+      "title": "Security and deployment",
+      "summary": "Self-hosted assets, untrusted input boundaries, and support-file isolation.",
+      "sections": [
+        {
+          "id": "self-host",
+          "title": "Self-host runtime assets",
+          "blocks": [
+            { "type": "list", "items": ["Pin package, Worker, Wasm, font, and codec versions together.", "Serve assets from the same trusted deployment boundary as the host application.", "Use artifact hashes and signatures from the release manifest.", "Keep application secrets out of browser code."] }
+          ]
+        },
+        {
+          "id": "untrusted",
+          "title": "Treat every document as untrusted",
+          "blocks": [
+            { "type": "p", "text": "Parsing runs with bounded archive, XML, image, object, render, and time budgets. Active content is blocked rather than executed. Applications should still apply their own upload policy, size limits, authentication, content security policy, and incident response." }
+          ]
+        },
+        {
+          "id": "support-isolation",
+          "title": "Support files are a separate flow",
+          "blocks": [
+            { "type": "callout", "tone": "warning", "title": "Explicit support action", "text": "Normal viewing is frontend-local. The website does not accept source-file uploads; private support transfers require a separately agreed channel and retention policy." }
+          ]
+        }
+      ]
+    }
+  ]
+}

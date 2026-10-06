@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>DocViewKit Viewer</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body { overflow: hidden; background: #eef0f3; }
+    docviewkit-viewer {
+      width: 100%;
+      height: 100dvh;
+      --dv-navigation-width: 176px;
+    }
+    .open-button {
+      display: inline-grid;
+      width: 40px;
+      height: 40px;
+      place-items: center;
+      border-radius: 8px;
+      color: inherit;
+      cursor: pointer;
+      transition: background-color var(--dv-motion-fast, 140ms) cubic-bezier(.65, 0, .35, 1),
+        transform var(--dv-motion-fast, 140ms) cubic-bezier(.22, 1, .36, 1);
+    }
+    .open-button:hover { background: var(--dv-hover, rgb(23 105 210 / 9%)); }
+    .open-button:active { transform: scale(.96); }
+    .open-button:focus-within { outline: 2px solid var(--dv-focus, #1769d2); outline-offset: 2px; }
+    .open-button svg {
+      width: var(--dv-icon-size, 20px);
+      height: var(--dv-icon-size, 20px);
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: var(--dv-icon-stroke, 1.5);
+    }
+    .open-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+    .open-button[hidden] { display: none; }
+    @media (hover: hover) and (pointer: fine) {
+      .open-button:hover { transform: translateY(-1px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .open-button { transition-duration: .01ms; }
+    }
+  </style>
+</head>
+<body>
+  <docviewkit-viewer id="viewer">
+    <label class="open-button" slot="toolbar-start" title="Open local document" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9.5H3zM3 7.5V5h7l2 2h5"/></svg>
+      <input id="viewer-file-input" type="file" aria-label="Open local document" accept=".pptx,.ppt,.odp,.odg,.otg,.fodp,.fodg,.xlsx,.xls,.ods,.fods,.docx,.doc,.odt,.fodt,.pdf,.xps,.oxps,.ofd,.pages,.numbers,.key,.csv,.rtf">
+    </label>
+  </docviewkit-viewer>
+  <script type="module" src="./viewer.js"></script>
+</body>
+</html>

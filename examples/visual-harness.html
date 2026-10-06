@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OfficeViewer visual harness</title>
+  <link rel="icon" href="data:,">
+  <style>
+    html, body { width: max-content; min-width: 1px; min-height: 1px; margin: 0; overflow: hidden; background: #ffffff; }
+    #surface { display: block; margin: 0; padding: 0; background: #ffffff; }
+    #status { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  </style>
+</head>
+<body data-state="loading">
+  <canvas id="surface" aria-label="OfficeViewer candidate rendering"></canvas>
+  <output id="status" aria-live="polite">loading</output>
+  <a id="candidate-export" hidden download="candidate.png">candidate rendering</a>
+  <div id="candidate-exports" hidden></div>
+  <script type="module" src="./visual-harness.js"></script>
+</body>
+</html>
