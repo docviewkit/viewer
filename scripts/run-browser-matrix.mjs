@@ -49,7 +49,15 @@ try {
         await route.fulfill({ response });
       });
       await page.goto("https://customer.example.test/examples/viewer.html?fixture=visual-baseline.pptx");
-      await page.waitForFunction(() => document.documentElement.dataset.ready === "true");
+      try {
+        await page.waitForFunction(() => document.documentElement.dataset.ready === "true");
+      } catch (cause) {
+        const state = await page.locator("docviewkit-viewer").evaluate(viewer => ({
+          error: document.documentElement.dataset.error,
+          status: viewer.state.status,
+        }));
+        throw new Error(`${name} production-origin load failed: ${JSON.stringify({ ...state, errors })}`, { cause });
+      }
       const openSource = await page.locator("docviewkit-viewer").evaluate(async (viewer) => {
         const bytes = await (await fetch("/tests/fixtures/visual-baseline.pptx")).arrayBuffer();
         const { createOfficeEngine } = await import("/dist/index.js");
