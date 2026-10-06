@@ -34,7 +34,7 @@ const url = await new Promise((resolve, reject) => {
 try {
   for (const name of requested) {
     const executablePath = name === "chromium" ? process.env.DOCVIEWKIT_CHROMIUM_EXECUTABLE : undefined;
-    const browser = await engines[name].launch({ headless: true, ...(executablePath === undefined ? {} : { executablePath }) });
+    const browser = await engines[name].launch({ headless: true, proxy: { server: url }, ...(executablePath === undefined ? {} : { executablePath }) });
     try {
       const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor });
       const errors = [];
@@ -42,13 +42,9 @@ try {
         if (message.type() === "error") errors.push(`console: ${message.text()}`);
       });
       page.on("pageerror", (error) => errors.push(`page: ${error.message}`));
-      // Exercise a production origin so a legacy localhost exception cannot hide a license gate.
-      await page.context().route("https://customer.example.test/**", async (route) => {
-        const request = new URL(route.request().url());
-        const response = await route.fetch({ url: `${url}${request.pathname.slice(1)}${request.search}` });
-        await route.fulfill({ response });
-      });
-      await page.goto("https://customer.example.test/examples/viewer.html?fixture=visual-baseline.pptx");
+      // A real proxy covers worker imports in Firefox, which page request routing misses.
+      // Keep a production hostname so a legacy localhost exception cannot hide a license gate.
+      await page.goto("http://customer.example.test/examples/viewer.html?fixture=visual-baseline.pptx");
       try {
         await page.waitForFunction(() => document.documentElement.dataset.ready === "true");
       } catch (cause) {
