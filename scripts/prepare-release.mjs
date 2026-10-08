@@ -436,20 +436,6 @@ async function preparePages(output, version, tag, freeStage) {
   return pages;
 }
 
-async function prepareOfficialSite(output) {
-  const site = resolve(output, "official-site");
-  await mkdir(resolve(site, "commercial"), { recursive: true });
-  await cp(resolve(root, "package.json"), resolve(site, "package.json"));
-  for (const entry of ["README.md", "package.json", "content", "public", "src"]) {
-    await cp(resolve(root, "commercial", entry), resolve(site, "commercial", entry), { recursive: true });
-  }
-  await cp(resolve(root, "dist"), resolve(site, "dist"), { recursive: true });
-  for (const entry of ["README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]) {
-    await cp(resolve(root, entry), resolve(site, entry));
-  }
-  return site;
-}
-
 export async function prepareRelease({
   tag,
   output,
@@ -467,7 +453,6 @@ export async function prepareRelease({
   const free = await prepareFreePackage(output, release.version);
   const sdkArchive = npmPack(root, output);
   await preparePages(output, release.version, tag, free.stage);
-  await prepareOfficialSite(output);
   const result = {
     tag,
     version: release.version,

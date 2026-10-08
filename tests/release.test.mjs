@@ -64,7 +64,7 @@ test("bundled font gate rejects unreviewed, oversized, altered and unlicensed re
   await validateBundledFonts(stage);
 });
 
-test("release preparation projects one build into public Viewer, SDK, Pages and official-site artifacts", async (t) => {
+test("release preparation projects one build into public Viewer, SDK and Pages without website source", async (t) => {
   const output = await mkdtemp(resolve(tmpdir(), "docviewkit-release-"));
   t.after(() => rm(output, { recursive: true, force: true }));
 
@@ -99,7 +99,7 @@ test("release preparation projects one build into public Viewer, SDK, Pages and 
       assets.set(name, await readFile(new URL(name, sourceRoot)));
     }
     for (const [name, bytes] of assets) {
-      for (const stage of ["free-package", `pages/sdk/v${manifest.version}`, "official-site/dist"]) {
+      for (const stage of ["free-package", `pages/sdk/v${manifest.version}`]) {
         assert.deepEqual(await readFile(resolve(output, stage, name)), bytes, `${stage}/${name}`);
       }
       for (const [archive, prefix] of [[result.freeArchive, "package/"], [result.sdkArchive, "package/dist/"]]) {
@@ -110,7 +110,7 @@ test("release preparation projects one build into public Viewer, SDK, Pages and 
 
   const dingbatsLicense = await readFile(new URL("../third_party/pdf-standard-fonts/LICENSE_FOXIT", import.meta.url));
   const dingbatsLicensePath = "third-party-licenses/PDFium-FoxitDingbats-LICENSE.txt";
-  for (const stage of ["free-package", `pages/sdk/v${manifest.version}`, "official-site/dist"]) {
+  for (const stage of ["free-package", `pages/sdk/v${manifest.version}`]) {
     assert.deepEqual(await readFile(resolve(output, stage, dingbatsLicensePath)), dingbatsLicense);
   }
   for (const [archive, prefix] of [[result.freeArchive, "package/"], [result.sdkArchive, "package/dist/"]]) {
@@ -149,7 +149,7 @@ test("release preparation projects one build into public Viewer, SDK, Pages and 
   }
   for (const entry of ["LICENSE", "NOTICE"]) {
     const bytes = await readFile(new URL(`../${entry}`, import.meta.url));
-    for (const stage of ["free-package", "pages", `pages/sdk/v${manifest.version}`, "official-site"]) {
+    for (const stage of ["free-package", "pages", `pages/sdk/v${manifest.version}`]) {
       assert.deepEqual(await readFile(resolve(output, stage, entry)), bytes, `${stage}/${entry}`);
     }
     for (const archive of [result.freeArchive, result.sdkArchive]) {
@@ -160,9 +160,7 @@ test("release preparation projects one build into public Viewer, SDK, Pages and 
   assert.equal(freeReadme, await readFile(new URL("../release/FREE_VIEWER_README.md", import.meta.url), "utf8"));
   assert.equal(execFileSync("tar", ["-xOf", resolve(output, result.freeArchive), "package/README.md"], { encoding: "utf8" }), freeReadme);
   const sourceReadme = await readFile(new URL("../README.md", import.meta.url), "utf8");
-  assert.equal(await readFile(resolve(output, "official-site/README.md"), "utf8"), sourceReadme);
   assert.equal(execFileSync("tar", ["-xOf", resolve(output, result.sdkArchive), "package/README.md"], { encoding: "utf8" }), sourceReadme);
-  assert.equal(await readFile(resolve(output, "official-site/commercial/README.md"), "utf8"), await readFile(new URL("../commercial/README.md", import.meta.url), "utf8"));
   assert.match(freeReadme, /OFD/);
   assert.match(freeReadme, /ofd-formats/);
   assert.match(freeReadme, /Electron, Tauri/);
@@ -188,13 +186,9 @@ test("release preparation projects one build into public Viewer, SDK, Pages and 
   assert.doesNotMatch(demo, /__DOCVIEWKIT_/u);
 
   await stat(resolve(output, `pages/sdk/v${manifest.version}/viewer.js`));
-  await stat(resolve(output, "official-site/commercial/src/server.mjs"));
-  await stat(resolve(output, "official-site/dist/version.json"));
-  const stagedDocs = await import(pathToFileURL(resolve(output, "official-site/commercial/src/docs.mjs")));
-  assert.equal(stagedDocs.getDocsCatalog().version, manifest.version);
-  for (const retired of ["data", "src/auth.mjs", "src/db.mjs", "src/license.mjs", "public/portal", "public/assets/portal.js"]) {
-    await assert.rejects(stat(resolve(output, "official-site/commercial", retired)), { code: "ENOENT" }, retired);
-  }
+  await assert.rejects(stat(resolve(output, "official-site")), { code: "ENOENT" });
+  await assert.rejects(stat(new URL("../commercial/package.json", import.meta.url)), { code: "ENOENT" });
+
 });
 
 test("release preparation rejects a tag that differs from package and Cargo versions", async () => {
@@ -352,7 +346,7 @@ test("same-repository release preserves published assets and dispatches complete
   const resumed = await run(draftStep, "true");
   assert.match(resumed, /release edit v0\.2\.74/u);
   for (const name of ["viewer-0.2.74.tgz", "sdk-0.2.74.tgz", "viewer-pages-0.2.74.tar.gz",
-    "official-site-0.2.74.tar.gz", "sdk-0.2.74.cdx.json", "PUBLIC_SHA256SUMS", "SHA256SUMS", "release.json"]) {
+    "sdk-0.2.74.cdx.json", "PUBLIC_SHA256SUMS", "SHA256SUMS", "release.json"]) {
     assert.ok(created.includes(name) && resumed.includes(name), `draft is missing ${name}`);
   }
   const dispatched = await run("Dispatch verified publication", "true");
@@ -363,7 +357,6 @@ test("same-repository release preserves published assets and dispatches complete
   assert.doesNotMatch(workflow, /DOCVIEWKIT_(?:APP_ID|APP_PRIVATE_KEY|RELEASE_TOKEN)|create-github-app-token|PUBLIC_REPOSITORY/u);
   assert.match(workflow, /if: github\.repository == 'docviewkit\/viewer'/u);
   assert.match(workflow, /actions\/upload-artifact@v7/u);
-  assert.match(workflow, /actions\/download-artifact@v8/u);
   const publish = await readFile(new URL("../.github/workflows/publish.yml", import.meta.url), "utf8");
   assert.match(publish, /repository_dispatch:\n    types: \[release-ready\]/u);
   assert.match(publish, /environment: npm-production/u);
@@ -372,19 +365,11 @@ test("same-repository release preserves published assets and dispatches complete
   assert.match(publish, /needs: \[publish, deploy-pages\]/u);
 });
 
-test("release workflow deploys the exact artifact through Namecheap SSH", async () => {
-  const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-  assert.match(workflow, /DOCVIEWKIT_WEBSITE_SSH_PRIVATE_KEY/u);
-  assert.match(workflow, /\(cd release-output && grep "  \$archive\$" SHA256SUMS \| shasum -a 256 -c -\)/u);
-  assert.match(workflow, /shasum -a 256 -c -/u);
-  assert.match(workflow, /-p 21098/u);
-  assert.match(workflow, /scripts\/deploy-official-site\.sh/u);
-  assert.match(workflow, /ref: \$\{\{ needs\.build\.outputs\.tag \}\}/u);
-  assert.match(workflow, /if: vars\.DOCVIEWKIT_DEPLOY_WEBSITE == 'true'/u);
-  assert.match(workflow, /sdk\/version\.json/u);
-  assert.match(workflow, /sdk\/office-viewer-xps\.wasm/u);
-  assert.doesNotMatch(workflow, /site-license|claims\.origins/u);
-  assert.doesNotMatch(workflow, /DOCVIEWKIT_WEBSITE_DEPLOY_(?:URL|TOKEN)/u);
+test("core workflows publish npm and Pages independently of website deployment", async () => {
+  for (const path of ["ci.yml", "release.yml", "publish.yml"]) {
+    const workflow = await readFile(new URL(`../.github/workflows/${path}`, import.meta.url), "utf8");
+    assert.doesNotMatch(workflow, /commercial|official-site|DOCVIEWKIT_WEBSITE|DOCVIEWKIT_DEPLOY_WEBSITE|website-production/u);
+  }
 });
 
 test("third-party license discovery is portable across case-sensitive file systems", async () => {

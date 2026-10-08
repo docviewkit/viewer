@@ -11,12 +11,10 @@ automatic compilation is reserved for `v*` release tags.
 The workflow:
 
 1. runs the JavaScript, package, Rust, and native release gates;
-2. builds the Apache-2.0 SDK, public Viewer package, Pages demo and
-   official-site bundle from the same commit, then uploads them to a draft release;
+2. builds the Apache-2.0 SDK, public Viewer package and Pages demo from the
+   same commit, then uploads them to a draft release;
 3. dispatches `publish.yml` to verify checksums, publish `@docviewkit/viewer`,
-   deploy Pages and publish the GitHub Release;
-4. optionally deploys the exact official-site bundle when
-   `DOCVIEWKIT_DEPLOY_WEBSITE=true`.
+   deploy Pages and publish the GitHub Release.
 
 ## Source repository configuration
 
@@ -40,52 +38,23 @@ default token permission can remain read-only. Old `DOCVIEWKIT_APP_ID`,
 `DOCVIEWKIT_APP_PRIVATE_KEY` and `DOCVIEWKIT_RELEASE_TOKEN` secrets are no longer
 used by this pipeline.
 
-## Optional official website deployment
+## Independent official website
 
-Create `website-production` in `docviewkit/viewer` and add its Actions secrets:
+The official website, online documentation and Demo source live in
+[docviewkit/website](https://github.com/docviewkit/website). That repository
+installs an exact, locked `@docviewkit/viewer` npm version and deploys tested
+website commits independently. It does not compile Core or Wasm. Publishing a
+Viewer version does not depend on the website build or hosting availability.
 
-- `DOCVIEWKIT_WEBSITE_SSH_HOST`
-- `DOCVIEWKIT_WEBSITE_SSH_USER`
-- `DOCVIEWKIT_WEBSITE_SSH_PRIVATE_KEY`
-- `DOCVIEWKIT_WEBSITE_SSH_KNOWN_HOSTS`
+Website production SSH secrets belong only to the website repository's
+`website-production` environment. This core repository does not package or
+deploy the website. Keep the existing npm Trusted Publishing identity here.
 
-GitHub environment secrets are not copied when source moves between repositories.
-
-Set the repository variable `DOCVIEWKIT_DEPLOY_WEBSITE=true` only when
-the website-production environment and credentials are configured. The
-website job is skipped otherwise; npm, Pages and Releases remain independent.
-
-The production SSH key must be restricted to the website hosting account. The
-workflow verifies the release checksum, uploads the exact official-site archive,
-switches `~/apps/docviewkit/current`, and preserves archived customer data
-under `~/apps/docviewkit/data`. After deployment it verifies:
-
-`https://docviewkit.com/sdk/version.json`
-
-The production canary must also verify that `/sdk/office-viewer-xps.wasm`,
-`/sdk/office-viewer-ofd.wasm`, and their versioned equivalents return HTTP 200.
-
-The endpoint must return:
-
-```json
-{"name":"@docviewkit/viewer","version":"<released version>"}
-```
-
-The official demo imports `/sdk/v<version>/viewer.js`, so a successful release
-uses the exact deployed version rather than a mutable build-time dependency.
-
-Protect the `website-production` environment and require approval if desired.
-
-The Namecheap cPanel application uses Node.js 24 in production mode with:
-
-- application root: `apps/docviewkit`
-- application URL: `docviewkit.com/`
-- startup file: `server.js`
-
-The website needs no account database or authentication configuration. Preserve any existing customer data as a private archive; the website does not open or migrate it.
-
-SSH runs on shared-hosting port `21098`. The deployment script retains every
-versioned release for rollback and restarts Passenger through `tmp/restart.txt`.
+The website reports its source commit at `/site-version.json`. Its Demo and
+online documentation report the installed Viewer version, which may differ
+from the website's own version. Dependabot proposes Viewer patch updates in
+the website repository; required website and browser checks gate their merge
+and deployment. Major and minor updates are reviewed separately.
 
 ## npm and Pages configuration
 
@@ -112,8 +81,9 @@ See [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) and
 
 ## Open source license
 
-Viewer, Engine and project source use Apache-2.0. Every package, Pages runtime
-and official-site bundle includes LICENSE, NOTICE and the third-party licenses.
+Viewer, Engine and project source use Apache-2.0. Every package and Pages runtime
+includes LICENSE, NOTICE and the third-party licenses. The independent website
+preserves these files from its installed npm dependency.
 The public package preserves its Viewer entry and adds `/engine`, `/viewer`
 and `/accuracy` exports. Runtime licenses and mandatory branding are removed.
 Support, customization and enterprise delivery are arranged by email;
@@ -132,5 +102,5 @@ If a downstream service fails after artifacts have been built, run the source
 workflow manually with the existing source tag. Draft assets can be replaced
 until publication completes, and an already published npm version is not
 republished. Once the GitHub Release is public, a retry leaves its notes and
-attachments intact. The website deployment script is checked out from the same
-release tag as its archive.
+attachments intact. Website deployments are retried in the website repository
+using the tested website commit.
