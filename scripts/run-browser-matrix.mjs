@@ -888,7 +888,10 @@ try {
         new URL("../tests/fixtures/word-table-auto-height.doc", import.meta.url).pathname,
       );
       await page.waitForFunction(
-        () => document.querySelector("docviewkit-viewer")?.state.info?.format === "doc",
+        () => {
+          const state = document.querySelector("docviewkit-viewer")?.state;
+          return state?.info?.format === "doc" && state.status === "ready";
+        },
         null,
         { timeout: 60_000 },
       );
