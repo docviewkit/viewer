@@ -444,11 +444,7 @@ pub(super) fn chinese_number(value: u32) -> String {
     }
 }
 
-#[cfg(any(
-    feature = "native-formats",
-    feature = "odf-formats",
-    feature = "legacy-office-formats"
-))]
+#[cfg(any(feature = "odf-formats", feature = "legacy-office-formats"))]
 /// ODF paragraph alignment; spreadsheet cells retain their value-dependent defaults.
 pub(super) fn odf_text_align(value: &str) -> crate::model::TextAlign {
     use crate::model::TextAlign;
@@ -461,11 +457,7 @@ pub(super) fn odf_text_align(value: &str) -> crate::model::TextAlign {
 }
 
 /// ODF font-family is a list; commas inside a quoted family are literal.
-#[cfg(any(
-    feature = "native-formats",
-    feature = "odf-formats",
-    feature = "legacy-office-formats"
-))]
+#[cfg(any(feature = "odf-formats", feature = "legacy-office-formats"))]
 pub(super) fn odf_primary_font_family(value: &str) -> &str {
     let value = value.trim();
     if let Some(quote @ ('\'' | '"')) = value.chars().next() {
@@ -2082,6 +2074,7 @@ pub(super) fn clone_materialized_text(value: &str, part: &str) -> Result<String,
 
 #[cfg(all(test, any(feature = "native-formats", feature = "odf-formats")))]
 mod tests {
+    #[cfg(any(feature = "odf-formats", feature = "legacy-office-formats"))]
     #[test]
     fn odf_font_family_list_preserves_quoted_names() {
         for (value, expected) in [
@@ -2097,6 +2090,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "odf-formats", feature = "legacy-office-formats"))]
     #[test]
     fn odf_paragraph_alignment_preserves_justification_and_fallback() {
         use crate::model::TextAlign;
