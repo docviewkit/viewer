@@ -52,7 +52,6 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features
       - run: npm test
-      - run: npm --prefix commercial run verify
       - run: node scripts/verify-api-snapshot.mjs
       - run: node scripts/verify-package.mjs
       - name: Validate reviewed native goldens when available
@@ -67,7 +66,7 @@ jobs:
             node scripts/run-native-visual-release.mjs --validate-only --allow-missing
             echo "status=not-certified" >> "$GITHUB_OUTPUT"
           fi
-      - name: Prepare Apache-2.0 Viewer, SDK, Pages, and official-site artifacts
+      - name: Prepare Apache-2.0 Viewer, SDK, and Pages artifacts
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
@@ -77,7 +76,6 @@ jobs:
             --native-visual-status "$NATIVE_VISUAL_STATUS"
           npm sbom --sbom-format cyclonedx > "release-output/docviewkit-sdk-$RELEASE_VERSION.cdx.json"
           tar -C release-output/pages -czf "release-output/docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" .
-          tar -C release-output/official-site -czf "release-output/docviewkit-official-site-$RELEASE_VERSION.tar.gz" .
           cd release-output
           shasum -a 256 \
             "docviewkit-viewer-$RELEASE_VERSION.tgz" \
@@ -86,8 +84,7 @@ jobs:
             "docviewkit-viewer-$RELEASE_VERSION.tgz" \
             "docviewkit-sdk-$RELEASE_VERSION.tgz" \
             "docviewkit-sdk-$RELEASE_VERSION.cdx.json" \
-            "docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" \
-            "docviewkit-official-site-$RELEASE_VERSION.tar.gz" > SHA256SUMS
+            "docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" > SHA256SUMS
       - name: Determine GitHub provenance attestation availability
         id: provenance
         env:
@@ -108,7 +105,6 @@ jobs:
             release-output/docviewkit-viewer-*.tgz
             release-output/docviewkit-viewer-pages-*.tar.gz
             release-output/docviewkit-sdk-*.tgz
-            release-output/docviewkit-official-site-*.tar.gz
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ steps.release.outputs.tag }}
@@ -152,7 +148,6 @@ jobs:
             "release-output/docviewkit-sdk-$RELEASE_VERSION.tgz" \
             "release-output/docviewkit-sdk-$RELEASE_VERSION.cdx.json" \
             "release-output/docviewkit-viewer-pages-$RELEASE_VERSION.tar.gz" \
-            "release-output/docviewkit-official-site-$RELEASE_VERSION.tar.gz" \
             release-output/SHA256SUMS \
             release-output/PUBLIC_SHA256SUMS \
             release-output/release.json
@@ -191,72 +186,4 @@ jobs:
             sleep 10
           done
           echo "Public release did not complete within 15 minutes" >&2
-          exit 1
-  deploy-official-demo:
-    name: Deploy official Demo
-    if: vars.DOCVIEWKIT_DEPLOY_WEBSITE == 'true'
-    needs: [build, publish-public]
-    runs-on: ubuntu-latest
-    concurrency:
-      group: website-production
-      cancel-in-progress: false
-    environment:
-      name: website-production
-      url: https://docviewkit.com/demo/
-    env:
-      SSH_HOST: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_HOST }}
-      SSH_USER: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_USER }}
-      SSH_PRIVATE_KEY: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_PRIVATE_KEY }}
-      SSH_KNOWN_HOSTS: ${{ secrets.DOCVIEWKIT_WEBSITE_SSH_KNOWN_HOSTS }}
-      RELEASE_VERSION: ${{ needs.build.outputs.version }}
-      RELEASE_TAG: ${{ needs.build.outputs.tag }}
-    steps:
-      - name: Require production deployment adapter
-        run: |
-          test -n "$SSH_HOST"
-          test -n "$SSH_USER"
-          test -n "$SSH_PRIVATE_KEY"
-          test -n "$SSH_KNOWN_HOSTS"
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.build.outputs.tag }}
-          sparse-checkout: scripts/deploy-official-site.sh
-          sparse-checkout-cone-mode: false
-          path: deployment
-      - uses: actions/download-artifact@v8
-        with:
-          name: release-${{ needs.build.outputs.tag }}
-          path: release-output
-      - name: Configure production SSH
-        run: |
-          install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/docviewkit-production"
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/docviewkit-production" "$HOME/.ssh/known_hosts"
-      - name: Deploy the exact release artifact
-        run: |
-          archive="docviewkit-official-site-$RELEASE_VERSION.tar.gz"
-          (cd release-output && grep "  $archive$" SHA256SUMS | shasum -a 256 -c -)
-          ssh_args=(-i "$HOME/.ssh/docviewkit-production" -p 21098 -o BatchMode=yes -o StrictHostKeyChecking=yes)
-          scp_args=(-i "$HOME/.ssh/docviewkit-production" -P 21098 -o BatchMode=yes -o StrictHostKeyChecking=yes)
-          ssh "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" 'mkdir -p "$HOME/apps/docviewkit/uploads"'
-          scp "${scp_args[@]}" "release-output/$archive" "$SSH_USER@$SSH_HOST:apps/docviewkit/uploads/$archive"
-          ssh "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" \
-            "DOCVIEWKIT_DEPLOY_ROOT=\"\$HOME/apps/docviewkit\" bash -s -- '$RELEASE_TAG' '$RELEASE_VERSION' '$archive'" \
-            < deployment/scripts/deploy-official-site.sh
-      - name: Verify official Demo switched versions
-        run: |
-          for attempt in $(seq 1 60); do
-            live_version="$(curl --fail --silent --show-error -H 'Cache-Control: no-cache' https://docviewkit.com/sdk/version.json | node -e 'let value=""; process.stdin.on("data", chunk => value += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(value).version ?? ""))' || true)"
-            if [ "$live_version" = "$RELEASE_VERSION" ]; then
-              curl --fail --silent --show-error https://docviewkit.com/demo/ >/dev/null
-              curl --fail --silent --show-error https://docviewkit.com/sdk/office-viewer-xps.wasm >/dev/null
-              curl --fail --silent --show-error "https://docviewkit.com/sdk/v$RELEASE_VERSION/office-viewer-xps.wasm" >/dev/null
-              curl --fail --silent --show-error https://docviewkit.com/sdk/office-viewer-ofd.wasm >/dev/null
-              curl --fail --silent --show-error "https://docviewkit.com/sdk/v$RELEASE_VERSION/office-viewer-ofd.wasm" >/dev/null
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "Official Demo did not switch to $RELEASE_VERSION within 10 minutes" >&2
           exit 1
