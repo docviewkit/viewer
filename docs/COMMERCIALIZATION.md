@@ -21,9 +21,11 @@ DocViewKit 是浏览器本地、只读的文档预览组件和 Engine SDK。
 
 ## 工程与发布
 
-源码目标仓库为 https://github.com/docviewkit/viewer。
-同一源码产生 Viewer、Engine、格式包、演示和官网产物；保持现有公开 Viewer
-入口兼容，并通过 @docviewkit/viewer/engine 提供 Engine API。
+核心源码位于 [docviewkit/viewer](https://github.com/docviewkit/viewer)，
+产生 Viewer、Engine、格式包和 Pages 演示；保持现有公开 Viewer 入口兼容，
+并通过 @docviewkit/viewer/engine 提供 Engine API。
+官网、在线文档和 Demo 位于 [docviewkit/website](https://github.com/docviewkit/website)，
+使用固定版本的 npm 核心库，独立测试和部署。
 根工程 @docviewkit/sdk 的 private 标记仅防止误向 npm 发布构建工程，
 不限制源码使用权。第三方许可、固定字体版本和哈希门禁继续生效。
 公开 Git 历史及外来测试文件前，须完成凭据、隐私、来源和再分发权核验。
