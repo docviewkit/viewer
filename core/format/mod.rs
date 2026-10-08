@@ -66,6 +66,8 @@ pub mod iwork;
 #[cfg(any(feature = "native-formats", feature = "legacy-office-formats"))]
 pub mod legacy;
 #[cfg(any(feature = "odf-formats", feature = "legacy-office-formats"))]
+// Legacy formats reuse only the shared labels, pie geometry and value axes.
+#[cfg_attr(not(feature = "odf-formats"), allow(dead_code))]
 mod odf_chart;
 #[cfg(any(feature = "odf-formats", feature = "legacy-office-formats"))]
 mod odf_math;
@@ -3242,6 +3244,11 @@ fn chart_linear_regression_preserves_finite_pairs_and_degenerate_cases() {
     assert!(linear_regression(&[1.0], &[2.0]).is_none());
 }
 
+#[cfg(any(
+    feature = "native-formats",
+    feature = "odf-formats",
+    feature = "legacy-office-formats"
+))]
 pub(super) fn nice_chart_step(raw_step: f32) -> f32 {
     let raw_step = raw_step.max(f32::MIN_POSITIVE);
     let magnitude = 10.0_f32.powf(raw_step.log10().floor());
@@ -3257,6 +3264,7 @@ pub(super) fn nice_chart_step(raw_step: f32) -> f32 {
     }
 }
 
+#[cfg(any(feature = "native-formats", feature = "legacy-office-formats"))]
 pub(super) fn format_general_number(number: f64, width: usize) -> String {
     if number == 0.0 {
         return "0".to_owned();

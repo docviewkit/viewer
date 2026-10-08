@@ -250,6 +250,7 @@ impl SheetAxis {
 }
 
 /// Smallest axis count covering an extent, bounded by the format's row/column limit.
+#[cfg(any(feature = "native-formats", feature = "odf-formats", test))]
 pub(crate) fn sheet_axis_count_for_extent(
     extent: f32,
     limit: u32,

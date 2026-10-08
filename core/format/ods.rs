@@ -1827,7 +1827,6 @@ fn parse_ods_charts_in_xml(
                             font_size: style.font_size,
                             font_family: style.font_family,
                             color: style.color,
-                            visible: true,
                         });
                     }
                     "data-point" if chart.is_some() => {

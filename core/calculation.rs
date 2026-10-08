@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 const RESULT_MAGIC: &[u8; 8] = b"OVCALCV2";
 pub const REQUIRED_MESSAGE: &str = "XLSX uncached or volatile formulas and conditional-format predicates require the optional calculation module";
 
+#[cfg(any(feature = "native-formats", feature = "calculation-service"))]
 pub(crate) fn calculated_condition(kind: &str) -> bool {
     matches!(
         kind,
