@@ -161,6 +161,15 @@ test("release preparation projects one build into public Viewer, SDK and Pages w
   const sourceReadme = await readFile(new URL("../README.md", import.meta.url), "utf8");
   assert.equal(freeReadme, sourceReadme, "npm and GitHub must use the same product README");
   assert.equal(execFileSync("tar", ["-xOf", resolve(output, result.sdkArchive), "package/README.md"], { encoding: "utf8" }), sourceReadme);
+  const chineseReadme = await readFile(new URL("../README.zh-CN.md", import.meta.url), "utf8");
+  assert.ok(sourceReadme.includes("[简体中文](https://github.com/docviewkit/viewer/blob/main/README.zh-CN.md)"));
+  assert.ok(chineseReadme.includes("[English](https://github.com/docviewkit/viewer/blob/main/README.md)"));
+  const chineseBenefits = chineseReadme.indexOf("\n## 为什么选择 DocViewKit");
+  const chineseScenarios = chineseReadme.indexOf("\n## 适用场景");
+  assert.ok(chineseBenefits > 0 && chineseBenefits < chineseReadme.indexOf("\n```"));
+  assert.ok(chineseScenarios > chineseBenefits && chineseScenarios < chineseReadme.indexOf("\n```"));
+  for (const term of ["Apache-2.0", "OFD", "Electron", "Tauri", "WebView", "支持、定制和企业交付", "兼容性和渲染深度"]) assert.ok(chineseReadme.includes(term), term);
+  assert.deepEqual(chineseReadme.match(/```[^\n]*\n[\s\S]*?```/gu), sourceReadme.match(/```[^\n]*\n[\s\S]*?```/gu), "translated quickstart must preserve the runnable integration example");
   for (const [surface, content] of [["GitHub", sourceReadme], ["npm", freeReadme]]) {
     const firstExample = content.indexOf("\n```");
     const benefits = content.indexOf("\n## Why DocViewKit");

@@ -1,5 +1,7 @@
 # DocViewKit Viewer
 
+[English](https://github.com/docviewkit/viewer/blob/main/README.md) · [简体中文](https://github.com/docviewkit/viewer/blob/main/README.zh-CN.md)
+
 **Lightweight document previews. Quick integration. Fits your business.**
 
 Give your users a place to read Word, Excel, PowerPoint, PDF, OFD and more inside your application. DocViewKit brings document viewing, search and source location to everyday OA attachments, approval workflows, CRM/ERP, cloud drives and enterprise apps. Documents are parsed and rendered locally in the frontend, with no conversion server to deploy.
