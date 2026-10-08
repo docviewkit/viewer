@@ -157,10 +157,22 @@ test("release preparation projects one build into public Viewer, SDK and Pages w
     }
   }
   const freeReadme = await readFile(resolve(output, "free-package/README.md"), "utf8");
-  assert.equal(freeReadme, await readFile(new URL("../release/FREE_VIEWER_README.md", import.meta.url), "utf8"));
   assert.equal(execFileSync("tar", ["-xOf", resolve(output, result.freeArchive), "package/README.md"], { encoding: "utf8" }), freeReadme);
   const sourceReadme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+  assert.equal(freeReadme, sourceReadme, "npm and GitHub must use the same product README");
   assert.equal(execFileSync("tar", ["-xOf", resolve(output, result.sdkArchive), "package/README.md"], { encoding: "utf8" }), sourceReadme);
+  for (const [surface, content] of [["GitHub", sourceReadme], ["npm", freeReadme]]) {
+    const firstExample = content.indexOf("\n```");
+    const benefits = content.indexOf("\n## Why DocViewKit");
+    const scenarios = content.indexOf("\n## Where it fits");
+    assert.ok(benefits > 0 && benefits < firstExample, `${surface} must explain product advantages before code`);
+    assert.ok(scenarios > benefits && scenarios < firstExample, `${surface} must explain use cases before code`);
+    assert.ok((content.match(/^```/gmu) ?? []).length <= 6, `${surface} must keep detailed engineering examples in documentation`);
+    assert.match(content, /https:\/\/docviewkit\.com\/en\/demo\//u);
+    assert.match(content, /https:\/\/docviewkit\.com\/docs\/supported-formats\//u);
+    assert.match(content, /Apache-2\.0/u);
+    assert.doesNotMatch(content, /\b(?:100% fidelity|pixel-perfect|zero latency)\b/iu);
+  }
   assert.match(freeReadme, /OFD/);
   assert.match(freeReadme, /ofd-formats/);
   assert.match(freeReadme, /Electron, Tauri/);

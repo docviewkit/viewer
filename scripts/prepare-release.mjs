@@ -253,7 +253,7 @@ async function prepareFreePackage(output, version) {
   const stage = resolve(output, "free-package");
   await mkdir(stage, { recursive: true });
   await copyFreeRuntime(stage);
-  await cp(resolve(root, "release/FREE_VIEWER_README.md"), resolve(stage, "README.md"));
+  await cp(resolve(root, "README.md"), resolve(stage, "README.md"));
   await cp(resolve(root, "release/FREE_VIEWER_LICENSE.md"), resolve(stage, "FREE_VIEWER_LICENSE.md"));
   const manifest = {
     name: "@docviewkit/viewer",
