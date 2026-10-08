@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 const html = await readFile(new URL("../examples/visual-harness.html", import.meta.url), "utf8");
 const script = await readFile(new URL("../examples/visual-harness.js", import.meta.url), "utf8");
@@ -109,4 +114,31 @@ test("development server exposes only the configured fixture and QA-font directo
   assert.match(serverManager, /VIEWER_HOST="\$\{VIEWER_HOST:-\$\{HOST:-0\.0\.0\.0\}\}"/);
   assert.match(server, /port < 0/);
   assert.match(server, /server\.address\(\)/);
+});
+
+test("core server manager starts and stops the real Inspector without website source", async (t) => {
+  const state = await mkdtemp(resolve(tmpdir(), "docviewkit-core-server-"));
+  const viewer = spawn(process.execPath, [resolve("scripts/serve.mjs"), "--port", "0"], { stdio: ["ignore", "pipe", "inherit"] });
+  t.after(async () => {
+    if (viewer.exitCode === null && viewer.signalCode === null) {
+      const exited = once(viewer, "exit");
+      viewer.kill();
+      await exited;
+    }
+    await rm(state, { recursive: true, force: true });
+  });
+  const [stdout] = await once(viewer.stdout, "data", { signal: AbortSignal.timeout(10_000) });
+  const url = new URL(stdout.toString().match(/http:\/\/[^\s]+/u)[0]);
+  await writeFile(resolve(state, "server.pid"), `${viewer.pid}\n`);
+  const run = (command) => promisify(execFile)("bash", ["scripts/test-server.sh", command], {
+    env: { ...process.env, OFFICE_VIEWER_STATE_DIR: state, VIEWER_HOST: url.hostname, VIEWER_PORT: url.port, WEBSITE_PORT: "0" },
+    timeout: 15_000,
+  });
+  const started = await run("start");
+  assert.match(started.stdout, /Inspector 已运行/u);
+  assert.match(await fetch(url).then((response) => response.text()), /DocViewKit Viewer/u);
+  await assert.rejects(readFile(resolve(state, "website.log")), { code: "ENOENT" });
+  assert.match((await run("status")).stdout, /Inspector 运行中/u);
+  await run("stop");
+  await assert.rejects(readFile(resolve(state, "server.pid")), { code: "ENOENT" });
 });

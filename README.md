@@ -304,7 +304,7 @@ Host CSP must allow the configured `worker-src` and same-origin `connect-src` ac
 
 ## Development
 
-Requirements: Node.js 24 (the release CI and production website runtime), npm, and a rustup toolchain with `wasm32-unknown-unknown`.
+Requirements: Node.js 24 (the release CI runtime), npm, and a rustup toolchain with `wasm32-unknown-unknown`.
 
 ```sh
 git clone https://github.com/docviewkit/viewer.git
@@ -336,13 +336,12 @@ Run the browser-local reference Viewer:
 npm run test:server -- start
 ```
 
-The managed test server always rebuilds the latest code before it starts and
-also starts the DocViewKit website. Use `restart`, `status`, `logs`, or `stop`
-in place of `start` to manage both processes. Logs are stored under
-`.cache/test-server/`.
+The managed test server always rebuilds the latest code before it starts.
+Use `restart`, `status`, `logs`, or `stop` in place of `start` to manage the
+Inspector at [http://127.0.0.1:4173/](http://127.0.0.1:4173/). Logs are stored
+under `.cache/test-server/`.
 
-- Inspector: [http://127.0.0.1:4173/](http://127.0.0.1:4173/)
-- Website: [http://127.0.0.1:4310/](http://127.0.0.1:4310/)
+The official website runs independently from [docviewkit/website](https://github.com/docviewkit/website).
 
 The lower-level `npm run inspect` command starts an already-built runtime without process management. Open [http://127.0.0.1:4173/](http://127.0.0.1:4173/). The page accepts every format listed above. It provides slide/page navigation and thumbnails, sheet tabs with virtual scrolling and frozen panes, lazy continuous text pages, search, selectable/copyable text, URL-text safe links, zoom, fullscreen, printing, and document/render diagnostics with hit-tested native source mappings. It never uploads document bytes and does not edit or save documents.
 
