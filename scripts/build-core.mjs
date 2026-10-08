@@ -96,7 +96,8 @@ const builds = [
 
 for (const build of builds) {
   const args = [
-    "build",
+    "rustc",
+    "--lib",
     "--release",
     "--target",
     "wasm32-unknown-unknown",
@@ -108,6 +109,7 @@ for (const build of builds) {
   if (build.features !== undefined) {
     args.push("--no-default-features", "--features", build.features);
   }
+  args.push("--", "-D", "dead_code");
   const cargo = spawnSync(cargoCommand, args, {
     cwd: root,
     stdio: "inherit",

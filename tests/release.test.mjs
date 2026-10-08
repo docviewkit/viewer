@@ -276,10 +276,11 @@ test("Wasm builds use the project-selected Rust toolchain", async () => {
   assert.match(source, /process\.env\.CARGO/u);
 });
 
-test("local server builds optimized Wasm", async () => {
+test("local server builds optimized Wasm and rejects unused format code", async () => {
   const source = await readFile(new URL("../scripts/build-core.mjs", import.meta.url), "utf8");
   const server = await readFile(new URL("../scripts/test-server.sh", import.meta.url), "utf8");
-  assert.match(source, /"build",\s*"--release"/u);
+  assert.match(source, /"rustc",\s*"--lib",\s*"--release"/u);
+  assert.match(source, /args\.push\("--", "-D", "dead_code"\)/u);
   assert.doesNotMatch(source, /--debug|wasm32-unknown-unknown\/debug/u);
   assert.match(server, /npm run build\b/u);
   assert.doesNotMatch(server, /npm run build:debug/u);

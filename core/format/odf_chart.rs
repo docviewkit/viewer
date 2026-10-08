@@ -7,14 +7,6 @@
 use crate::model::{PathCommand, Rect};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum OdfChartKind {
-    Bar,
-    Line,
-    Scatter,
-    Pie,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OdfDataLabelNumber {
     Value,
     Percentage,
@@ -125,7 +117,6 @@ pub(super) struct OdfChartLegend {
     pub font_size: f32,
     pub font_family: String,
     pub color: u32,
-    pub visible: bool,
 }
 
 impl OdfChartLegend {
@@ -421,7 +412,6 @@ mod tests {
             font_size: 12.0,
             font_family: "Arial".to_owned(),
             color: 0,
-            visible: true,
         };
         let bounds = resolve_legend_bounds(
             &legend,
