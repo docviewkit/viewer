@@ -66,7 +66,7 @@
     "generate:symbol-font-mappings": "node scripts/generate-symbol-font-mappings.mjs",
     "build:core": "node scripts/build-core.mjs",
     "build:js": "tsc -p tsconfig.json --incremental false && node scripts/bundle-runtime.mjs && node scripts/bundle-image-codec.mjs && node scripts/generate-third-party-notices.mjs",
-    "build": "npm run generate:symbol-font-mappings && npm run clean && npm run build:core && npm run build:js",
+    "build": "node scripts/build.mjs",
     "inspect": "node scripts/serve.mjs --host 0.0.0.0",
     "test:server": "bash scripts/test-server.sh",
     "test:browsers:install": "node node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit",

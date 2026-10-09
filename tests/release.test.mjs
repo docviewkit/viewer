@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   cp,
   mkdir,
@@ -12,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
@@ -286,6 +288,96 @@ test("local server builds optimized Wasm and rejects unused format code", async 
   assert.doesNotMatch(server, /npm run build:debug/u);
   assert.equal(manifest.scripts["build:debug"], undefined);
   assert.equal(manifest.scripts["build:core:debug"], undefined);
+});
+
+test("concurrent builds cannot delete the Inspector calculator", async (t) => {
+  const root = await mkdtemp(resolve(tmpdir(), "docviewkit-build-race-"));
+  const source = resolve(import.meta.dirname, "..");
+  const children = [];
+  await mkdir(resolve(root, "scripts"));
+  await mkdir(resolve(root, ".cache"));
+  await cp(resolve(source, "examples"), resolve(root, "examples"), { recursive: true });
+  await mkdir(resolve(root, "tests/fixtures"), { recursive: true });
+  await mkdir(resolve(root, "fonts"));
+  await cp(resolve(source, "scripts/build.mjs"), resolve(root, "scripts/build.mjs"))
+    .catch((cause) => { if (cause.code !== "ENOENT") throw cause; });
+  await writeFile(resolve(root, "package.json"), JSON.stringify({ type: "module", scripts: {
+    build: manifest.scripts.build,
+    clean: manifest.scripts.clean,
+    "generate:symbol-font-mappings": "node --eval ''",
+    "build:core": "node fixture.mjs core",
+    "build:js": "node fixture.mjs js",
+  } }));
+  await writeFile(resolve(root, "fixture.mjs"), `
+import { cp, mkdir, readdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
+import { resolve } from "node:path";
+const source = ${JSON.stringify(resolve(source, "dist"))};
+const role = process.env.BUILD_ROLE;
+await mkdir("dist", { recursive: true });
+if (process.argv[2] === "core") {
+  if (role === "second") {
+    await cp(resolve(source, "office-viewer-core.wasm"), "dist/office-viewer-core.wasm");
+    await writeFile(".cache/second-ready", "");
+    while (!existsSync(".cache/second-release")) await delay(10);
+  }
+  if (role === "failed") process.exit(23);
+  await cp(source, "dist", { recursive: true });
+  if (role === "first") {
+    await writeFile(".cache/first-ready", "");
+    while (!existsSync(".cache/first-release")) await delay(10);
+  }
+} else {
+  for (const name of await readdir(source)) {
+    if (!name.startsWith("office-viewer-")) await cp(resolve(source, name), resolve("dist", name), { recursive: true });
+  }
+}
+`);
+  const launch = (command, args, options = {}) => {
+    const child = spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"], ...options });
+    const result = { child, output: "", done: new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", resolve);
+    }) };
+    for (const stream of [child.stdout, child.stderr]) stream.on("data", (data) => { result.output += data; });
+    children.push(result);
+    return result;
+  };
+  t.after(async () => {
+    for (const role of ["first", "second"]) await writeFile(resolve(root, `.cache/${role}-release`), "");
+    for (const { child, done } of children) {
+      if (child.spawnfile === process.execPath && child.exitCode === null && child.signalCode === null) child.kill();
+      await done;
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  const build = (role) => launch(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], {
+    shell: process.platform === "win32", env: { ...process.env, BUILD_ROLE: role },
+  });
+  const waitUntil = async (ready) => {
+    const deadline = Date.now() + 15_000;
+    while (!ready()) { assert.ok(Date.now() < deadline, "build regression timed out"); await delay(10); }
+  };
+  const first = build("first");
+  await waitUntil(() => existsSync(resolve(root, ".cache/first-ready")));
+  const second = build("second");
+  await waitUntil(() => second.child.exitCode !== null || existsSync(resolve(root, ".cache/second-ready")));
+  await writeFile(resolve(root, ".cache/first-release"), "");
+  assert.equal(await first.done, 0, first.output);
+  const viewer = launch(process.execPath, [resolve(source, "scripts/serve.mjs"), "--port", "0", "--font-root", resolve(root, "fonts")]);
+  await waitUntil(() => /DocViewKit Viewer: http:/u.test(viewer.output) || viewer.child.exitCode !== null);
+  assert.match(viewer.output, /DocViewKit Viewer: http:/u, viewer.output);
+  const url = viewer.output.match(/http:\/\/[^\s]+/u)[0];
+  const response = await fetch(`${url}dist/office-viewer-calc.wasm`);
+  assert.equal(response.status, 200);
+  assert.ok(WebAssembly.validate(await response.arrayBuffer()));
+  assert.notEqual(await second.done, 0);
+  assert.match(second.output, /build.*(?:running|busy)/iu);
+  const failed = build("failed");
+  assert.equal(await failed.done, 23, failed.output);
+  const recovered = build("recovered");
+  assert.equal(await recovered.done, 0, recovered.output);
 });
 
 test("CI installs browsers with the pinned Playwright package", async () => {
