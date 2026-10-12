@@ -18,6 +18,11 @@ export type DocumentFormat =
   | "pdf"
   | "xps"
   | "ofd";
+/** @internal Formats whose adapters distinguish automatic reading colors from authored paints. */
+export function supportsReadingColors(format: DocumentFormat): boolean {
+  return format === "docx" || format === "odt" || format === "rtf"
+    || format === "xlsx" || format === "ods" || format === "csv";
+}
 export type DocumentKind = "presentation" | "spreadsheet" | "text";
 export type MappingQuality = "exact" | "derived" | "approximate";
 
@@ -461,6 +466,8 @@ export interface RenderRequest {
   readonly scale?: number;
   readonly pixelRatio?: number;
   readonly background?: string;
+  /** Reading colors for semantic text/sheet defaults; authored colors and fixed layouts stay original. */
+  readonly colorScheme?: "light" | "dark";
   /** Repeated diagonal text painted over the rendered bitmap without modifying document objects. */
   readonly watermark?: string;
   /** Includes the exact text placements used by this render for selection and accessibility overlays. */

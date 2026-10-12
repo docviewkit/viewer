@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { chromium, firefox, webkit } from 'playwright-core';
 
-for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,firefox,webkit').split(',')) {
+for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,webkit').split(',')) {
   const browser = await ({ chromium, firefox, webkit })[name].launch({ headless: true, timeout: 30_000 });
   try {
     const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });

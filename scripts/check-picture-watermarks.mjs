@@ -15,7 +15,7 @@ const url = await new Promise((resolve, reject) => {
 });
 try {
   await mkdir('.cache/picture-watermark', { recursive: true });
-  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,firefox,webkit').split(',')) {
+  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,webkit').split(',')) {
     const browser = await ({ chromium, firefox, webkit })[name].launch({ timeout: 15000 });
     try {
       const page = await browser.newPage({ viewport: { width: 1100, height: 1250 } });

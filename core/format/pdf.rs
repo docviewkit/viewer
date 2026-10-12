@@ -3572,9 +3572,7 @@ fn paint_page_annotations(
                 }
             }
             (Some("Link"), AnnotationLayer::Overlay) => {
-                let Some(action) = pdf_link_action(dict, context) else {
-                    continue;
-                };
+                let action = pdf_link_action(dict, context);
                 let Some(rect) = annotation_number_array(dict.get("Rect"), context.store)
                     .and_then(|values| <[f32; 4]>::try_from(values).ok())
                 else {
@@ -3589,12 +3587,28 @@ fn paint_page_annotations(
                 let Some(bounds) = bounds(&points) else {
                     continue;
                 };
+                let first_object = context.objects.len();
+                paint_annotation_normal_appearance(dict, page_matrix, context)?;
+                let width = annotation_border_width(dict, context.store, 0.0) * page_matrix.scale();
+                let visual = if context.objects.len() == first_object && width > 0.0 {
+                    Visual::Shape {
+                        geometry: Geometry::Rectangle,
+                        fill: 0,
+                        stroke: annotation_color(dict, context.store, 0x0000_00ff),
+                        stroke_width: width,
+                    }
+                } else {
+                    Visual::None
+                };
+                if action.is_none() && matches!(visual, Visual::None) {
+                    continue;
+                }
                 context.push_object(
                     ObjectKind::Shape,
                     bounds,
                     text,
-                    Visual::None,
-                    pdf_link_source(object_number, action),
+                    visual,
+                    action.map_or_else(source, |action| pdf_link_source(object_number, action)),
                 )?;
             }
             (Some("Highlight"), AnnotationLayer::Underlay) => {
@@ -3746,7 +3760,8 @@ fn paint_page_annotations(
                     }
                 }
                 if let Some(bounds) = bounds(&points) {
-                    let width = annotation_border_width(dict, context.store) * page_matrix.scale();
+                    let width =
+                        annotation_border_width(dict, context.store, 1.0) * page_matrix.scale();
                     context.push_object(
                         ObjectKind::Shape,
                         bounds,
@@ -3836,7 +3851,7 @@ fn paint_page_annotations(
                         0
                     },
                     annotation_color(dict, context.store, 0x0000_00ff),
-                    annotation_border_width(dict, context.store) * page_matrix.scale(),
+                    annotation_border_width(dict, context.store, 1.0) * page_matrix.scale(),
                     text.clone(),
                     source(),
                 )?;
@@ -3871,7 +3886,7 @@ fn paint_page_annotations(
                         },
                         fill: annotation_named_color(dict, "IC", context.store, 0),
                         stroke: annotation_color(dict, context.store, 0x0000_00ff),
-                        stroke_width: annotation_border_width(dict, context.store)
+                        stroke_width: annotation_border_width(dict, context.store, 1.0)
                             * page_matrix.scale(),
                     },
                     source(),
@@ -4452,6 +4467,7 @@ fn annotation_named_color(dict: &PdfDict, key: &str, store: &ObjectStore, fallba
         return fallback;
     };
     let color = match values.as_slice() {
+        [] => return 0,
         [gray_value] => gray(*gray_value),
         [red, green, blue] => rgb([*red, *green, *blue]),
         [cyan, magenta, yellow, black] => cmyk([*cyan, *magenta, *yellow, *black]),
@@ -4460,10 +4476,10 @@ fn annotation_named_color(dict: &PdfDict, key: &str, store: &ObjectStore, fallba
     with_alpha(color, dict.get("CA").and_then(number_f32).unwrap_or(1.0))
 }
 
-fn annotation_border_width(dict: &PdfDict, store: &ObjectStore) -> f32 {
+fn annotation_border_width(dict: &PdfDict, store: &ObjectStore, fallback: f32) -> f32 {
     annotation_number_array(dict.get("Border"), store)
         .and_then(|values| values.get(2).copied())
-        .unwrap_or(1.0)
+        .unwrap_or(fallback)
         .abs()
 }
 
@@ -12867,6 +12883,12 @@ fn extract_pdf_fonts(
                 .get("FontBBox")
                 .and_then(|value| pdf_box(store, value))
                 .unwrap_or([0.0, info.descent, 1_000.0, info.ascent]);
+            // Some PDF subsetters label a full OpenType font as a raw CFF stream.
+            let cff = if bytes.starts_with(b"OTTO") {
+                sfnt_table(&bytes, b"CFF ")
+            } else {
+                Some(bytes.as_slice())
+            };
             let wrapped = match container {
                 2 if bytes
                     .get(..4)
@@ -12874,30 +12896,28 @@ fn extract_pdf_fonts(
                 {
                     patch_cid_truetype_cmap(&bytes, &info, metrics, store, limits)
                 }
-                2 if dict_name(metrics, "Subtype") == Some("CIDFontType2") => {
+                2 if dict_name(metrics, "Subtype") == Some("CIDFontType2") => cff.and_then(|cff| {
                     wrap_pdf_mapped_cff_as_opentype(
-                        &bytes, &family, &info, bbox, metrics, store, limits,
+                        cff, &family, &info, bbox, metrics, store, limits,
                     )
-                }
-                2 if cff_is_cid_keyed(&bytes) == Some(false) => {
-                    wrap_name_keyed_cid_cff_as_opentype(&bytes, &family, &info, bbox)
-                        .or_else(|| wrap_cid_cff_as_opentype(&bytes, &family, &info, bbox))
-                }
-                2 => wrap_cid_cff_as_opentype(&bytes, &family, &info, bbox),
-                3 if bytes.starts_with(b"OTTO") => sfnt_table(&bytes, b"CFF ").and_then(|cff| {
+                }),
+                2 if cff.and_then(cff_is_cid_keyed) == Some(false) => cff.and_then(|cff| {
+                    wrap_name_keyed_cid_cff_as_opentype(cff, &family, &info, bbox)
+                        .or_else(|| wrap_cid_cff_as_opentype(cff, &family, &info, bbox))
+                }),
+                2 => cff.and_then(|cff| wrap_cid_cff_as_opentype(cff, &family, &info, bbox)),
+                3 if bytes.starts_with(b"OTTO") => cff.and_then(|cff| {
                     wrap_pdf_mapped_cff_as_opentype(
                         cff, &family, &info, bbox, metrics, store, limits,
                     )
                 }),
                 3 => patch_cid_truetype_cmap(&bytes, &info, metrics, store, limits)
                     .or_else(|| Some(bytes.clone())),
-                4 if bytes.starts_with(b"OTTO") => sfnt_table(&bytes, b"CFF ").and_then(|cff| {
+                4 => cff.and_then(|cff| {
                     wrap_name_keyed_cff_as_opentype(cff, &family, &info, bbox, &simple_encoding)
                 }),
-                4 => {
-                    wrap_name_keyed_cff_as_opentype(&bytes, &family, &info, bbox, &simple_encoding)
-                }
-                5 => wrap_type1_as_opentype(&bytes, &family, &info, bbox, &simple_encoding),
+                // PDF encoding overrides must outrank aliases in the embedded program.
+                5 => wrap_type1_as_opentype(&bytes, &family, &info, bbox, &explicit_encoding),
                 _ => None,
             };
             let Some(wrapped) = wrapped else {
@@ -25601,6 +25621,68 @@ trailer << /Root 1 0 R >>
     }
 
     #[test]
+    fn preserves_pdf_widths_over_embedded_type1_encoding_aliases() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/arxiv-type1-charter-advances.pdf"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.embedded_fonts.len(), 1);
+        let font = &document.embedded_fonts[0].bytes;
+        let hmtx = super::sfnt_table(font, b"hmtx").unwrap();
+        for (code, width) in [
+            (56, 556),
+            (48, 556),
+            (66, 604),
+            (45, 319),
+            (65, 639),
+            (51, 556),
+        ] {
+            let gid = embedded_cmap_gid(font, 0xe000 + code).unwrap();
+            assert_eq!(
+                super::read_u16(hmtx, usize::from(gid) * 4),
+                Some(width),
+                "PDF code {code} must retain its authored advance"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_arxiv_watermark_with_mislabeled_opentype_cid_cff() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/arxiv-cid-cff-opentype-watermark.pdf"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.embedded_fonts.len(), 1);
+        assert!(
+            document.diagnostics.is_empty(),
+            "{:?}",
+            document.diagnostics
+        );
+        assert_eq!(
+            document
+                .objects
+                .iter()
+                .filter_map(|object| object.text.as_deref())
+                .collect::<String>(),
+            "arXiv:2609.26368v1  [cs.CL]  22 Sep 2026",
+        );
+        let font = &document.embedded_fonts[0].bytes;
+        assert!(super::sfnt_table(font, b"CFF ").is_some());
+        assert_eq!(sfnt_checksum(font), 0xb1b0_afba);
+        for cid in 1..=24 {
+            assert!(
+                embedded_cmap_gid(font, super::pdf_cid_glyph_codepoint(cid).unwrap())
+                    .is_some_and(|gid| gid != 0),
+                "CID {cid} must retain its embedded glyph"
+            );
+        }
+    }
+
+    #[test]
     fn extracts_cff_from_a_cid_fontfile2_opentype_container() {
         let Some(bytes) = pdfjs_fixture("bug1186827.pdf") else {
             return;
@@ -29515,6 +29597,101 @@ trailer << /Root 1 0 R >>
         let runs =
             text_runs(&text.visual).expect("FreeText appearance text must retain its styled run");
         assert_eq!(runs[0].color, 0xff00_00ff);
+    }
+
+    #[test]
+    fn paints_supplied_arxiv_link_borders_without_losing_actions() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/arxiv-link-borders.pdf"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.objects.len(), 2);
+        for (link, color) in document.objects.iter().zip([0x00ff_00ff, 0x00ff_ffff]) {
+            let Visual::Shape {
+                fill,
+                stroke,
+                stroke_width,
+                ..
+            } = &link.visual
+            else {
+                panic!("link border must be painted: {:?}", link.visual);
+            };
+            assert_eq!(*fill, 0);
+            assert_eq!(*stroke, color);
+            assert!((*stroke_width - super::PDF_POINT_TO_CSS).abs() < 0.001);
+            assert!(matches!(
+                &link.source.locator,
+                SourceLocator::Pdf {
+                    action: Some(_),
+                    ..
+                }
+            ));
+        }
+        let SourceLocator::Pdf {
+            action: Some(action),
+            ..
+        } = &document.objects[0].source.locator
+        else {
+            unreachable!()
+        };
+        assert_eq!(action.action.as_deref(), Some("navigate"));
+        assert_eq!(action.target.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn preserves_invisible_link_borders_and_authored_appearances() {
+        let bytes = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /Annots [
+<< /Subtype /Link /Rect [10 10 20 20] /A << /S /URI /URI (https://example.test) >> >>
+<< /Subtype /Link /Rect [20 10 30 20] /Border [0 0 0] /A << /S /URI /URI (https://example.test) >> >>
+<< /Subtype /Link /Rect [30 10 40 20] /Border [] /A << /S /URI /URI (https://example.test) >> >>
+<< /Subtype /Link /Rect [40 10 50 20] /Border [0 0 1] /C [] /A << /S /URI /URI (https://example.test) >> >>
+<< /Subtype /Link /Rect [10 60 30 80] /Border [0 0 1] /C [0 1 0] /AP << /N 4 0 R >> /A << /S /URI /URI (https://example.test) >> >>
+<< /Subtype /Link /Rect [50 10 60 20] /Border [0 0 1] /C [0 1 0] /Dest (missing) >>
+] >> endobj
+4 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 20 20] >> stream
+1 0 0 rg 0 0 20 20 re f
+endstream endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+        assert!(
+            document.objects[..3]
+                .iter()
+                .all(|object| matches!(object.visual, Visual::None))
+        );
+        assert!(matches!(
+            document.objects[3].visual,
+            Visual::Shape {
+                stroke: 0,
+                fill: 0,
+                ..
+            }
+        ));
+        assert!(
+            matches!(
+                document.objects[4].visual,
+                Visual::PaintedShape {
+                    fill: Paint::Solid(0xff00_00ff),
+                    ..
+                }
+            ),
+            "authored appearance must retain its red fill: {:?}",
+            document.objects[4].visual
+        );
+        assert!(matches!(document.objects[5].visual, Visual::None));
+        assert!(matches!(
+            document.objects[6].visual,
+            Visual::Shape {
+                stroke: 0x00ff_00ff,
+                ..
+            }
+        ));
+        assert_eq!(document.objects.len(), 7);
     }
 
     #[test]

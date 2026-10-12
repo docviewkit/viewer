@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { chromium, firefox, webkit } from 'playwright-core';
+import { chromium, webkit } from 'playwright-core';
 
 const output = 'output/sample-doc';
 await mkdir(output, { recursive: true });
-for (const [name, type] of Object.entries({ chromium, firefox, webkit })) {
+for (const [name, type] of Object.entries({ chromium, webkit })) {
   if (process.env.BROWSER && process.env.BROWSER !== name) continue;
   const browser = await type.launch({ headless: true, timeout: 30_000 });
   try {

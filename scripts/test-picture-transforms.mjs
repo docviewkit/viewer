@@ -102,7 +102,7 @@ try {
     server.once('error', reject); server.once('exit', code => reject(new Error(`server ${code}`)));
     createInterface({ input: server.stdout }).on('line', line => { const match = line.match(/https?:\/\/\S+/u); if (match) resolve(match[0]); });
   });
-  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,firefox,webkit').split(',')) {
+  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,webkit').split(',')) {
     console.log(`${name}: launching`);
     const browser = await ({chromium, firefox, webkit})[name].launch({headless:true, timeout:30000});
     try {

@@ -2,7 +2,7 @@ import { DEFAULT_LIMITS } from "./core.js";
 import { createOfficeEngine } from "./engine.js";
 import { sheetAutoFitColumnWidth, sheetAutoFitRowHeight, sheetPrintPages } from "./render.js";
 import { OPEN_SOURCE_LICENSE, type LicenseOptions, type LicenseState } from "./license.js";
-import { OfficeEngineError } from "./types.js";
+import { OfficeEngineError, supportsReadingColors } from "./types.js";
 import type {
   Diagnostic,
   DocumentAction,
@@ -338,6 +338,7 @@ const TEMPLATE = `
       --dv-object-hover: rgb(23 105 210 / 8%);
       --dv-object-hover-border: rgb(23 105 210 / 58%);
       --dv-page-shadow: 0 4px 18px rgb(21 28 38 / 18%);
+      --dv-document-background: #ffffff;
       --dv-toolbar-height: 44px;
       --dv-status-height: 28px;
       --dv-sheet-tabs-height: 34px;
@@ -378,6 +379,7 @@ const TEMPLATE = `
       --dv-object-hover: rgb(106 167 255 / 10%);
       --dv-object-hover-border: rgb(131 182 255 / 72%);
       --dv-page-shadow: 0 5px 24px rgb(0 0 0 / 45%);
+      --dv-document-background: #1a1a1a;
       color-scheme: dark;
     }
 
@@ -685,6 +687,7 @@ const TEMPLATE = `
       }
     }
     .unit-list { display: grid; gap: 10px; }
+    .unit-list[data-navigation-mode="outline"] { gap: 0; }
     .unit-button {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
@@ -719,7 +722,7 @@ const TEMPLATE = `
       width: min(100%, var(--dv-thumbnail-max-width));
       aspect-ratio: var(--dv-thumbnail-aspect);
       overflow: hidden;
-      background: #ffffff;
+      background: var(--dv-document-background);
       box-shadow: inset 0 0 0 1px #cfd4dc, 0 1px 3px rgb(20 27 38 / 12%);
       transition: transform var(--dv-motion-state) var(--dv-ease-out),
         box-shadow var(--dv-motion-state) var(--dv-ease-toggle);
@@ -731,7 +734,9 @@ const TEMPLATE = `
     .thumbnail canvas { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; }
     .outline-button {
       width: 100%;
-      min-height: 32px;
+      height: max(32px, calc(1lh + 12px));
+      min-height: 0;
+      margin-block-end: 2px;
       padding: 6px 8px;
       padding-inline-start: calc(8px + min(var(--dv-outline-level), 8) * 14px);
       overflow: hidden;
@@ -743,9 +748,37 @@ const TEMPLATE = `
       text-overflow: ellipsis;
       white-space: nowrap;
       cursor: pointer;
+      transition: height var(--dv-motion-layout) var(--dv-ease-out),
+        padding-block var(--dv-motion-layout) var(--dv-ease-out),
+        margin-block-end var(--dv-motion-layout) var(--dv-ease-out),
+        opacity var(--dv-motion-layout) var(--dv-ease-out),
+        visibility var(--dv-motion-layout);
+    }
+    /* Keep rows paintable during collapse; inert disables them immediately. */
+    .outline-button[hidden] {
+      display: block !important;
+      height: 0;
+      padding-block: 0;
+      margin-block-end: 0;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
     }
     .outline-button:hover { background: var(--dv-hover); }
     .outline-button[aria-current="page"] { color: var(--dv-accent); background: var(--dv-surface); }
+    .outline-button:focus-visible { outline: 2px solid var(--dv-focus); outline-offset: -2px; }
+    .outline-toggle { display: inline-grid; place-items: center; width: 24px; height: 24px; margin-block: -4px; vertical-align: middle; }
+    .outline-button[aria-expanded] .outline-toggle::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-right: 1.5px solid currentColor;
+      border-bottom: 1.5px solid currentColor;
+      transform: rotate(-45deg);
+      transition: transform var(--dv-motion-layout) var(--dv-ease-out);
+    }
+    .shell[dir="rtl"] .outline-button[aria-expanded="false"] .outline-toggle::before { transform: rotate(135deg); }
+    .outline-button[aria-expanded="true"] .outline-toggle::before { transform: rotate(45deg); }
 
     .workspace {
       position: relative;
@@ -810,7 +843,7 @@ const TEMPLATE = `
       min-width: 100%;
       min-height: 100%;
       padding: 0;
-      background: #ffffff;
+      background: var(--dv-document-background);
     }
     .shell[data-spreadsheet="true"] .stage {
       position: absolute;
@@ -836,7 +869,7 @@ const TEMPLATE = `
       content-visibility: auto;
       contain: layout paint style;
       contain-intrinsic-size: auto 1100px;
-      background: #ffffff;
+      background: var(--dv-document-background);
       box-shadow: var(--dv-page-shadow);
       transition: box-shadow var(--dv-motion-state) var(--dv-ease-toggle);
     }
@@ -862,7 +895,7 @@ const TEMPLATE = `
     .stage {
       position: relative;
       flex: none;
-      background: #ffffff;
+      background: var(--dv-document-background);
       box-shadow: var(--dv-page-shadow);
       transform-origin: top left;
       margin: auto;
@@ -996,6 +1029,11 @@ const TEMPLATE = `
       border-block-end: 1px solid #c8cdd3;
       font-size: 11px;
       line-height: 1;
+    }
+    :host([data-resolved-theme="dark"]) :is(.sheet-header-axis, .sheet-header-corner, .sheet-header-item) {
+      color: var(--dv-text-muted);
+      background: var(--dv-surface-muted);
+      border-color: var(--dv-border);
     }
     .sheet-header-resizer {
       position: absolute;
@@ -1236,6 +1274,7 @@ const TEMPLATE = `
         transition-duration: .01ms !important;
         scroll-behavior: auto !important;
       }
+      .outline-button, .outline-toggle::before { transition: none !important; }
     }
 
     @media (hover: hover) and (pointer: fine) {
@@ -1248,7 +1287,7 @@ const TEMPLATE = `
     .shell[data-minimal="true"] .workspace { width: 100%; height: 100%; }
 
     @media print {
-      :host { height: auto !important; overflow: visible !important; }
+      :host { height: auto !important; overflow: visible !important; --dv-document-background: #ffffff !important; }
       .toolbar, .formula-bar, .navigation, .navigation-resizer, .sheet-tabs, .statusbar, .diagnostic-panel, .selection,
       .sheet-header-axis, .sheet-header-corner, .sheet-resize-guide, .sheet-tile { display: none !important; }
       .shell, .workspace { display: block; border: 0; overflow: visible; background: #ffffff; }
@@ -1596,6 +1635,7 @@ export class DocViewKitViewerElement extends HTMLElement {
   #navigationEnd = -1;
   #navigationMode: ViewerNavigationMode = "thumbnails";
   #outlineSelection = -1;
+  readonly #collapsedOutline = new Set<number>();
   #navigationTransitionRevision = 0;
   #navigationTransitioning = false;
   #navigationResize: NavigationResizeState | undefined;
@@ -1985,7 +2025,28 @@ export class DocViewKitViewerElement extends HTMLElement {
     this.#resolvedTheme = theme === "auto" ? (this.#themeMedia.matches ? "dark" : "light") : theme;
     this.dataset.resolvedTheme = this.#resolvedTheme;
     this.#localize();
-    if (previous !== this.#resolvedTheme) this.#emitState();
+    if (previous !== this.#resolvedTheme) {
+      this.#emitState();
+      if (this.#document !== undefined && this.#info !== undefined
+        && supportsReadingColors(this.#info.format)) {
+        this.#renderRevision += 1;
+        this.#continuousRevision += 1;
+        this.#closeRenderedFrame();
+        for (const record of this.#continuousPages.values()) {
+          record.rendered = false;
+          record.rendering = false;
+          record.element.dataset.rendered = "false";
+        }
+        this.#clearThumbnails();
+        this.#root.querySelectorAll<HTMLCanvasElement>(".thumbnail canvas").forEach(canvas => { delete canvas.dataset.rendered; });
+        this.#renderNavigationWindow(this.#unitIndex, true);
+        if (this.#pageMode === "continuous") {
+          for (const [index, record] of this.#continuousPages) {
+            if (record.visible || Math.abs(index - this.#unitIndex) <= 1) void this.#renderContinuousPage(index);
+          }
+        } else void this.#renderCurrent();
+      }
+    }
   }
 
   readonly #handleThemeChange = (): void => this.#applyTheme();
@@ -2272,6 +2333,21 @@ export class DocViewKitViewerElement extends HTMLElement {
       && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
       event.preventDefault();
       void this.#selectUnit(this.#unitIndex + (event.key === "ArrowRight" ? 1 : -1));
+    } else if (target instanceof HTMLElement && target.classList.contains("outline-button")
+      && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      const expand = (event.key === "ArrowRight") !== (this.#element<HTMLElement>(".shell").dir === "rtl");
+      const expanded = target.getAttribute("aria-expanded");
+      if ((expand && expanded === "false") || (!expand && expanded === "true")) {
+        this.#toggleOutline(target);
+      } else {
+        const index = expand
+          ? (expanded === "true" ? Number(target.dataset.outlineIndex) + 1 : -1)
+          : Number(target.dataset.outlineParent);
+        const next = this.#root.querySelector<HTMLElement>(`.outline-button[data-outline-index="${index}"]`);
+        next?.focus({ preventScroll: true });
+        if (next !== null) this.#revealNavigationButton(next);
+      }
     } else if (target instanceof HTMLElement && target.closest(".unit-button, .outline-button") !== null
       && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
@@ -2716,7 +2792,7 @@ export class DocViewKitViewerElement extends HTMLElement {
       this.#prepareSheetTiles(this.#document!, unit, {
         unitIndex: unit.index, viewport: this.#sheetRenderViewport(unit, rendered.scale),
         scale: rendered.scale, pixelRatio: Math.min(2, Math.max(1, devicePixelRatio || 1)),
-        background: "#ffffff", includeTextFragments: true,
+        colorScheme: this.#resolvedTheme, includeTextFragments: true,
         ...this.#watermarkRequest(), sheetSizes: this.#sheetSizeRequest(unit),
       });
       if (this.#sheetScrollRendering) return;
@@ -3404,7 +3480,7 @@ export class DocViewKitViewerElement extends HTMLElement {
         ...(viewport === undefined ? {} : { viewport }),
         scale,
         pixelRatio,
-        background: "#ffffff",
+        colorScheme: this.#resolvedTheme,
         includeTextFragments: true,
         ...this.#watermarkRequest(),
         ...(unit.type === "sheet" ? { sheetSizes: this.#sheetSizeRequest(unit) } : {}),
@@ -3868,7 +3944,7 @@ export class DocViewKitViewerElement extends HTMLElement {
         unitIndex,
         scale,
         pixelRatio: Math.min(2, Math.max(1, devicePixelRatio || 1)),
-        background: "#ffffff",
+        colorScheme: this.#resolvedTheme,
         includeTextFragments: true,
         ...this.#watermarkRequest(),
       }, { priority: "visible", supersedeKey: `viewer-continuous:${unitIndex}` });
@@ -4231,6 +4307,7 @@ export class DocViewKitViewerElement extends HTMLElement {
     const list = this.#element<HTMLElement>(".unit-list");
     const tabs = this.#element<HTMLElement>(".sheet-tabs");
     list.replaceChildren();
+    this.#collapsedOutline.clear();
     tabs.replaceChildren();
     this.#thumbnailObserver?.disconnect();
     this.#thumbnailObserver = undefined;
@@ -4291,7 +4368,9 @@ export class DocViewKitViewerElement extends HTMLElement {
       button.setAttribute("aria-selected", String(this.#navigationMode === mode));
       button.tabIndex = this.#navigationMode === mode ? 0 : -1;
     }
-    this.#element<HTMLElement>(".unit-list").dataset.navigationMode = this.#navigationMode;
+    const list = this.#element<HTMLElement>(".unit-list");
+    list.dataset.navigationMode = this.#navigationMode;
+    list.setAttribute("role", this.#navigationMode === "outline" ? "tree" : "listbox");
     if (this.#navigationMode === "outline") this.#renderOutline();
     else this.#renderNavigationWindow(this.#unitIndex, true);
   }
@@ -4300,24 +4379,63 @@ export class DocViewKitViewerElement extends HTMLElement {
     this.#thumbnailObserver?.disconnect();
     const list = this.#element<HTMLElement>(".unit-list");
     const fragment = document.createDocumentFragment();
-    for (const [index, item] of (this.#info?.outline ?? []).entries()) {
+    const outline = this.#info?.outline ?? [];
+    const ancestors: number[] = [];
+    const siblings = new Map<number, HTMLElement[]>();
+    for (const [index, item] of outline.entries()) {
+      while (ancestors.length > 0 && outline[ancestors[ancestors.length - 1]!]!.level >= item.level) ancestors.pop();
+      const parent = ancestors[ancestors.length - 1] ?? -1;
       const button = document.createElement("button");
       button.type = "button";
       button.className = "outline-button";
       button.dataset.unitIndex = String(item.unitIndex);
       button.dataset.outlineIndex = String(index);
-      button.setAttribute("role", "option");
+      button.dataset.outlineParent = String(parent);
+      button.setAttribute("role", "treeitem");
+      button.setAttribute("aria-level", String(ancestors.length + 1));
+      if ((outline[index + 1]?.level ?? -1) > item.level) {
+        button.setAttribute("aria-expanded", String(!this.#collapsedOutline.has(index)));
+      }
       button.style.setProperty("--dv-outline-level", String(item.level));
       button.textContent = item.title;
       button.title = item.title;
-      button.addEventListener("click", () => {
+      const toggle = document.createElement("span");
+      toggle.className = "outline-toggle";
+      toggle.ariaHidden = "true";
+      button.prepend(toggle);
+      button.addEventListener("click", (event) => {
+        if (event.target === toggle && button.hasAttribute("aria-expanded")) {
+          this.#toggleOutline(button);
+          return;
+        }
         this.#outlineSelection = index;
-        this.#updateNavigationSelection();
         void this.#selectUnit(item.unitIndex);
+        this.#updateNavigationSelection();
       });
       fragment.append(button);
+      const group = siblings.get(parent) ?? [];
+      group.push(button);
+      siblings.set(parent, group);
+      ancestors.push(index);
+    }
+    for (const group of siblings.values()) {
+      group.forEach((button, index) => {
+        button.setAttribute("aria-posinset", String(index + 1));
+        button.setAttribute("aria-setsize", String(group.length));
+      });
     }
     list.replaceChildren(fragment);
+  }
+
+  #toggleOutline(button: HTMLElement): void {
+    const focused = this.#root.activeElement;
+    const index = Number(button.dataset.outlineIndex);
+    const expanded = button.getAttribute("aria-expanded") === "true";
+    if (expanded) this.#collapsedOutline.add(index);
+    else this.#collapsedOutline.delete(index);
+    button.setAttribute("aria-expanded", String(!expanded));
+    this.#updateNavigationSelection();
+    if (focused instanceof HTMLElement && focused.hidden) button.focus({ preventScroll: true });
   }
 
   #renderNavigationWindow(center: number, force = false): void {
@@ -4407,15 +4525,15 @@ export class DocViewKitViewerElement extends HTMLElement {
     if (this.#thumbnailRequests.has(unitIndex)) return;
     const controller = new AbortController();
     this.#thumbnailRequests.set(unitIndex, controller);
-    const scale = Math.min(.22, 120 / Math.max(1, unit.width), 96 / Math.max(1, unit.height));
+    const scale = Math.min(MAX_NAVIGATION_WIDTH / Math.max(1, unit.width), 96 / Math.max(1, unit.height));
     let frame: RenderResult | undefined;
     let retry = false;
     try {
       frame = await document.render({
         unitIndex,
         scale,
-        pixelRatio: 1,
-        background: "#ffffff",
+        pixelRatio: Math.min(2, Math.max(1, devicePixelRatio || 1)),
+        colorScheme: this.#resolvedTheme,
         ...this.#watermarkRequest(),
       }, {
         priority: "prefetch",
@@ -4449,7 +4567,8 @@ export class DocViewKitViewerElement extends HTMLElement {
     if (canvas.dataset.rendered === "true") return true;
     const context = canvas.getContext("2d");
     if (context === null) return false;
-    const scale = Math.min(.22, 120 / Math.max(1, unit.width), 96 / Math.max(1, unit.height));
+    const scale = Math.min(MAX_NAVIGATION_WIDTH / Math.max(1, unit.width), 96 / Math.max(1, unit.height))
+      * Math.min(2, Math.max(1, devicePixelRatio || 1));
     canvas.width = Math.max(1, Math.ceil(viewport.width * scale));
     canvas.height = Math.max(1, Math.ceil(viewport.height * scale));
     context.imageSmoothingQuality = "high";
@@ -4524,18 +4643,25 @@ export class DocViewKitViewerElement extends HTMLElement {
       if (current) this.#revealNavigationButton(button);
     });
     const outlineButtons = Array.from(this.#root.querySelectorAll<HTMLElement>(".outline-button"));
+    for (const button of outlineButtons) {
+      const parent = outlineButtons[Number(button.dataset.outlineParent)];
+      button.hidden = parent?.hidden === true || parent?.getAttribute("aria-expanded") === "false";
+      button.inert = button.hidden;
+    }
     const retainedOutline = outlineButtons[this.#outlineSelection];
-    if (Number(retainedOutline?.dataset.unitIndex) !== this.#unitIndex) {
+    if (outlineButtons.length > 0 && Number(retainedOutline?.dataset.unitIndex) !== this.#unitIndex) {
       this.#outlineSelection = outlineButtons.findIndex(
         (button) => Number(button.dataset.unitIndex) === this.#unitIndex,
       );
     }
+    let tabStop = outlineButtons[this.#outlineSelection] ?? outlineButtons[0];
+    while (tabStop?.hidden) tabStop = outlineButtons[Number(tabStop.dataset.outlineParent)];
     outlineButtons.forEach((button, index) => {
       const current = index === this.#outlineSelection;
       button.setAttribute("aria-current", current ? "page" : "false");
       button.setAttribute("aria-selected", String(current));
-      button.tabIndex = current ? 0 : -1;
-      if (current) this.#revealNavigationButton(button);
+      button.tabIndex = button === tabStop ? 0 : -1;
+      if (current && !button.hidden) this.#revealNavigationButton(button);
     });
     this.#root.querySelectorAll<HTMLElement>(".sheet-tab").forEach((tab) => {
       const current = Number(tab.dataset.unitIndex) === this.#unitIndex;
@@ -4548,7 +4674,7 @@ export class DocViewKitViewerElement extends HTMLElement {
 
   #stepNavigationUnit(direction: -1 | 1): void {
     if (this.#navigationMode === "outline") {
-      const items = Array.from(this.#root.querySelectorAll<HTMLElement>(".outline-button"));
+      const items = Array.from(this.#root.querySelectorAll<HTMLElement>(".outline-button:not([hidden])"));
       const current = items.findIndex((item) => item === this.#root.activeElement);
       const next = items[Math.min(items.length - 1, Math.max(0, current + direction))];
       if (next === undefined) return;

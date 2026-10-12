@@ -21,6 +21,7 @@ import {
 import type {
   Diagnostic,
   DocumentFontRun,
+  DocumentFormat,
   Rect,
   RenderRequest,
   RenderResult,
@@ -31,7 +32,7 @@ import type {
   UnitDescriptor,
   Viewport,
 } from "./types.js";
-import { OfficeEngineError } from "./types.js";
+import { OfficeEngineError, supportsReadingColors } from "./types.js";
 import { identifyImage, reducedJpeg2000Dimensions } from "./image.js";
 import { decodeOfficeImage, type DecodedOfficeImage } from "./image-codec-client.js";
 import type { OfficeImageCodecFont } from "./image-codecs.js";
@@ -378,6 +379,7 @@ function drawSheetGridLines(
   viewport: Viewport,
   rows: SheetAxisMapper,
   columns: SheetAxisMapper,
+  dark = false,
 ): void {
   if (!unit.showGridLines) return;
   const left = Math.max(0, viewport.x);
@@ -395,7 +397,7 @@ function drawSheetGridLines(
   const snapY = (value: number): number => transform.d > 0
     ? (Math.round(value * transform.d + transform.f) - transform.f) / transform.d
     : value;
-  context.fillStyle = color(0xd0d0_d0ff);
+  context.fillStyle = color(dark ? 0x4247_50ff : 0xd0d0_d0ff);
 
   let firstColumn = columns.indexAt(left);
   if (columns.offset(firstColumn) < left) firstColumn += 1;
@@ -659,6 +661,13 @@ function nestedVectorRasterTarget(
     width: Math.hypot(transform.a, transform.b) * bounds.width,
     height: Math.hypot(transform.c, transform.d) * bounds.height,
   }, 1, maxPixels, crop);
+}
+
+function readingBackdrop(visual: SceneVisual): ScenePaint | undefined {
+  if (visual.kind === "image") return { kind: "none" };
+  if (!("fill" in visual)) return undefined;
+  const fill = typeof visual.fill === "number" ? { kind: "solid" as const, color: visual.fill } : visual.fill;
+  return fill.kind === "none" || fill.kind === "solid" && (fill.color & 255) === 0 ? undefined : fill;
 }
 
 function color(value: number): string {
@@ -6001,6 +6010,7 @@ function drawText(
   textEffects?: readonly SceneTextEffect[],
   collectTextFragment?: TextFragmentCollector,
   paintStyles?: ReadonlyMap<ScenePaint, string | CanvasGradient | CanvasPattern>,
+  automaticTextColor?: number,
 ): void {
   let sourceOffset = 0;
   const sourceRuns = visualTextRuns(object, visual).map((run, index) => {
@@ -6410,7 +6420,9 @@ function drawText(
       }
       return paintStyles?.get(paint) ?? paintStyle(context, object, paint);
     };
-    const runFillStyle = glyphPaint === undefined ? color(placement.style.color)
+    const runColor = automaticTextColor !== undefined && glyphPaint === undefined
+      && (placement.style.highlight & 255) === 0 ? automaticTextColor : placement.style.color;
+    const runFillStyle = glyphPaint === undefined ? color(runColor)
       : glyphPaint.kind === "none" ? "rgba(0,0,0,0)"
         : (effect?.fillToText ? glyphStyle(glyphPaint) : paintStyles?.get(glyphPaint) ?? paintStyle(context, object, glyphPaint))
           ?? color(placement.style.color);
@@ -6595,7 +6607,7 @@ function drawText(
       paintRunGlyphs(placement.text, runX, textY);
     }
     if (placement.width > 0 && (placement.style.underline || placement.style.strikethrough)) {
-      context.strokeStyle = color(placement.style.color);
+      context.strokeStyle = color(runColor);
       context.lineWidth = Math.max(1, placement.style.fontSize * layout.scale / 48);
       const decoration = (decorationY: number): void => {
         context.beginPath();
@@ -6689,6 +6701,7 @@ export class SceneRenderer {
   readonly #objectsByUnit = new Map<number, readonly SceneObject[]>();
   readonly #preparedUnits = new Map<number, PreparedSceneUnit>();
   readonly #limits: ResourceLimits;
+  readonly #format: DocumentFormat | undefined;
   #imageFonts: readonly OfficeImageCodecFont[];
   #fonts: RuntimeFontSet | RuntimeFontResolver | undefined;
   readonly #images = new Map<string, CachedSceneImage>();
@@ -6725,6 +6738,7 @@ export class SceneRenderer {
     limits: ResourceLimits,
     fonts?: RuntimeFontSet | RuntimeFontResolver,
     imageFonts: readonly OfficeImageCodecFont[] = [],
+    format?: DocumentFormat,
   ) {
     const objectsByUnit = new Map<number, SceneObject[]>();
     for (const object of objects) {
@@ -6736,6 +6750,7 @@ export class SceneRenderer {
       this.#objectsByUnit.set(unitIndex, unitObjects);
     }
     this.#limits = limits;
+    this.#format = format ?? objects[0]?.source.format;
     this.#fonts = fonts;
     this.#imageFonts = imageFonts;
   }
@@ -6837,6 +6852,9 @@ export class SceneRenderer {
       && typeof request.includeTextFragments !== "boolean") {
       throw new OfficeEngineError("INVALID_RENDER_REQUEST", "includeTextFragments must be a boolean");
     }
+    if (request.colorScheme !== undefined && request.colorScheme !== "light" && request.colorScheme !== "dark") {
+      throw new OfficeEngineError("INVALID_RENDER_REQUEST", "colorScheme must be light or dark");
+    }
     const watermark = request.watermark?.trim();
     const viewport = request.viewport ?? {
       x: 0,
@@ -6857,6 +6875,9 @@ export class SceneRenderer {
       );
     }
     const unitObjects = this.#objectsByUnit.get(unit.index);
+    // Binary Office and fixed layouts retain their colors until automatic-color provenance is available.
+    const dark = request.colorScheme === "dark" && this.#format !== undefined && supportsReadingColors(this.#format);
+    const background = request.background ?? (dark ? "#1a1a1a" : "#ffffff");
     const pdfPage = unitObjects?.some(({ source }) => source.format === "pdf") === true;
     const pdfUnit = pdfPage && unitObjects?.some(({ source, visual }) => (
       source.format === "pdf" && visualNeedsLowResolutionSupersampling(visual)
@@ -6896,7 +6917,8 @@ export class SceneRenderer {
       viewport.height,
       scale,
       pixelRatio,
-      request.background ?? "#ffffff",
+      background,
+      dark,
       watermark ?? "",
       request.includeTextFragments === true,
       unit.type === "sheet" ? sheetSizeCacheKey(request) : "",
@@ -6944,6 +6966,24 @@ export class SceneRenderer {
       });
     }
     visibleObjects.sort(({ object: left }, { object: right }) => comparePaintOrder(left, right));
+    const backdrops: { bounds: Rect; paint: ScenePaint }[] = [];
+    const readingInk = (object: SceneObject, visual: SceneVisual): number | undefined => {
+      if (!dark || !supportsReadingColors(object.source.format)
+        || (object.type !== "paragraph" && object.type !== "cell")) return undefined;
+      let paint = readingBackdrop(visual);
+      if (paint === undefined && object.type !== "cell") {
+        // shortcut: overlapping complex backdrops retain original ink; resolve per-glyph backdrop coverage when needed.
+        for (let index = backdrops.length - 1; index >= 0; index--) {
+          const entry = backdrops[index]!;
+          if (intersects(entry.bounds, object.bounds)) { paint = entry.paint; break; }
+        }
+      }
+      if (paint !== undefined && (paint.kind !== "solid" || (paint.color & 255) !== 255)) return undefined;
+      if (paint === undefined && request.background !== undefined) return undefined;
+      const rgb = paint?.kind === "solid" ? paint.color : 0x1a1a_1aff;
+      const luminance = ((rgb >>> 24) * .2126 + ((rgb >>> 16) & 255) * .7152 + ((rgb >>> 8) & 255) * .0722);
+      return luminance < 128 ? 0xe2e5_e9ff : undefined;
+    };
     const media = visibleObjects.flatMap(({ object, state }) => state.media === undefined ? [] : [{
       objectId: object.id,
       kind: state.media.mediaKind,
@@ -6982,7 +7022,7 @@ export class SceneRenderer {
       let gridPending = unit.type === "sheet";
       const drawPendingGrid = () => {
         if (gridPending && unit.type === "sheet" && sheetAxes !== undefined) {
-          drawSheetGridLines(context, unit, viewport, sheetAxes.rows, sheetAxes.columns);
+          drawSheetGridLines(context, unit, viewport, sheetAxes.rows, sheetAxes.columns, dark);
         }
         gridPending = false;
       };
@@ -7023,7 +7063,21 @@ export class SceneRenderer {
           await yieldRenderTurn();
         }
         assertActive();
-        const { visual } = state;
+        let { visual } = state;
+        const automaticTextColor = readingInk(object, visual);
+        if (dark && object.type === "cell" && (visual.kind === "text" || visual.kind === "rich-text")) {
+          // These adapters emit this stroke only for their default grid, never for authored borders.
+          if (object.source.format === "xlsx" && visual.kind === "text" && visual.stroke === 0xd0d0_d0ff) {
+            visual = { ...visual, stroke: 0x4247_50ff };
+          } else if (object.source.format === "xlsx" && visual.kind === "rich-text"
+            && visual.stroke.kind === "solid" && visual.stroke.color === 0xd0d0_d0ff) {
+            visual = { ...visual, stroke: { kind: "solid", color: 0x4247_50ff } };
+          }
+        }
+        if (dark && object.type !== "cell") {
+          const paint = readingBackdrop(visual);
+          if (paint !== undefined) backdrops.push({ bounds: transformedBounds(object, state.transform), paint });
+        }
         if (visual.kind === "none") continue;
         const batch = batchablePdfPath({ object, state });
         if (batch !== undefined) {
@@ -7360,6 +7414,7 @@ export class SceneRenderer {
               state.textEffects,
               collectTextFragment,
               glyphPaintStyles,
+              automaticTextColor,
             );
             if (advancedEffects.some(({ threeD }) => threeD !== undefined)) {
               drawWithAdvancedEffects(context, object, advancedEffects, drawShape, "full", prepareAdvancedSurface);
@@ -7526,7 +7581,7 @@ export class SceneRenderer {
       try {
         context.globalAlpha = 1;
         context.globalCompositeOperation = "destination-over";
-        context.fillStyle = request.background ?? "#ffffff";
+        context.fillStyle = background;
         context.fillRect(
           viewport.x,
           viewport.y,

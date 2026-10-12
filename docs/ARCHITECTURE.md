@@ -210,7 +210,7 @@ For compatibility, the former `textSelection` and `objectSelection` feature flag
 
 Legacy `license` options and `evaluateLicense()` remain as deprecated compatibility APIs and no longer restrict capabilities.
 
-The toolbar theme button cycles through system, light, and dark modes. It updates the `theme` attribute, which takes precedence over `config.theme`; remove the attribute to return control to the host configuration. The dark theme changes only Viewer chrome and workspace colors. Rendered document surfaces remain white and retain authored colors rather than being inverted.
+The toolbar theme button cycles through system, light, and dark modes. It updates the `theme` attribute, which takes precedence over `config.theme`; remove the attribute to return control to the host configuration. Display requests pass `colorScheme` to the shared renderer. DOCX, ODT, RTF, XLSX, ODS and plain text adapt default paper, automatic ink and sheet grid lines; authored glyph paints, fills, highlights, images and chart objects retain their colors. Automatic ink on an authored light background stays dark. Adapters retain explicit text colors as glyph paints and distinguish an absent cell fill from an authored white fill. Single pages, continuous pages, sheet tiles and thumbnails share this policy and invalidate their display caches when the theme changes. Presentations and fixed layouts keep original content colors, as do binary Office formats whose automatic-color provenance is not available. Default Engine requests and the Viewer print action retain original colors.
 
 Viewport-driven hosts can pass `{ priority: "interactive", supersedeKey: "surface", signal }`
 as the second `render()` argument. Worker execution runs one prioritized render queue, drops

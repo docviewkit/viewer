@@ -98,7 +98,7 @@
 - 适配边界：将两个真实文件的原始 ChartML 放入现有 PPTX/XLSX 容器，验证三宿主均输出单位和父子标签。这些是派生容器，不伪称新的独立真实来源。
 - 条件格式使用已有 IronCalc matcher，只新增只读匹配结果出口。计算 ABI 升为 3，Core 与 calc Wasm 必须同步发布。常量 cellIs 不触发可选计算模块加载。
 - 缺计算模块、超规则单元格预算或未覆盖的规则保留其他内容，输出 UnsupportedFeature 诊断。1904 日期系统的 timePeriod 和未附公式的周区间规则保留诊断，不静默套用计算引擎的 1900/Monday 语义；不声明完整 CF 支持。
-- 共同布局与匹配回归：`cargo test --lib`、`cargo test --no-default-features --features calculation-service --lib`；适配/渲染回归：`node --test tests/spreadsheet.test.mjs`；真实 Viewer：`node scripts/run-ooxml-display-regression.mjs`，可用 `BROWSER=chromium|firefox|webkit` 分别运行。
+- 共同布局与匹配回归：`cargo test --lib`、`cargo test --no-default-features --features calculation-service --lib`；适配/渲染回归：`node --test tests/spreadsheet.test.mjs`；真实 Viewer：`node scripts/run-ooxml-display-regression.mjs`，可用 `BROWSER=chromium|webkit` 分别运行。
 
 真实输入均逐字节复制自 LibreOffice core commit `db5d24b4e0d0350125babbaf377d2ed7f043e161`，来源项目许可证适用；无 Office 预览图片兜底。
 
@@ -189,7 +189,7 @@ Firefox 本批再次在浏览器启动阶段超过 90 秒，未进入 Viewer 断
 - 快照协议为 75，计算 ABI 为 3；Core、计算模块与 JavaScript 必须作为同一版本发布。公开声明新增打印标题/分页/分片和文字描边、发光属性，已对照 v0.2.71 包复核后更新 API 摘要。
 - 最终 macOS 优化 Core 为 3,771,967 字节，calc 为 2,030,982 字节。Core 预算由早期批次的 3,630,000 调整为 3,800,000 字节，包含后续上述几何与样式实现，并留不到 1% 的 Linux 代码生成余量；calc 仍限 2,040,000。完整 SDK 压缩 8,006,869 字节、解包 21,686,842 字节，保持原发布包预算，未新增依赖或随包字体。
 - `Text_withExtrusion_200chars.pptx` 原样来自 Microsoft Open XML SDK v3.5.1 官方语料。逐层整页分配预算在优化前失败，优化后通过；Chromium 的 960×720 绘制三次中位数约 537→303 ms、2× 约 2145→1173 ms，累计画布分配减少约 89%。原文件在 Chromium/WebKit 的 1×、2× 和缩放局部视口均与优化前像素一致。无 Canvas 滤镜的实现保持原路径，不宣称获得相同提速。
-- 本机 Chromium/WebKit 完成真实 Viewer、两页打印、图片变换、笔迹、文字效果、SmartArt 和 20 页图表回归；本机 Firefox 启动受阻，其最终结果以 Linux 三浏览器 CI 为准。缺少已审核的 Office/iWork/WPS 原生验收清单，发布仍标记 `not-certified`，不把浏览器回归当作 Office 原生保真度认证。
+- 本机 Chromium/WebKit 完成真实 Viewer、两页打印、图片变换、笔迹、文字效果、SmartArt 和 20 页图表回归；本机 Firefox 启动受阻。当前自动化矩阵仅运行 Chromium/WebKit。缺少已审核的 Office/iWork/WPS 原生验收清单，发布仍标记 `not-certified`，不把浏览器回归当作 Office 原生保真度认证。
 
 发布前将 8 个变化摘要与 v0.2.71 正式 npm 包逐对象核对：`chart-original.docx` 新增 14 条表格边框并扩大线图图例键；`complex2005_12rtm.docx` 新增 126 条边框、29 处作者 caps 标题和两张图片的裁剪/3D 效果，图片字节不变；`corpus-stacked-mix.pptx` 图例采用作者 24px 字号；三个 XLSX 图表样本恢复保存的 14.25/15pt 默认行高，连带锚定图表几何，空标题样本图例采用黑色；`background-worksheet.xlsx` 恢复 13.5pt 行高及 SmartArt 阴影，保留计算模块需求诊断；`piechart_outside.xls` 调整外侧标签度量与短引导线，全部标签文字保持不变。只有这些已解释的摘要更新，其他原有摘要继续严格逐字节检查。打印与辉光的旧测试分别改为断言实际片段视口和 Canvas 阴影，真实浏览器回归同时保留。
 
@@ -215,3 +215,18 @@ Linux 发布门禁还覆盖了两个真实 DOC 选择问题：压缩开标点的
 八个场景在未更新基线时失败，更新后通过。此复核证明上述摘要变化的来源，不代表完整 Office 原生像素认证；缺少审核后的 native release manifests 时仍标记为 `not-certified`。
 
 共享字体名称协议元数据及格式化后的源码位置使 PDF pack 从公开 v0.2.74 的 3,139,335 字节变为 3,140,235 字节，增加 900 字节，未新增或修改字体二进制。原 3,140,000 字节门禁超出 235 字节；预算仅增加 1,000 字节到 3,141,000，其余字体、Core 与 calc 预算维持原约束。
+
+## 16. v0.2.77 发布前场景差异复核（2026-10-12）
+
+全量测试发现 7 个场景哈希变化。使用 npm `0.2.76` 的原始 Wasm 与候选版逐字段比较初始场景、每次 `loadUnit()` 和 `loadAll()`；7 个旧版哈希均与原有基准相同。差异范围如下，未发现额外的对象几何、正文、媒体或诊断变化：
+
+- `chart-original.docx`、`complex2005_12rtm.docx`：显式文字颜色新增同色 `TextRun.paint`，使深色阅读能区分自动颜色与作者颜色。
+- `chart-empty-title-original.xlsx`、`sunburst.xlsx`、`color_funnel.xlsx`：无填充单元格由隐式白色改为透明；作者指定的填充保持原值。
+- `background-worksheet.xlsx`：同样保留无填充语义；显式文字样式改由富文本 run 携带同色 paint，原字体、字号、粗斜体和颜色保留。
+- `toolkit-basic-sheet.ods`：无填充改为透明；移除逐单元格重复的默认网格描边，由共享工作表网格绘制负责，作者边框保持独立。
+
+据此更新这 7 个精确场景哈希，其余基准保持不变。真实图表标签越轴与显式文字颜色用例在旧引擎失败、候选引擎通过；Chromium/WebKit 已验证颜色、打印原色、工作表网格、原始图像/幻灯片/PDF 及旋转标签边界。
+
+核心 Wasm 从 npm `0.2.76` 的 3,802,963 字节增至 3,807,602 字节，增加 4,639 字节（约 0.12%），来自自动颜色来源保留和共享旋转图表标签布局。体积门槛调整为 3,810,000 字节，未新增依赖或字体，字体预算及哈希保持不变。
+
+补跑 CBAM 外部 Excel 对照用例时发现测试仍以 `None` 调用解析器，未接入已拆分的计算结果。用例现在在 `calculation-service` 配置下计算后传入现有解析接口，保留原有完整工作簿、首表、区域及逐表的 Excel 文本断言。接入后又定位到计算入口未解码表名及关系 ID 的 XML 实体，导致真实 `C_Emissions&Energy`、`b_Guidelines&Conditions` 跨表引用出现 `#NAME?`。入口现在复用现有 `decode_xml_text`，并用公开 API 的最小派生用例覆盖命名/数字实体及关系匹配；完整工作簿继续逐格对照 Excel 基准。

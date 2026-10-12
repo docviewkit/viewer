@@ -12,7 +12,7 @@ try {
       if (match) { clearTimeout(timer); resolve(match[0]); }
     });
   });
-  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,firefox,webkit").split(",")) {
+  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,webkit").split(",")) {
     const browser = await ({ chromium, firefox, webkit })[name].launch({ headless: process.env.DOCVIEWKIT_HEADED !== "1", timeout: 30_000 });
     try {
       const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });

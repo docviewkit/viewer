@@ -151,7 +151,8 @@ fn prepare_impl(
     if !package.has_part(&sequence_part)
         && super::find_xps_sequence(&package, Some(&mut diagnostics))?.is_none()
     {
-        if let Some(part) = unique_fixed_document(&package, &sequence_part, &mut diagnostics)? {
+        if let Some(part) = unique_fixed_document(&package, &sequence_part, None, &mut diagnostics)?
+        {
             diagnostics.push(Diagnostic::warning(DiagnosticCode::FormatInvalid, Phase::Parse,
                 Fidelity::Approximate, format!("recovered missing XPS sequence {sequence_part} through the unique FixedDocument {part}")).in_part(&sequence_part));
             sequence_part = part;
@@ -177,11 +178,15 @@ fn prepare_impl(
 fn unique_fixed_document(
     package: &Package<'_>,
     source: &str,
+    prefix: Option<&str>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<Option<String>, Diagnostic> {
     let types = super::parse_content_types_with_diagnostics(package, Some(diagnostics))?;
     let mut parts = package.entry_names().filter(|part| {
-        matches!(
+        prefix.is_none_or(|prefix| {
+            part.strip_prefix(prefix)
+                .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+        }) && matches!(
             types.for_part(part),
             Some(
                 "application/vnd.ms-package.xps-fixeddocument+xml"
@@ -189,14 +194,31 @@ fn unique_fixed_document(
             )
         )
     });
-    let part = parts.next().map(str::to_owned);
-    if parts.next().is_some() {
-        return Err(format_error(
-            source,
-            "incomplete XPS sequence has multiple candidate FixedDocuments",
-        ));
+    let Some(part) = parts.next() else {
+        return Ok(None);
+    };
+    for candidate in parts {
+        // Identical bytes resolve identically only with the same relative URI base.
+        if part.rsplit_once('/').map(|(dir, _)| dir)
+            != candidate.rsplit_once('/').map(|(dir, _)| dir)
+            || *package.required_part(part)? != *package.required_part(candidate)?
+        {
+            return Err(format_error(
+                source,
+                "incomplete XPS sequence has multiple candidate FixedDocuments",
+            ));
+        }
+        diagnostics.push(
+            Diagnostic::warning(
+                DiagnosticCode::FormatInvalid,
+                Phase::Parse,
+                Fidelity::Approximate,
+                format!("recovered equivalent FixedDocuments {part} and {candidate}"),
+            )
+            .in_part(source),
+        );
     }
-    Ok(part)
+    Ok(Some(part.to_owned()))
 }
 
 fn collect_page_parts(
@@ -230,6 +252,12 @@ fn collect_page_parts(
         );
         document_parts.push(sequence_part.to_owned());
     }
+    let single_reference = sequence
+        .children
+        .iter()
+        .filter(|node| node.local_name() == "DocumentReference")
+        .count()
+        == 1;
     for reference in &sequence.children {
         if reference.local_name() != "DocumentReference" {
             continue;
@@ -239,23 +267,40 @@ fn collect_page_parts(
             Ok(target) => target,
             Err(error) => {
                 // Some producers put literal URI delimiters in ZIP member names.
-                // Only an exact, archive-validated absolute member is recoverable.
-                let Some(literal) = source
+                // Literal recovery requires an exact, archive-validated absolute member.
+                let literal = source
                     .strip_prefix('/')
-                    .filter(|part| package.entry_names().any(|name| name == *part))
-                else {
-                    return Err(error);
+                    .filter(|part| package.entry_names().any(|name| name == *part));
+                let (target, message) = if let Some(literal) = literal {
+                    (
+                        literal.to_owned(),
+                        format!("recovered literal XPS part name {source}"),
+                    )
+                } else {
+                    if !single_reference {
+                        return Err(error);
+                    }
+                    let Some(part) =
+                        unique_fixed_document(package, sequence_part, None, diagnostics)?
+                    else {
+                        return Err(error);
+                    };
+                    let message = format!(
+                        "ignored invalid XPS DocumentReference {source} ({}) and recovered {part}",
+                        error.message
+                    );
+                    (part, message)
                 };
                 diagnostics.push(
                     Diagnostic::warning(
                         DiagnosticCode::FormatInvalid,
                         Phase::Parse,
                         Fidelity::Approximate,
-                        format!("recovered literal XPS part name {source}"),
+                        message,
                     )
                     .in_part(sequence_part),
                 );
-                literal.to_owned()
+                target
             }
         };
         if source.ends_with('/') && package.part(&target)?.is_some() {
@@ -271,29 +316,17 @@ fn collect_page_parts(
         }
         if (source.ends_with('/') || source.ends_with("/.")) && package.part(&target)?.is_none() {
             let prefix = format!("{target}/");
-            let content_types =
-                super::parse_content_types_with_diagnostics(package, Some(diagnostics))?;
-            let mut candidates = package.entry_names().filter(|part| {
-                part.strip_prefix(&prefix)
-                    .is_some_and(|name| !name.is_empty() && !name.contains('/'))
-                    && content_types.for_part(part).is_some_and(|kind| {
-                        kind == "application/vnd.ms-package.xps-fixeddocument+xml"
-                            || kind == "application/oxps-fixeddocument+xml"
-                    })
-            });
-            let candidate = candidates.next().ok_or_else(|| {
+            let mut candidate =
+                unique_fixed_document(package, sequence_part, Some(&prefix), diagnostics)?;
+            if candidate.is_none() && single_reference {
+                candidate = unique_fixed_document(package, sequence_part, None, diagnostics)?;
+            }
+            target = candidate.ok_or_else(|| {
                 format_error(
                     sequence_part,
                     format!("XPS directory reference {source} contains no FixedDocument"),
                 )
             })?;
-            if candidates.next().is_some() {
-                return Err(format_error(
-                    sequence_part,
-                    format!("XPS directory reference {source} contains multiple FixedDocuments"),
-                ));
-            }
-            target = candidate.to_owned();
             diagnostics.push(
                 Diagnostic::warning(
                     DiagnosticCode::FormatInvalid,
@@ -307,7 +340,7 @@ fn collect_page_parts(
         document_parts.push(target);
     }
     if document_parts.is_empty()
-        && let Some(part) = unique_fixed_document(package, sequence_part, diagnostics)?
+        && let Some(part) = unique_fixed_document(package, sequence_part, None, diagnostics)?
     {
         diagnostics.push(Diagnostic::warning(DiagnosticCode::FormatInvalid, Phase::Parse,
             Fidelity::Approximate, format!("recovered missing XPS DocumentReference through the unique FixedDocument {part}")).in_part(sequence_part));
@@ -4009,6 +4042,44 @@ mod tests {
                 crate::diagnostic::DiagnosticCode::XmlDtdForbidden
             );
         }
+    }
+
+    #[test]
+    fn supplied_directory_references_recover_the_real_page() {
+        for name in ["control", "traversal", "none", "ambiguous"] {
+            let bytes = std::fs::read(format!(
+                "{}/tests/fixtures/xps-directory-reference/{name}.xps",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            let prepared = super::prepare(&bytes, crate::limits::Limits::default())
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"))
+                .unwrap();
+            assert_eq!(prepared.page_parts, ["Documents/1/Pages/1.fpage"], "{name}");
+            let (document, _) = prepared
+                .materialize(Some(0), &std::collections::HashSet::new())
+                .unwrap();
+            assert_eq!(document.units.len(), 1, "{name}");
+            let text: String = document
+                .objects
+                .iter()
+                .filter_map(|o| o.text.as_deref())
+                .collect();
+            assert_eq!(text.trim(), "This is a test", "{name}");
+            if name != "control" {
+                assert!(
+                    document
+                        .diagnostics
+                        .iter()
+                        .any(|d| d.severity == crate::diagnostic::Severity::Warning
+                            && d.location.part.as_deref() == Some("FixedDocSeq.fdseq")),
+                    "{name}"
+                );
+            }
+            crate::protocol::encode(&document).unwrap();
+        }
+        assert!(super::resolve_part("FixedDocSeq.fdseq", "../../Documents/1/").is_err());
+        assert!(super::resolve_part("FixedDocSeq.fdseq", "/%2e%2e/secret").is_err());
     }
 
     #[test]

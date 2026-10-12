@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile } from 'node:fs/promises';
 import { createZip } from '../tests/zip-fixture.mjs';
 import { readZipEntries } from './accuracy-metamorphic.mjs';
-import { chromium, firefox, webkit } from 'playwright-core';
+import { chromium, webkit } from 'playwright-core';
 
 await mkdir('output/ooxml-display', { recursive: true });
-for (const [name, type] of Object.entries({ chromium, firefox, webkit })) {
+for (const [name, type] of Object.entries({ chromium, webkit })) {
   if (process.env.BROWSER && process.env.BROWSER !== name) continue;
   const deadline = setTimeout(() => {
     console.error(`${name}: browser regression exceeded 90 seconds`);

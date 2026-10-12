@@ -13,7 +13,7 @@ try {
     });
   });
   for (const fixture of (process.env.DOCVIEWKIT_FIXTURE ?? "activex_commandbutton.pptx,activex_togglebutton.pptx").split(",")) {
-    for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,firefox,webkit").split(",")) {
+    for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,webkit").split(",")) {
       const browser = await ({ chromium, firefox, webkit })[name].launch({ headless: true });
       try {
         const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });

@@ -1722,13 +1722,27 @@ fn push_spreadsheet_chart_axes(
                         height: axis_style.font_size * 1.5,
                     }
                 } else {
-                    Rect {
-                        x: position - width / 2.0,
-                        y: chart.category_baseline(series, index, plot) + 6.0,
-                        width,
-                        height: (bounds.y + bounds.height - if dense { 10.0 } else { 28.0 } - (plot.y + plot.height))
-                            .max(18.0),
-                    }
+                    chart_rotated_category_label_bounds(
+                        Rect {
+                            x: position - width / 2.0,
+                            y: chart.category_baseline(series, index, plot) + 6.0,
+                            width,
+                            height: (bounds.y + bounds.height
+                                - if dense { 10.0 } else { 28.0 }
+                                - (plot.y + plot.height))
+                                .max(18.0),
+                        },
+                        category,
+                        axis_style.font_size,
+                        if series.three_d {
+                            0.0
+                        } else {
+                            chart
+                                .horizontal_axis_options
+                                .label_rotation_degrees
+                                .unwrap_or(0.0)
+                        },
+                    )
                 },
                 category.clone(),
                 ChartTextStyle { color: chart.category_axis_options().label_color.unwrap_or(axis_style.color), ..axis_style },

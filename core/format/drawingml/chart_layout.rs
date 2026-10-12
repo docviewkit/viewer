@@ -1253,6 +1253,62 @@ impl Chart {
                 .fold(0.0_f32, f32::max) + 12.0;
             fallback.height = fallback.height.min((bounds.y + bounds.height - label_height - fallback.y).max(bounds.height * 0.3));
         }
+        if self.plot_bounds.is_none()
+            && self.axis_labels_visible(true)
+            && let Some(rotation) = self
+                .category_axis_options()
+                .label_rotation_degrees
+                .filter(|r| *r != 0.0)
+            && let Some(series) = self.series.first()
+            && !series.bar_horizontal
+            && !series.three_d
+            && matches!(
+                series.kind,
+                ChartKind::Bar | ChartKind::Line | ChartKind::Area
+            )
+        {
+            let font = self.axis_label_font_size(self.category_axis_options(), 12.0);
+            let (sin, cos) = rotation.to_radians().sin_cos();
+            let (label_height, label_overhang) = series
+                .categories
+                .iter()
+                .map(|text| {
+                    let label = chart_rotated_category_label_bounds(fallback, text, font, rotation);
+                    (
+                        label.width * sin.abs() + label.height * cos.abs(),
+                        label.width * cos.abs() + label.height * sin.abs() / 2.0,
+                    )
+                })
+                .fold((0.0_f32, 0.0_f32), |(h, w), (height, width)| {
+                    (h.max(height), w.max(width))
+                });
+            fallback.height = fallback
+                .height
+                .min((bounds.y + bounds.height - label_height - 16.0 - fallback.y).max(1.0));
+            let count = series.values.len().max(series.categories.len()).max(1);
+            let edge_slot = if !self.category_axis_options().is_date
+                && (count == 1
+                    || series.kind == ChartKind::Bar
+                    || self.value_axis_options.cross_between_categories)
+            {
+                0.5 / count as f32
+            } else {
+                0.0
+            };
+            let overflow = if rotation > 0.0 {
+                fallback.x + fallback.width * (1.0 - edge_slot) + label_overhang + 4.0
+                    - (bounds.x + bounds.width)
+            } else {
+                bounds.x + label_overhang + 4.0 - (fallback.x + fallback.width * edge_slot)
+            };
+            let shift = (overflow / (1.0 - edge_slot))
+                .max(0.0)
+                .min((fallback.width - 1.0).max(0.0));
+            if rotation < 0.0 {
+                fallback.x += shift;
+            }
+            fallback.width -= shift;
+        }
         if self.classic_defaults && self.plot_bounds.is_none() && bounds.height < 240.0 {
             if self.series.iter().all(|s| matches!(s.kind, ChartKind::Scatter | ChartKind::Bubble)) {
                 fallback.x = fallback.x.max(bounds.x + self.axis_label_font_size(&self.value_axis_options, 12.0) * 2.0);
@@ -2574,6 +2630,36 @@ pub(super) fn format_chart_value(value: f32, number_format: Option<&str>) -> Str
         super::group_decimal_digits(&format!("{value:.decimals$}"))
     } else {
         format_axis_value(value)
+    }
+}
+
+// Authored horizontal-axis rotations share this anchor in all OOXML hosts;
+// automatic rotation, vertical category axes and 3-D projections keep their own layout.
+pub(super) fn chart_rotated_category_label_bounds(
+    slot: Rect,
+    text: &str,
+    font_size: f32,
+    rotation: f32,
+) -> Rect {
+    if rotation == 0.0 {
+        return slot;
+    }
+    // shortcut: estimate advances until chart layout receives resolved font metrics.
+    let width = text
+        .lines()
+        .map(|line| {
+            line.chars()
+                .map(|c| drawingml_fallback_character_width(c, font_size))
+                .sum::<f32>()
+        })
+        .fold(0.0_f32, f32::max);
+    let height = font_size * 1.4 * text.lines().count().max(1) as f32 + 8.0;
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    Rect {
+        x: slot.x + slot.width / 2.0 + sin.signum() * cos * width / 2.0 - width / 2.0,
+        y: slot.y + (width * sin.abs() + height * cos.abs() - height) / 2.0,
+        width,
+        height,
     }
 }
 
