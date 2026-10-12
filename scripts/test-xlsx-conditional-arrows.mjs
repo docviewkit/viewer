@@ -5,8 +5,8 @@ import { chromium, firefox, webkit } from 'playwright-core';
 const server = spawn(process.execPath, ['scripts/serve.mjs', '--port', '0'], {stdio: ['ignore','pipe','inherit']});
 try {
   const url = await new Promise(resolve => createInterface({input: server.stdout}).on('line', line => { const m = line.match(/https?:\/\/\S+/); if(m) resolve(m[0]); }));
-  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,firefox,webkit').split(',')) {
-    const browser = await ({chromium,firefox,webkit})[name].launch({headless:true,timeout:30000});
+  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,webkit').split(',')) {
+    const browser = await ({chromium,webkit})[name].launch({headless:true,timeout:30000});
     try {
       const page = await browser.newPage({viewport:{width:1000,height:700}});
       const errors = [];

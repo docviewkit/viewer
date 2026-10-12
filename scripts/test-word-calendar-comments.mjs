@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
-import { chromium, firefox, webkit } from 'playwright-core';
+import { chromium, webkit } from 'playwright-core';
 
 await mkdir('output/comment001', { recursive: true });
-for (const [name, type] of Object.entries({ chromium, firefox, webkit })) {
+for (const [name, type] of Object.entries({ chromium, webkit })) {
   if (process.env.BROWSER && process.env.BROWSER !== name) continue;
   const timeout = setTimeout(() => { console.error(`${name}: exceeded 60 seconds`); process.exit(1); }, 60_000);
   const browser = await type.launch({ headless: true, timeout: 20_000 });

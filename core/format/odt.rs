@@ -41,6 +41,7 @@ struct OdtTextStyle {
     font_family: String,
     font_size: f32,
     color: u32,
+    automatic_color: bool,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -56,6 +57,7 @@ impl Default for OdtTextStyle {
             font_family: "Arial".to_owned(),
             font_size: FONT_SIZE,
             color: 0x0000_00ff,
+            automatic_color: true,
             bold: false,
             italic: false,
             underline: false,
@@ -73,6 +75,7 @@ struct OdtTextStyleOverrides {
     font_size: Option<f32>,
     font_size_scale: Option<f32>,
     color: Option<u32>,
+    automatic_color: Option<bool>,
     bold: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
@@ -95,6 +98,10 @@ impl OdtTextStyleOverrides {
         }
         if let Some(value) = self.color {
             style.color = value;
+            style.automatic_color = self.automatic_color.unwrap_or(false);
+        }
+        if let Some(automatic) = self.automatic_color {
+            style.automatic_color = automatic;
         }
         if let Some(value) = self.bold {
             style.bold = value;
@@ -2940,7 +2947,8 @@ fn push_master_stories(
             if runs.is_empty() && !text.is_empty() {
                 let text_style = &paragraph.style.text;
                 runs.push(TextRun {
-                    paint: None,
+                    paint: (!text_style.automatic_color)
+                        .then(|| Box::new(Paint::Solid(text_style.color))),
                     east_asian_line_breaks: true,
                     text: text.clone(),
                     font_family: text_style.font_family.clone(),
@@ -5382,7 +5390,17 @@ fn parse_style_catalog_xml(
                             let color = parse_odf_color(&color)
                                 .ok_or_else(|| format_error(part, "ODT text color is invalid"))?;
                             style.color = color;
+                            style.automatic_color = false;
                             overrides.color = Some(color);
+                        }
+                        if let Some(automatic) = super::odf_automatic_font_color(&attributes, part)?
+                        {
+                            style.automatic_color = automatic;
+                            overrides.automatic_color = Some(automatic);
+                            if automatic {
+                                style.color = 0x0000_00ff;
+                                overrides.color = Some(style.color);
+                            }
                         }
                         if let Some(weight) = optional_attribute(&attributes, "font-weight", part)?
                         {
@@ -7538,7 +7556,8 @@ fn push_paragraph_segment(
     }
     if paragraph.runs.is_empty() && !paragraph.text.is_empty() {
         paragraph.runs.push(TextRun {
-            paint: None,
+            paint: (!paragraph.style.text.automatic_color)
+                .then(|| Box::new(Paint::Solid(paragraph.style.text.color))),
             east_asian_line_breaks: true,
             text: paragraph.text.clone(),
             font_family: paragraph.style.text.font_family.clone(),
@@ -7911,7 +7930,7 @@ fn append_text_run(
         run.text.push_str(value);
     } else {
         runs.push(TextRun {
-            paint: None,
+            paint: (!style.automatic_color).then(|| Box::new(Paint::Solid(style.color))),
             east_asian_line_breaks: true,
             text: value.to_owned(),
             font_family: style.font_family.clone(),
@@ -7975,6 +7994,7 @@ fn same_text_run_style(run: &TextRun, style: &OdtTextStyle) -> bool {
     run.font_family == style.font_family
         && run.font_size == style.font_size
         && run.color == style.color
+        && run.paint.is_none() == style.automatic_color
         && run.bold == style.bold
         && run.italic == style.italic
         && run.underline == style.underline

@@ -45,11 +45,12 @@ use super::drawingml::{
     chart_bar_cone_to_max_geometry, chart_bar_cylinder_cap, chart_bar_data_label,
     chart_bar_geometry, chart_bar_segment_bounds, chart_bubble_bounds, chart_bubble_paint,
     chart_data_table_layout, chart_line_geometry, chart_marker_geometry, chart_pie_label_layout,
-    chart_pie_side_paint, chart_pie_slices, chart_series_line_geometries, chart_title_bounds,
-    drawingml_dash_lengths, drawingml_fallback_character_width, drawingml_fill_reference_has_paint,
-    drawingml_outer_shadow, drawingml_outer_shadow_is_identity, drawingml_relative_rectangle,
-    drawingml_shadow_alignment, drawingml_stroke_style, drawingml_text_orientation,
-    ellipse_arc_bezier_points, format_axis_value, linear_to_srgb, numeric_attribute,
+    chart_pie_side_paint, chart_pie_slices, chart_rotated_category_label_bounds,
+    chart_series_line_geometries, chart_title_bounds, drawingml_dash_lengths,
+    drawingml_fallback_character_width, drawingml_fill_reference_has_paint, drawingml_outer_shadow,
+    drawingml_outer_shadow_is_identity, drawingml_relative_rectangle, drawingml_shadow_alignment,
+    drawingml_stroke_style, drawingml_text_orientation, ellipse_arc_bezier_points,
+    format_axis_value, linear_to_srgb, numeric_attribute,
     parse_chart_with_theme as parse_drawingml_chart, parse_diagram as parse_pptx_diagram,
     parse_drawingml_reflection, parse_rgb_color, parse_three_d_backdrop_point, parse_three_d_bevel,
     parse_three_d_camera, parse_three_d_light, parse_three_d_rotation, parse_three_d_shape,
@@ -13020,13 +13021,25 @@ fn push_basic_pptx_chart(
                         height: category_height,
                     }
                 } else {
-                    Rect {
-                        x: x - category_width / 2.0,
-                        y: chart.category_baseline(series, index, plot) + 8.0,
-                        width: category_width,
-                        height: (bounds.y + bounds.height - 28.0 - (plot.y + plot.height))
-                            .max(18.0),
-                    }
+                    chart_rotated_category_label_bounds(
+                        Rect {
+                            x: x - category_width / 2.0,
+                            y: chart.category_baseline(series, index, plot) + 8.0,
+                            width: category_width,
+                            height: (bounds.y + bounds.height - 28.0 - (plot.y + plot.height))
+                                .max(18.0),
+                        },
+                        category,
+                        category_font_size,
+                        if series.three_d {
+                            0.0
+                        } else {
+                            chart
+                                .horizontal_axis_options
+                                .label_rotation_degrees
+                                .unwrap_or(0.0)
+                        },
+                    )
                 },
                 category.clone(),
                 0x0000_00ff,

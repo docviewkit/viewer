@@ -153,6 +153,7 @@ struct SharedStringRun {
     font_family: Option<String>,
     font_size: Option<f32>,
     color: Option<u32>,
+    automatic_color: Option<bool>,
     bold: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
@@ -187,6 +188,7 @@ struct CellStyle {
     font_family: String,
     font_size: f32,
     color: u32,
+    automatic_color: bool,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -218,6 +220,7 @@ impl Default for CellStyle {
             font_family: "Arial".to_owned(),
             font_size: 11.0 * 96.0 / 72.0,
             color: 0x0000_00ff,
+            automatic_color: true,
             bold: false,
             italic: false,
             underline: false,
@@ -250,6 +253,7 @@ struct FontRecord {
     family: String,
     size: f32,
     color: u32,
+    automatic_color: bool,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -264,6 +268,7 @@ impl Default for FontRecord {
             family: style.font_family,
             size: style.font_size,
             color: style.color,
+            automatic_color: style.automatic_color,
             bold: style.bold,
             italic: style.italic,
             underline: style.underline,
@@ -960,7 +965,7 @@ pub(super) fn parse(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "calculation-service"))]
 pub(super) fn parse_preview(
     package: &Package<'_>,
     workbook_part: &str,
@@ -2631,7 +2636,10 @@ fn apply_spreadsheet_run_property(
                 )?);
             }
         }
-        "color" => run.color = parse_color(attributes, theme_colors, part)?,
+        "color" => {
+            run.color = parse_color(attributes, theme_colors, part)?;
+            run.automatic_color = Some(xlsx_automatic_text_color(attributes, part)?);
+        }
         "b" => run.bold = Some(boolean_value(attributes, part)?.unwrap_or(true)),
         "i" => run.italic = Some(boolean_value(attributes, part)?.unwrap_or(true)),
         "strike" => run.strikethrough = Some(boolean_value(attributes, part)?.unwrap_or(true)),
@@ -2892,6 +2900,8 @@ fn parse_styles(
                         "color" => {
                             if let Some(color) = parse_color(&attributes, &theme_colors, part)? {
                                 font.value.color = color;
+                                font.value.automatic_color =
+                                    xlsx_automatic_text_color(&attributes, part)?;
                             }
                         }
                         _ => {}
@@ -3141,6 +3151,7 @@ fn parse_styles(
                 font_family: font.family.clone(),
                 font_size: font.size,
                 color: font.color,
+                automatic_color: font.automatic_color,
                 bold: font.bold,
                 italic: font.italic,
                 underline: font.underline,
@@ -8645,6 +8656,7 @@ fn table_cell_style(
                 style.fill_paint = None;
                 style.has_fill = true;
                 style.color = 0xffff_ffff;
+                style.automatic_color = false;
                 style.bold = true;
             } else if table.show_row_stripes && (row - table.range.start_row) % 2 == 1 {
                 style.fill = transform_luminance(styles.theme_colors[4], 0.2, 0.8);
@@ -8699,6 +8711,7 @@ fn table_cell_style(
             }
             if medium && (header || subheading.is_some_and(|item| item.level == 0)) {
                 style.color = 0xffff_ffff;
+                style.automatic_color = false;
             }
         }
         _ => {}
@@ -8709,6 +8722,7 @@ fn table_cell_style(
 fn apply_differential_style(style: &mut CellStyle, differential: &DifferentialStyle) {
     if let Some(color) = differential.color {
         style.color = color;
+        style.automatic_color = false;
     }
     if let Some(bold) = differential.bold {
         style.bold = bold;
@@ -9750,7 +9764,8 @@ fn cell_text_runs(
                 .map(|run| {
                     let font_size = run.font_size.unwrap_or(style.font_size);
                     TextRun {
-                        paint: None,
+                        paint: (!run.automatic_color.unwrap_or(style.automatic_color))
+                            .then(|| Box::new(Paint::Solid(run.color.unwrap_or(style.color)))),
                         east_asian_line_breaks: true,
                         text: run.text.clone(),
                         font_family: run
@@ -9774,24 +9789,28 @@ fn cell_text_runs(
                 .collect(),
         );
     }
-    (style.underline || style.strikethrough || style.baseline_shift != 0.0).then(|| {
-        vec![TextRun {
-            paint: None,
-            east_asian_line_breaks: true,
-            text: displayed_text.unwrap_or_default().to_owned(),
-            font_family: style.font_family.clone(),
-            font_size: style.font_size,
-            color: style.color,
-            bold: style.bold,
-            italic: style.italic,
-            underline: style.underline,
-            strikethrough: style.strikethrough,
-            highlight: 0,
-            baseline_shift: style.baseline_shift,
-            letter_spacing: 0.0,
-            horizontal_scale: 1.0,
-        }]
-    })
+    (!style.automatic_color
+        || style.underline
+        || style.strikethrough
+        || style.baseline_shift != 0.0)
+        .then(|| {
+            vec![TextRun {
+                paint: (!style.automatic_color).then(|| Box::new(Paint::Solid(style.color))),
+                east_asian_line_breaks: true,
+                text: displayed_text.unwrap_or_default().to_owned(),
+                font_family: style.font_family.clone(),
+                font_size: style.font_size,
+                color: style.color,
+                bold: style.bold,
+                italic: style.italic,
+                underline: style.underline,
+                strikethrough: style.strikethrough,
+                highlight: 0,
+                baseline_shift: style.baseline_shift,
+                letter_spacing: 0.0,
+                horizontal_scale: 1.0,
+            }]
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9838,7 +9857,7 @@ fn push_cell(
         .or_else(|| {
             style.fill_paint.as_ref().map(|_| {
                 vec![TextRun {
-                    paint: None,
+                    paint: (!style.automatic_color).then(|| Box::new(Paint::Solid(style.color))),
                     east_asian_line_breaks: true,
                     text: text.clone().unwrap_or_default(),
                     font_family: style.font_family.clone(),
@@ -9857,10 +9876,10 @@ fn push_cell(
         }) {
         Some(runs) => Visual::RichText {
             geometry: Geometry::Rectangle,
-            fill: style
-                .fill_paint
-                .as_ref()
-                .map_or(Paint::Solid(style.fill), |fill| fill.paint(bounds)),
+            fill: style.fill_paint.as_ref().map_or(
+                Paint::Solid(if style.has_fill { style.fill } else { 0 }),
+                |fill| fill.paint(bounds),
+            ),
             stroke: Paint::Solid(stroke),
             stroke_width,
             align: style.align,
@@ -9869,7 +9888,7 @@ fn push_cell(
         },
         None => Visual::Text {
             geometry: Geometry::Rectangle,
-            fill: style.fill,
+            fill: if style.has_fill { style.fill } else { 0 },
             stroke,
             stroke_width,
             font_family: style.font_family.clone(),
@@ -10357,6 +10376,24 @@ fn parse_optional_u32(
 
 fn boolean_value(attributes: &[XmlAttribute<'_>], part: &str) -> Result<Option<bool>, Diagnostic> {
     parse_bool_attribute(attributes, "val", part)
+}
+
+fn xlsx_automatic_text_color(
+    attributes: &[XmlAttribute<'_>],
+    part: &str,
+) -> Result<bool, Diagnostic> {
+    if optional_attribute(attributes, "rgb", part)?.is_some() {
+        return Ok(false);
+    }
+    let theme = optional_attribute(attributes, "theme", part)?;
+    let indexed = optional_attribute(attributes, "indexed", part)?;
+    Ok(if let Some(theme) = theme {
+        theme == "1" && optional_attribute(attributes, "tint", part)?.is_none()
+    } else if let Some(indexed) = indexed {
+        indexed == "64"
+    } else {
+        parse_bool_attribute(attributes, "auto", part)?.unwrap_or(false)
+    })
 }
 
 fn parse_color(
@@ -11167,6 +11204,7 @@ fn with_part(error: Diagnostic, part: &str) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "calculation-service")]
     use std::collections::BTreeMap;
 
     use super::{
@@ -11302,9 +11340,16 @@ mod tests {
                     let Visual::TextLayout { visual, .. } = &cell.visual else {
                         panic!("cell text layout")
                     };
-                    let Visual::Text { fill, .. } = **visual else {
-                        panic!("cell fill")
+                    let fill = match visual.as_ref() {
+                        Visual::Text { fill, .. }
+                        | Visual::RichText {
+                            fill: Paint::Solid(fill),
+                            ..
+                        } => *fill,
+                        _ => panic!("cell fill"),
                     };
+                    // No authored fill uses the display medium, white in the original render.
+                    let fill = if fill & 255 == 0 { 0xffff_ffff } else { fill };
                     assert!(
                         [8, 16, 24].iter().all(|shift| ((fill >> shift) & 255)
                             .abs_diff((expected_fill >> shift) & 255)
@@ -12143,14 +12188,22 @@ mod tests {
         assert_eq!(error.code, DiagnosticCode::UnsupportedFeature);
     }
 
+    #[cfg(feature = "calculation-service")]
     #[test]
     #[ignore = "requires the user-supplied CBAM XLSX and Excel-calculated golden"]
     fn renders_uncached_cbam_formulas_from_the_supplied_workbook() {
         let path = std::env::var("OFFICEVIEWER_XLSX_SOURCE").unwrap();
         let bytes = std::fs::read(path).unwrap();
         let package = Package::open(&bytes, Limits::default()).unwrap();
-        let document =
-            super::parse(&package, "xl/workbook.xml", &ContentTypes::default(), None).unwrap();
+        let calculation =
+            crate::format::xlsx_formula::calculate(&bytes, Limits::default()).unwrap();
+        let document = super::parse(
+            &package,
+            "xl/workbook.xml",
+            &ContentTypes::default(),
+            Some(&calculation),
+        )
+        .unwrap();
         let preview =
             super::parse_preview(&package, "xl/workbook.xml", &ContentTypes::default()).unwrap();
         assert_eq!(preview.units, document.units);
@@ -12249,11 +12302,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "calculation-service")]
     #[test]
     #[ignore = "requires the user-supplied CBAM XLSX and Excel-calculated golden"]
-    fn previews_the_first_cbam_sheet_with_excel_exact_text() {
+    fn previews_and_calculates_the_first_cbam_sheet_with_excel_exact_text() {
         let source = std::fs::read(std::env::var("OFFICEVIEWER_XLSX_SOURCE").unwrap()).unwrap();
         let source_package = Package::open(&source, Limits::default()).unwrap();
+        let calculation =
+            crate::format::xlsx_formula::calculate(&source, Limits::default()).unwrap();
         for sheet in 1..=19 {
             let part = format!("xl/worksheets/sheet{sheet}.xml");
             let bytes = source_package.required_part(&part).unwrap();
@@ -12310,7 +12366,16 @@ mod tests {
         );
         assert_eq!(metadata.units, preview.units);
         assert!(metadata.objects.is_empty());
-        assert_eq!(first_sheet_text(&preview), first_sheet_text(&expected));
+        let calculated = parse_unit(
+            &source_package,
+            "xl/workbook.xml",
+            &ContentTypes::default(),
+            0,
+            Some(&calculation),
+        )
+        .unwrap();
+        assert_eq!(calculated.units, preview.units);
+        assert_eq!(first_sheet_text(&calculated), first_sheet_text(&expected));
         assert!(preview.objects.iter().all(|object| object.unit_index == 0));
     }
 
@@ -12342,6 +12407,7 @@ mod tests {
         assert_eq!(widths, vec![25_400.0 / super::EMU_PER_CSS_PIXEL; 2]);
     }
 
+    #[cfg(feature = "calculation-service")]
     #[test]
     #[ignore = "requires the user-supplied CBAM XLSX and Excel-calculated golden"]
     fn materializes_cbam_summary_products_viewport_with_excel_exact_text() {
@@ -12350,6 +12416,8 @@ mod tests {
         const MAX_COLUMN: i32 = 24;
         let source = std::fs::read(std::env::var("OFFICEVIEWER_XLSX_SOURCE").unwrap()).unwrap();
         let source_package = Package::open(&source, Limits::default()).unwrap();
+        let calculation =
+            crate::format::xlsx_formula::calculate(&source, Limits::default()).unwrap();
         let actual = parse_unit_region(
             &source_package,
             "xl/workbook.xml",
@@ -12357,7 +12425,7 @@ mod tests {
             UNIT_INDEX,
             MAX_ROW,
             MAX_COLUMN,
-            None,
+            Some(&calculation),
         )
         .unwrap();
         let golden =
@@ -12400,11 +12468,14 @@ mod tests {
         }));
     }
 
+    #[cfg(feature = "calculation-service")]
     #[test]
     #[ignore = "requires the user-supplied CBAM XLSX and Excel-calculated golden"]
     fn materializes_every_cbam_sheet_with_excel_exact_text() {
         let source = std::fs::read(std::env::var("OFFICEVIEWER_XLSX_SOURCE").unwrap()).unwrap();
         let source_package = Package::open(&source, Limits::default()).unwrap();
+        let calculation =
+            crate::format::xlsx_formula::calculate(&source, Limits::default()).unwrap();
         let golden =
             std::fs::read(std::env::var("OFFICEVIEWER_XLSX_EXCEL_GOLDEN").unwrap()).unwrap();
         let golden_package = Package::open(&golden, Limits::default()).unwrap();
@@ -12445,7 +12516,7 @@ mod tests {
                 "xl/workbook.xml",
                 &ContentTypes::default(),
                 unit_index,
-                None,
+                Some(&calculation),
             )
             .unwrap();
             assert_eq!(

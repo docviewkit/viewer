@@ -1138,6 +1138,17 @@ const ODT_MIMETYPE: &[u8] = b"application/vnd.oasis.opendocument.text";
 const OTT_MIMETYPE: &[u8] = b"application/vnd.oasis.opendocument.text-template";
 
 #[cfg(feature = "odf-formats")]
+pub(super) fn odf_automatic_font_color(
+    attributes: &[crate::xml::XmlAttribute<'_>],
+    part: &str,
+) -> Result<Option<bool>, Diagnostic> {
+    Ok(
+        optional_xml_attribute(attributes, "use-window-font-color", part)?
+            .map(|value| matches!(value.as_str(), "true" | "1")),
+    )
+}
+
+#[cfg(feature = "odf-formats")]
 fn is_open_document_presentation_mimetype(mimetype: &[u8]) -> bool {
     matches!(
         mimetype,

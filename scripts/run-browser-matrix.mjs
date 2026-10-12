@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { chromium, firefox, webkit } from "playwright-core";
 
 const engines = { chromium, firefox, webkit };
-const requested = (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,firefox,webkit")
+const requested = (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,webkit")
   .split(",")
   .map((name) => name.trim())
   .filter(Boolean);

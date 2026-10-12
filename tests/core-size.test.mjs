@@ -8,9 +8,9 @@ import { Core, DEFAULT_LIMITS } from "../dist/core.js";
 const coreWasm = await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url));
 
 test("optimized core stays within the size budget", () => {
-  // Declared DOCX font alternates add 3,454 bytes: 3,798,670 -> 3,802,124
-  // on macOS, with no added font binaries. Keep the allowance below 0.2%.
-  assert.ok(coreWasm.byteLength <= 3_805_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3805000`);
+  // Reading-color provenance and shared rotated chart labels add 4,639 bytes
+  // over v0.2.76: 3,802,963 -> 3,807,602; no dependencies or font binaries added.
+  assert.ok(coreWasm.byteLength <= 3_810_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3810000`);
 });
 
 test("calculator contains only its runtime ABI and stays within its size budget", async () => {
@@ -46,17 +46,19 @@ test("binary Dingbats font preserves the original decoded font bytes", async () 
 // saved XLSX row metrics, chart labels, DOCX caps/borders/picture effects and SmartArt shadows.
 // Reviewed v0.2.75 chart text/axes, DOCX cell-end markers, floating-object z order
 // and VML gradient changes are recorded in the same audit, section 15.
+// Reviewed v0.2.77 reading-color provenance, transparent unfilled cells and ODS
+// default grid ownership are recorded in the same audit, section 16.
 const scenes = {
   "core": {
-    "chart-original.docx": "2c270cdcbc22db5a3a96bd9c294ea1af6deb6950b4033854f22ea91080428bd7",
-    "complex2005_12rtm.docx": "54591b5b1130cdc6582990f3ffcf9f870ca527aac8965d76193140dfe2e4ab2b",
+    "chart-original.docx": "fff3cf84016fa0ed9d5c7ad28584e66a7333423aa77501d1c75bdf199e7db3f2",
+    "complex2005_12rtm.docx": "1ce107a8851679071bf771936dabaaf98010d10a7bd26975f3e4c22ec8f8395b",
     "word-data-label-borders.docx": "5a7c82fdfb7bdbb33d656f763df9cb98e00d178c22a4264bf5cb49ea2cb2b3d3",
     "chart_pt_color_bg1.pptx": "c3a40615d11e2ad4057daa21265786dbdff5fd1c104862c090aa83fa7fd29597",
     "corpus-stacked-mix.pptx": "8078699c48e1abc96a8717f87e33602cbf2c44f15d41d73b75668317d58361a8",
     "funnel-pp1.pptx": "29df874d81433d53a150ca2f608ac75ef75596d7e1852ea53a8a5d6cc4983e8d",
-    "chart-empty-title-original.xlsx": "0a5ce557794be41cbe5af2c10372aea45a6b8ee49fe22c5635a1193cd3b8a7f2",
-    "sunburst.xlsx": "a1687d7a3f119833566b823300622f8190b102a85595bde74996a9333f7d48a6",
-    "color_funnel.xlsx": "553e85e0c3582ae63e1b4133d9c9ac1ae068c54a5b2c034d457f2b1d677f42c6",
+    "chart-empty-title-original.xlsx": "a5c0e8891931d772f978da9e2080887f256d6f08b4119081daf54438c9c36530",
+    "sunburst.xlsx": "e252ed9932529f328d7813643789e7ed8af8c4d9dc40b882fc21120fb93a514f",
+    "color_funnel.xlsx": "e92466efaf2f65a46c026936ee1a33924c1e0a82061410052ac9cab5f76a0576",
     "smartart-chevron.pptx": "efad1c39b4b86fb13ae7efdac2a154dc543962daa62195eb34ee0e94b10b6497",
     "smartart-cycle.pptx": "b7d4b001d6a2f4896c5087dac5c66dca62aaf4dca9914cbe096ffb4fdcf220c9",
     "smartart-dir.pptx": "6ac256dce458e769b5f9bb0f236b807afda5df046fb5b26821c569113444df0f",
@@ -66,11 +68,11 @@ const scenes = {
     "background-theme-gradient.pptx": "5e423eb5a23aaf406d4fd55c2176e6c1be8fbd63c7a63456904f45dc2f6a2b18",
     "background-linear.docx": "2fff91a03563856c8f3f052b07437bafce3ee08b19b2d50f355a5ec10eec995f",
     "background-radial.docx": "838ab0d1938124b4bc39b4e646799605d8b6e6cdf8f35ba8c2f9b89329da585f",
-    "background-worksheet.xlsx": "01b290d3847be61598fd3df663d74933ec3faa3418b66f266e8d115678712b7f"
+    "background-worksheet.xlsx": "a7240cd9ba9cb42d0e0660997621237fe956a374466e17bae7e595fb53b7148b"
   },
   "odf": {
     "background-image.odt": "e813012a4ca332d64691cc5bfb3bae88e91af41ea26a6430c2db4ef73baf4f06",
-    "toolkit-basic-sheet.ods": "abb52be9dfc9b39d22da57af61f806243578638a5cfe5e5de9c49c11bbee83dc",
+    "toolkit-basic-sheet.ods": "f38cd9e0195531bcf5802a1fb1a6a503d7d80b9925e8158ef85aeb4d1bbcbee2",
     "odf-dash-linecaps.odp": "30000f3bfdacd475c2a84ad39cdb0292ffcc8ecbcd3545ff4ecc5854dd04b582"
   },
   "legacy-office": {

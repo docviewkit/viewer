@@ -197,9 +197,12 @@ struct OdsCellStyle {
     font_family: String,
     font_size: f32,
     color: u32,
+    automatic_color: bool,
     bold: bool,
     italic: bool,
     fill: u32,
+    has_fill: bool,
+    has_border: bool,
     stroke: u32,
     stroke_width: f32,
     stroke_style: StrokeStyle,
@@ -231,9 +234,12 @@ impl Default for OdsCellStyle {
             font_family: "Arial".to_owned(),
             font_size: 11.0 * 96.0 / 72.0,
             color: 0x0000_00ff,
+            automatic_color: true,
             bold: false,
             italic: false,
             fill: 0xffff_ffff,
+            has_fill: false,
+            has_border: false,
             stroke: 0xd0d0_d0ff,
             stroke_width: 1.0,
             stroke_style: StrokeStyle::default(),
@@ -716,31 +722,37 @@ fn parse_styles_xml(
                                 && let Some(color) = parse_odf_color(&fill, part)?
                             {
                                 style.cell.fill = color;
+                                style.cell.has_fill = true;
                             }
                             if let Some(background) =
                                 optional_attribute(&attributes, "background-color", part)?
                                 && let Some(color) = parse_odf_color(&background, part)?
                             {
                                 style.cell.fill = color;
+                                style.cell.has_fill = true;
                             }
                             if optional_attribute(&attributes, "stroke", part)?.as_deref()
                                 == Some("none")
                             {
                                 style.cell.stroke_none = true;
+                                style.cell.has_border = true;
                             }
                             if let Some(stroke) =
                                 optional_attribute(&attributes, "stroke-color", part)?
                                 && let Some(color) = parse_odf_color(&stroke, part)?
                             {
                                 style.cell.stroke = color;
+                                style.cell.has_border = true;
                             }
                             if let Some(width) =
                                 optional_attribute(&attributes, "stroke-width", part)?
                             {
+                                style.cell.has_border = true;
                                 style.cell.stroke_width =
                                     parse_length(&width, part, "stroke width")?;
                             }
                             if let Some(border) = optional_attribute(&attributes, "border", part)? {
+                                style.cell.has_border = true;
                                 apply_border(&border, &mut style.cell, part)?;
                             }
                         }
@@ -769,6 +781,15 @@ fn parse_styles_xml(
                                 && let Some(color) = parse_odf_color(&color, part)?
                             {
                                 style.cell.color = color;
+                                style.cell.automatic_color = false;
+                            }
+                            if let Some(automatic) =
+                                super::odf_automatic_font_color(&attributes, part)?
+                            {
+                                style.cell.automatic_color = automatic;
+                                if automatic {
+                                    style.cell.color = 0x0000_00ff;
+                                }
                             }
                         }
                         "paragraph-properties" => {
@@ -6074,17 +6095,52 @@ fn push_cell(
         cell.source_index + 1,
     );
     let object_index = objects.len();
-    let visual = Visual::Text {
-        geometry: Geometry::Rectangle,
-        fill: style.fill,
-        stroke: style.stroke,
-        stroke_width: style.stroke_width,
-        font_family: style.font_family.clone(),
-        font_size: style.font_size,
-        color: style.color,
-        bold: style.bold,
-        italic: style.italic,
-        align: style.align.unwrap_or(cell.default_align),
+    let visual = if style.automatic_color {
+        Visual::Text {
+            geometry: Geometry::Rectangle,
+            fill: if style.has_fill { style.fill } else { 0 },
+            stroke: if style.has_border { style.stroke } else { 0 },
+            stroke_width: if style.has_border {
+                style.stroke_width
+            } else {
+                0.0
+            },
+            font_family: style.font_family.clone(),
+            font_size: style.font_size,
+            color: style.color,
+            bold: style.bold,
+            italic: style.italic,
+            align: style.align.unwrap_or(cell.default_align),
+        }
+    } else {
+        Visual::RichText {
+            geometry: Geometry::Rectangle,
+            fill: Paint::Solid(if style.has_fill { style.fill } else { 0 }),
+            stroke: Paint::Solid(if style.has_border { style.stroke } else { 0 }),
+            stroke_width: if style.has_border {
+                style.stroke_width
+            } else {
+                0.0
+            },
+            line_height: 0.0,
+            runs: vec![TextRun {
+                paint: (!style.automatic_color).then(|| Box::new(Paint::Solid(style.color))),
+                east_asian_line_breaks: true,
+                text: cell.text.clone().unwrap_or_default(),
+                font_family: style.font_family.clone(),
+                font_size: style.font_size,
+                color: style.color,
+                bold: style.bold,
+                italic: style.italic,
+                underline: false,
+                strikethrough: false,
+                highlight: 0,
+                baseline_shift: 0.0,
+                letter_spacing: 0.0,
+                horizontal_scale: 1.0,
+            }],
+            align: style.align.unwrap_or(cell.default_align),
+        }
     };
     let visual = if style.stroke_style == StrokeStyle::default() {
         visual

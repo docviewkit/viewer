@@ -971,7 +971,10 @@ pub(crate) fn calculate(bytes: &[u8], limits: Limits) -> Result<CalculationResul
                 .ok_or_else(|| {
                     formula_error(&workbook_part, "formula sheet has no relationship")
                 })?;
-            raw_sheets.push((name.to_owned(), relationship.to_owned()));
+            raw_sheets.push((
+                decode_xml_text(name)?.into_owned(),
+                decode_xml_text(relationship)?.into_owned(),
+            ));
         }
         Ok(())
     })

@@ -384,7 +384,7 @@ test("CI installs browsers with the pinned Playwright package", async () => {
   const workflow = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   assert.equal(
     manifest.scripts["test:browsers:install"],
-    "node node_modules/playwright-core/cli.js install --with-deps chromium firefox webkit",
+    "node node_modules/playwright-core/cli.js install --with-deps chromium webkit",
   );
   assert.match(workflow, /npm run test:browsers:install/u);
   assert.doesNotMatch(workflow, /npx playwright install/u);

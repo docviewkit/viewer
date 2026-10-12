@@ -15,6 +15,131 @@ mod tests {
     use crate::package::Package;
     use crate::xml::XmlAttribute;
 
+    fn check_supplied_rotated_category_labels(host: &[u8], chart_part: &str) {
+        let source = Package::open(
+            include_bytes!("../../../tests/fixtures/chart-text-can-overlap.xlsx"),
+            Limits::default(),
+        )
+        .unwrap();
+        let xml = String::from_utf8(
+            source
+                .required_part("xl/charts/chart1.xml")
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let host = Package::open(host, Limits::default()).unwrap();
+        for rotation in [0.0_f32, 45.0, -45.0, 90.0, -90.0] {
+            let chart_xml = xml.replace(
+                "rot=\"2700000\"",
+                &format!("rot=\"{}\"", (rotation * 60000.0) as i32),
+            );
+            let parts = host
+                .entry_names()
+                .map(|name| {
+                    (
+                        name,
+                        if name == chart_part {
+                            chart_xml.as_bytes().to_vec()
+                        } else {
+                            host.required_part(name).unwrap().to_vec()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let bytes = stored_zip(
+                &parts
+                    .iter()
+                    .map(|(name, data)| (*name, data.as_slice()))
+                    .collect::<Vec<_>>(),
+            );
+            let document = crate::format::detect_and_parse(&bytes, Limits::default())
+                .unwrap()
+                .unwrap();
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| {
+                    o.source.part == chart_part
+                        && o.text
+                            .as_ref()
+                            .is_some_and(|text| text.starts_with("Here is a long"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(labels.len(), 7);
+            let frame = document
+                .objects
+                .iter()
+                .find(|o| Some(o.numeric_id) == labels[0].parent_numeric_id)
+                .unwrap()
+                .bounds;
+            let axis = document
+                .objects
+                .iter()
+                .filter(|o| {
+                    o.source.part == chart_part
+                        && o.text.is_none()
+                        && o.bounds.width > frame.width * 0.5
+                        && o.bounds.height <= 1.0
+                })
+                .max_by(|a, b| a.bounds.y.total_cmp(&b.bounds.y))
+                .expect("horizontal chart axis")
+                .bounds;
+            for label in labels {
+                let Visual::TextLayout { layout, .. } = &label.visual else {
+                    panic!("axis text layout");
+                };
+                assert_eq!(
+                    layout.rotation_degrees, rotation,
+                    "{chart_part}: authored rotation"
+                );
+                assert!(rotation == 0.0 || !layout.wrap);
+                let b = label.bounds;
+                let (sin, cos) = rotation.to_radians().sin_cos();
+                let half_height = (b.width * sin.abs() + b.height * cos.abs()) / 2.0;
+                let top = b.y + b.height / 2.0 - half_height;
+                let bottom = b.y + b.height / 2.0 + half_height;
+                let half_width = (b.width * cos.abs() + b.height * sin.abs()) / 2.0;
+                assert!(b.x + b.width / 2.0 - half_width >= frame.x - 0.1);
+                assert!(b.x + b.width / 2.0 + half_width <= frame.x + frame.width + 0.1);
+                assert!(
+                    top >= axis.y + 1.0,
+                    "{chart_part} {rotation}: rotated label top {top} crosses axis {}",
+                    axis.y
+                );
+                assert!(
+                    bottom <= frame.y + frame.height + 0.1,
+                    "{chart_part} {rotation}: label bottom {bottom} exceeds chart {}",
+                    frame.y + frame.height
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supplied_xlsx_rotated_category_labels_clear_axis() {
+        check_supplied_rotated_category_labels(
+            include_bytes!("../../../tests/fixtures/chart-text-can-overlap.xlsx"),
+            "xl/charts/chart1.xml",
+        );
+    }
+
+    #[test]
+    fn supplied_pptx_rotated_category_labels_clear_axis() {
+        check_supplied_rotated_category_labels(
+            include_bytes!("../../../tests/fixtures/corpus-chart-wall.pptx"),
+            "ppt/charts/chart1.xml",
+        );
+    }
+
+    #[test]
+    fn supplied_docx_rotated_category_labels_clear_axis() {
+        check_supplied_rotated_category_labels(
+            include_bytes!("../../../tests/fixtures/ooxml-display-units.docx"),
+            "word/charts/chart1.xml",
+        );
+    }
+
     #[test]
     fn supplied_radar_style_preserves_bevel_shadow_and_series_shades() {
         let package = Package::open(include_bytes!("../../../tests/fixtures/chart-Radar.docx"), Limits::default()).unwrap();

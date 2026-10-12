@@ -272,6 +272,27 @@ test("calculator runtime ABI preserves dependent formulas, text and error result
   }
 });
 
+test("calculator resolves the supplied CBAM sheet names with XML entities", async () => {
+  const calculationWasm = await readFile(new URL("../dist/office-viewer-calc.wasm", import.meta.url));
+  // Reduced from the real C_Emissions&Energy references; the full workbook has an Excel golden regression.
+  for (const name of ["C_Emissions&amp;Energy", "C_Emissions&#38;Energy"]) {
+    const bytes = workbook(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+      <row r="1"><c r="A1"><v>4</v></c><c r="B1"><f>'C_Emissions&amp;Energy'!A1+1</f></c></row>
+      </sheetData></worksheet>`, undefined, {
+      "xl/workbook.xml": `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${name}" sheetId="1" r:id="rId&amp;1"/></sheets></workbook>`,
+      "xl/_rels/workbook.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId&amp;1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+    });
+    const { engine, document } = await open(bytes, { calculationWasm });
+    try {
+      assert.equal(document.info.units[0].name, "C_Emissions&Energy");
+      const cells = new Map((await document.listObjects({ unitIndex: 0 }))
+        .filter(object => object.type === "cell").map(object => [object.source.address, object.text]));
+      assert.equal(cells.get("A1"), "4");
+      assert.equal(cells.get("B1"), "5");
+    } finally { document.close(); engine.close(); }
+  }
+});
+
 test("recalculates cached TODAY formulas when the workbook opens", async () => {
   const bytes = workbook(
     `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1"><f>TODAY()</f><v>42189</v></c></row></sheetData></worksheet>`,

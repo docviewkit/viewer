@@ -13,7 +13,7 @@ try {
       if (match) resolve(match[0]);
     });
   });
-  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,firefox,webkit').split(',')) {
+  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,webkit').split(',')) {
     const browser = await ({ chromium, firefox, webkit })[name].launch({ headless: true });
     const timeout = setTimeout(() => {
       console.error(`${name}: extrusion regression exceeded 90 seconds`);

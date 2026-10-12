@@ -316,6 +316,7 @@ class InlineDocument implements OfficeDocument {
         this.#coreDocument!.limits,
         fonts,
         fonts.imageCodecFonts(),
+        this.info.format,
       );
     } else {
       this.#renderer.replaceObjects(scene.objects, fonts.imageCodecFonts());

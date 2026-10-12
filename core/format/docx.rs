@@ -27,11 +27,11 @@ use super::drawingml::{
     chart_bar_cone_cap, chart_bar_cone_to_max_geometry, chart_bar_cylinder_cap,
     chart_bar_data_label, chart_bar_geometry, chart_bar_segment_bounds, chart_bubble_bounds,
     chart_bubble_paint, chart_data_table_layout, chart_line_geometry, chart_marker_geometry,
-    chart_pie_label_layout, chart_pie_side_paint, chart_pie_slices, chart_series_line_geometries,
-    chart_title_bounds, drawingml_dash_lengths, drawingml_fallback_character_width,
-    drawingml_fill_reference_has_paint, drawingml_shadow_alignment, drawingml_stroke_style,
-    format_axis_value, parse_chart as parse_basic_ooxml_chart, parse_chart_ex,
-    parse_drawingml_reflection,
+    chart_pie_label_layout, chart_pie_side_paint, chart_pie_slices,
+    chart_rotated_category_label_bounds, chart_series_line_geometries, chart_title_bounds,
+    drawingml_dash_lengths, drawingml_fallback_character_width, drawingml_fill_reference_has_paint,
+    drawingml_shadow_alignment, drawingml_stroke_style, format_axis_value,
+    parse_chart as parse_basic_ooxml_chart, parse_chart_ex, parse_drawingml_reflection,
 };
 use super::omml::{OmmlCapture, OmmlNode, math_alphabet};
 use super::optional_xml_attribute as optional_attribute;
@@ -986,6 +986,7 @@ struct TextStyle {
     east_asian_line_breaks: bool,
     font_size: f32,
     color: u32,
+    automatic_color: bool,
     bold: bool,
     italic: bool,
     complex_bold: Option<bool>,
@@ -1021,6 +1022,7 @@ impl Default for TextStyle {
             east_asian_line_breaks: true,
             font_size: DEFAULT_FONT_SIZE,
             color: 0x0000_00ff,
+            automatic_color: true,
             bold: false,
             italic: false,
             complex_bold: None,
@@ -1091,6 +1093,7 @@ impl TextStyle {
         }
         if let Some(value) = properties.color {
             self.color = value;
+            self.automatic_color = properties.automatic_color.unwrap_or(false);
         }
         if let Some(value) = properties.caps {
             self.caps = value;
@@ -1512,6 +1515,7 @@ struct ParagraphStyleProperties {
     emphasis: Option<Option<EmphasisMark>>,
     letter_spacing: Option<f32>,
     color: Option<u32>,
+    automatic_color: Option<bool>,
     bold: Option<bool>,
     caps: Option<bool>,
     small_caps: Option<bool>,
@@ -1666,6 +1670,7 @@ impl ParagraphStyleProperties {
         }
         if other.color.is_some() {
             self.color = other.color;
+            self.automatic_color = other.automatic_color;
         }
         if other.caps.is_some() {
             self.caps = other.caps;
@@ -3069,7 +3074,8 @@ impl Paragraph {
                 let start = run.start.max(range_start);
                 let end = run.end.min(range_end);
                 (start < end).then(|| TextRun {
-                    paint: None,
+                    paint: (!run.style.automatic_color && run.style.text_fill.is_none())
+                        .then(|| Box::new(Paint::Solid(run.style.color))),
                     east_asian_line_breaks: run.style.east_asian_line_breaks,
                     text: slice_chars(&run.text, start - run.start, end - run.start),
                     font_family: run.style.font_family.clone(),
@@ -10317,6 +10323,7 @@ fn apply_docx_run_property(
         "color" => {
             if let Some(color) = parse_docx_text_color(attributes, part)? {
                 style.color = color;
+                style.automatic_color = docx_automatic_text_color(attributes, part)?;
                 if style.text_stroke_width > 0.0 {
                     style.text_stroke_paint = Paint::Solid(color);
                 }
@@ -11293,7 +11300,8 @@ fn equation_text_box(
                     align: TextAlign::Start,
                     line_height: height,
                     runs: vec![TextRun {
-                        paint: None,
+                        paint: (!style.automatic_color && style.text_fill.is_none())
+                            .then(|| Box::new(Paint::Solid(style.color))),
                         east_asian_line_breaks: style.east_asian_line_breaks,
                         text: text.to_owned(),
                         font_family: style.font_family,
@@ -12492,6 +12500,8 @@ fn parse_styles_xml(
                         ) && let Some(color) = parse_docx_text_color(&attributes, part)?
                         {
                             properties.color = Some(color);
+                            properties.automatic_color =
+                                Some(docx_automatic_text_color(&attributes, part)?);
                         }
                     }
                     "shd" => {
@@ -15745,7 +15755,8 @@ impl Layout<'_> {
                         align: label.align,
                         line_height: height,
                         runs: vec![TextRun {
-                            paint: None,
+                            paint: (!style.automatic_color && style.text_fill.is_none())
+                                .then(|| Box::new(Paint::Solid(style.color))),
                             east_asian_line_breaks: style.east_asian_line_breaks,
                             text: label.text,
                             font_family: style.font_family,
@@ -20076,6 +20087,14 @@ impl Layout<'_> {
             );
             category_style.font_size =
                 chart.axis_label_font_size(chart.category_axis_options(), category_style.font_size);
+            let rotation = if horizontal_bars || series.three_d {
+                0.0
+            } else {
+                chart
+                    .horizontal_axis_options
+                    .label_rotation_degrees
+                    .unwrap_or(0.0)
+            };
             for (category_index, label) in series.categories.iter().enumerate() {
                 if !chart.category_has_label(series, category_index, plot, 18.0) {
                     continue;
@@ -20128,18 +20147,30 @@ impl Layout<'_> {
                         let center_x = chart
                             .category_x(series, category_index, plot, false)
                             .unwrap_or(plot.x + (category_index as f32 + 0.5) * category_width);
-                        Rect {
-                            x: center_x - category_width / 2.0,
-                            y: chart.category_baseline(series, category_index, plot) + 2.0,
-                            width: category_width,
-                            height: (bounds.height * 0.10).max(12.0),
-                        }
+                        chart_rotated_category_label_bounds(
+                            Rect {
+                                x: center_x - category_width / 2.0,
+                                y: chart.category_baseline(series, category_index, plot) + 2.0,
+                                width: category_width,
+                                height: (bounds.height * 0.10).max(12.0),
+                            },
+                            label,
+                            category_style.font_size,
+                            rotation,
+                        )
                     },
                     label.clone(),
                     category_style,
                     None,
                     Some(u32::try_from(category_index).unwrap_or(u32::MAX)),
                 )?;
+                if let Some(Object {
+                    visual: Visual::TextLayout { layout, .. },
+                    ..
+                }) = self.objects.last_mut()
+                {
+                    layout.rotation_degrees = rotation;
+                }
             }
             if !horizontal_bars {
                 let terminal_category = series.values.len().max(series.categories.len());
@@ -26391,13 +26422,27 @@ fn required_margin(
     Ok(value as f32 / TWIPS_PER_CSS_PIXEL)
 }
 
+fn docx_automatic_text_color(
+    attributes: &[XmlAttribute<'_>],
+    part: &str,
+) -> Result<bool, Diagnostic> {
+    Ok(
+        optional_attribute(attributes, "val", part)?.as_deref() == Some("auto")
+            || matches!(
+                optional_attribute(attributes, "themeColor", part)?.as_deref(),
+                Some("text1" | "dark1")
+            ) && optional_attribute(attributes, "themeTint", part)?.is_none()
+                && optional_attribute(attributes, "themeShade", part)?.is_none(),
+    )
+}
+
 fn parse_docx_text_color(
     attributes: &[XmlAttribute<'_>],
     part: &str,
 ) -> Result<Option<u32>, Diagnostic> {
     let value = optional_attribute(attributes, "val", part)?;
     if value.as_deref() == Some("auto") {
-        return Ok(None);
+        return Ok(Some(0x0000_00ff));
     }
     let value = value.as_deref().map(|value| value.trim_start_matches('#'));
     let rgb = if let Some(value) = value.filter(|value| value.len() == 6) {

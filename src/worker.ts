@@ -119,6 +119,7 @@ function replaceScene(scene: CoreDocument["scene"], registeredFonts: RegisteredF
     document!.limits,
     registeredFonts,
     registeredFonts.imageCodecFonts(),
+    document!.scene.info!.format,
   );
   renderer?.close();
   renderer = nextRenderer;
@@ -343,6 +344,7 @@ async function handle(request: WorkerRequest): Promise<void> {
           request.limits,
           loadedFonts,
           loadedFonts.imageCodecFonts(),
+          scene.info.format,
         );
         scope.postMessage({
           id: request.id,

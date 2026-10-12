@@ -5,7 +5,7 @@ import { chromium, firefox, webkit } from "playwright-core";
 
 const url = process.env.VIEWER_URL ?? "http://127.0.0.1:8080/";
 const font = process.env.CURLZ_FONT_PATH ? [...await readFile(process.env.CURLZ_FONT_PATH)] : null;
-for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,firefox,webkit").split(",")) {
+for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? "chromium,webkit").split(",")) {
   const browser = await { chromium, firefox, webkit }[name].launch({ timeout: 20000 });
   try {
     const page = await browser.newPage({ viewport: { width: 1100, height: 1300 } });

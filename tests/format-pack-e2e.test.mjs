@@ -7,6 +7,7 @@ import { deflateSync } from "node:zlib";
 import { extendedFormatPack } from "../dist/extended-formats.js";
 import { createOfficeEngine } from "../dist/engine.js";
 import { createZip } from "./zip-fixture.mjs";
+import { readZipEntries, writeZipEntries } from "../scripts/accuracy-metamorphic.mjs";
 
 const encoder = new TextEncoder();
 const FREE_SECTOR = 0xffff_ffff;
@@ -1451,6 +1452,39 @@ test("PDF text survives the public protocol and renderer", async () => {
   }
 });
 
+test("supplied PDF link borders render and retain clickable actions", async () => {
+  const recording = installRecordingCanvas();
+  const { pdf } = await readArtifacts();
+  const engine = await createOfficeEngine({ wasm: pdf, execution: "inline" });
+  let document;
+  let frame;
+  try {
+    document = await engine.open(await readFile(new URL("./fixtures/arxiv-link-borders.pdf", import.meta.url)));
+    for (const unitIndex of [0, 1]) {
+      const [link] = await document.listObjects({ unitIndex });
+      const hits = await document.hitTest({
+        unitIndex,
+        x: link.bounds.x + link.bounds.width / 2,
+        y: link.bounds.y + link.bounds.height / 2,
+      });
+      assert.equal(hits[0]?.object.id, link.id);
+      assert.equal(link.actions[0].kind, unitIndex === 0 ? "command" : "hyperlink");
+      assert.equal(link.actions[0].target, unitIndex === 0 ? "1" : "https://aclanthology.org/2023.emnlp-main.298/");
+      frame = await document.render({ unitIndex });
+      frame.bitmap.close();
+      frame = undefined;
+    }
+    assert.deepEqual(recording.calls.strokes.map(({ strokeStyle }) => strokeStyle), [
+      "rgba(0, 255, 0, 1)", "rgba(0, 255, 255, 1)",
+    ]);
+  } finally {
+    frame?.bitmap.close();
+    document?.close();
+    engine.close();
+    recording.restore();
+  }
+});
+
 test("password-protected PDF reports actionable failures and opens with the password", async () => {
   const recording = installRecordingCanvas();
   const { pdf } = await readArtifacts();
@@ -1726,5 +1760,80 @@ test("XPS interleaved OPC parts require consecutive pieces and exactly one final
     await assert.rejects(engine.open(createZip(gap)), /piece sequence/);
     const afterFinal = { ...entries, "page.fpage/[2].piece": encoder.encode("extra") };
     await assert.rejects(engine.open(createZip(afterFinal)), /piece sequence/);
+  } finally { engine.close(); }
+});
+
+test("supplied XPS directory references recover real content with diagnostics", async t => {
+  const { xps } = await readArtifacts();
+  const engine = await createOfficeEngine({ wasm: xps, execution: "inline" });
+  try {
+    for (const [name, warning] of [
+      ["control", null], ["traversal", /escapes the package root/u],
+      ["none", /directory reference/u], ["ambiguous", /equivalent FixedDocuments/u],
+    ]) await t.test(name, async () => {
+      const document = await engine.open(await readFile(new URL(
+        `./fixtures/xps-directory-reference/${name}.xps`, import.meta.url,
+      )));
+      try {
+        assert.equal(document.info.units.length, 1);
+        const objects = await document.listObjects({ unitIndex: 0 });
+        assert.equal(objects.map(object => object.text ?? "").join("").trim(), "This is a test");
+        if (warning) assert.ok(document.diagnostics().some(diagnostic =>
+          diagnostic.severity === "warning" && warning.test(diagnostic.message)));
+      } finally { document.close(); }
+    });
+  } finally { engine.close(); }
+});
+
+test("XPS reference recovery preserves ambiguity and package safety boundaries", async t => {
+  const { xps } = await readArtifacts();
+  const engine = await createOfficeEngine({ wasm: xps, execution: "inline" });
+  const entries = readZipEntries(await readFile(new URL(
+    "./fixtures/xps-directory-reference/ambiguous.xps", import.meta.url,
+  )));
+  const doc = "Documents/1/FixedDoc.fdoc";
+  const other = "Documents/1/Other.fdoc";
+  const sequence = source => encoder.encode(`<FixedDocumentSequence><DocumentReference Source="${source}"/></FixedDocumentSequence>`);
+  const changed = (replacements, removed = []) => writeZipEntries([
+    ...entries.filter(entry => !removed.includes(entry.name))
+      .map(entry => ({ ...entry, data: replacements[entry.name] ?? entry.data })),
+    ...Object.entries(replacements).filter(([name]) => !entries.some(entry => entry.name === name))
+      .map(([name, data]) => ({ name, data })),
+  ]);
+  try {
+    for (const [name, bytes, error] of [
+      ["distinct document contents", changed({ [other]: encoder.encode('<FixedDocument><PageContent Source="Pages/2.fpage"/></FixedDocument>') }), /multiple candidate FixedDocuments/u],
+      ["identical bytes with different URI bases", changed({
+        "FixedDocSeq.fdseq": sequence("/missing/"),
+        "Documents/2/Other.fdoc": entries.find(entry => entry.name === doc).data,
+      }, [other]), /multiple candidate FixedDocuments/u],
+      ["no declared document", changed({}, [doc, other]), /contains no FixedDocument/u],
+      ["unsafe reference without a recoverable document", changed({ "FixedDocSeq.fdseq": sequence("../../Documents/1/") }, [doc, other]), /escapes the package root/u],
+      ["multiple references cannot reuse a guessed document", changed({
+        "FixedDocSeq.fdseq": encoder.encode(`<FixedDocumentSequence><DocumentReference Source="/${doc}"/><DocumentReference Source="/missing/"/></FixedDocumentSequence>`),
+      }, [other]), /contains no FixedDocument/u],
+      ["recovered page URI still cannot escape", changed({ [doc]: encoder.encode('<FixedDocument><PageContent Source="../../../secret.fpage"/></FixedDocument>') }, [other]), /escapes the package root/u],
+      ["recovered XML still rejects DTDs", changed({ [doc]: encoder.encode('<!DOCTYPE FixedDocument><FixedDocument/>') }, [other]), /DTD/u],
+      ["ZIP traversal still fails", changed({ "../secret.fpage": encoder.encode("secret") }), /ZIP entry/u],
+    ]) await t.test(name, () => assert.rejects(engine.open(bytes), error));
+
+    await t.test("OpenXPS content type declarations recover the same real page", async () => {
+      const types = new TextDecoder().decode(entries.find(entry => entry.name === "[Content_Types].xml").data);
+      const document = await engine.open(changed({
+        "[Content_Types].xml": encoder.encode(types.replaceAll("application/vnd.ms-package.xps-", "application/oxps-")),
+      }));
+      try {
+        assert.equal(document.info.units.length, 1);
+        const objects = await document.listObjects({ unitIndex: 0 });
+        assert.equal(objects.map(object => object.text ?? "").join("").trim(), "This is a test");
+      } finally { document.close(); }
+    });
+
+    await t.test("explicit repeated references retain their page order", async () => {
+      const document = await engine.open(changed({
+        "FixedDocSeq.fdseq": encoder.encode(`<FixedDocumentSequence><DocumentReference Source="/${doc}"/><DocumentReference Source="/${other}"/></FixedDocumentSequence>`),
+      }));
+      try { assert.equal(document.info.units.length, 2); } finally { document.close(); }
+    });
   } finally { engine.close(); }
 });

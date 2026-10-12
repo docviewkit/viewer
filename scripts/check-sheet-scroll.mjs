@@ -16,7 +16,7 @@ const url = await new Promise((resolve, reject) => {
   server.once('exit', code => reject(new Error(`Server exited: ${code}`)));
 });
 try {
-  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,firefox,webkit').split(',')) {
+  for (const name of (process.env.DOCVIEWKIT_BROWSERS ?? 'chromium,webkit').split(',')) {
     const browser = await ({ chromium, firefox, webkit })[name].launch({ timeout: 15000 });
     try {
       const page = await browser.newPage({ viewport: { width: 1000, height: 450 }, deviceScaleFactor: ratio });

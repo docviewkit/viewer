@@ -97,12 +97,15 @@ test("localization is icon-first without losing accessible names", () => {
   assert.doesNotMatch(source, /[\u{1F300}-\u{1FAFF}]/u);
 });
 
-test("theme defaults to browser preference and keeps the document surface white", () => {
+test("theme follows browser preference across document surfaces without changing source or print colors", () => {
   assert.match(source, /type ViewerTheme = "auto" \| "light" \| "dark"/);
   assert.match(source, /matchMedia\("\(prefers-color-scheme: dark\)"\)/);
   assert.match(source, /data-resolved-theme="dark"/);
   assert.match(source, /color-scheme: dark/);
-  assert.match(source, /\.stage \{[\s\S]*?background: #ffffff/);
+  assert.doesNotMatch(source, /invert\(\.9\)/);
+  assert.match(source, /colorScheme: this\.#resolvedTheme/);
+  assert.match(source, /\.stage \{[\s\S]*?background: var\(--dv-document-background\)/);
+  assert.match(source, /@media print \{[\s\S]*?--dv-document-background: #ffffff !important/);
   assert.match(source, /background: "#ffffff"/);
 });
 
@@ -341,7 +344,7 @@ test("navigation thumbnails preserve the rendered viewport aspect ratio", () => 
   assert.match(source, /--dv-thumbnail-aspect/);
   assert.match(source, /--dv-thumbnail-max-width/);
   assert.match(thumbnailRenderer, /viewport\.width \/ Math\.max\(1, viewport\.height\)/);
-  assert.match(thumbnailRenderer, /120 \/ Math\.max\(1, unit\.width\), 96 \/ Math\.max\(1, unit\.height\)/);
+  assert.match(thumbnailRenderer, /MAX_NAVIGATION_WIDTH \/ Math\.max\(1, unit\.width\), 96 \/ Math\.max\(1, unit\.height\)/);
   assert.match(source, /\.thumbnail canvas \{[^}]*width: 100%;[^}]*height: 100%;[^}]*min-width: 0;[^}]*min-height: 0;/);
   assert.match(source, /box-shadow: inset 0 0 0 1px #cfd4dc/);
   assert.doesNotMatch(source, /\.thumbnail \{[^}]*min-height:/);

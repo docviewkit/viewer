@@ -873,7 +873,14 @@ impl RtfParser<'_> {
 
     fn rtf_run(&self, text: String) -> TextRun {
         TextRun {
-            paint: None,
+            paint: (self.state.color_index != 0).then(|| {
+                Box::new(Paint::Solid(
+                    self.colors
+                        .get(self.state.color_index)
+                        .copied()
+                        .unwrap_or(0x0000_00ff),
+                ))
+            }),
             east_asian_line_breaks: true,
             text,
             font_family: self

@@ -1,0 +1,108 @@
+%PDF-1.3
+%‚„œ”
+1 0 obj
+<<
+/Producer (pypdf)
+>>
+endobj
+2 0 obj
+<<
+/Type /Pages
+/Count 2
+/Kids [ 4 0 R 6 0 R ]
+>>
+endobj
+3 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+/Names 9 0 R
+>>
+endobj
+4 0 obj
+<<
+/Annots [ 5 0 R ]
+/MediaBox [ 0 0 595.276 841.89 ]
+/Resources <<
+>>
+/Type /Page
+/Parent 2 0 R
+>>
+endobj
+5 0 obj
+<<
+/A <<
+/D (cite\056hysparse)
+/S /GoTo
+>>
+/Border [ 0 0 1 ]
+/C [ 0 1 0 ]
+/H /I
+/Rect [ 121.344 629.126 168.124 641.618 ]
+/Subtype /Link
+/Type /Annot
+>>
+endobj
+6 0 obj
+<<
+/Annots [ 7 0 R ]
+/MediaBox [ 0 0 595.276 841.89 ]
+/Resources <<
+>>
+/Type /Page
+/Parent 2 0 R
+>>
+endobj
+7 0 obj
+<<
+/A <<
+/S /URI
+/Type /Action
+/URI (https\072\057\057aclanthology\056org\0572023\056emnlp\055main\056298\057)
+>>
+/Border [ 0 0 1 ]
+/C [ 0 1 1 ]
+/H /I
+/Rect [ 104.041 626.701 390.032 639.694 ]
+/Subtype /Link
+/Type /Annot
+>>
+endobj
+8 0 obj
+<<
+/D [ 6 0 R /FitH 826 ]
+/S /GoTo
+>>
+endobj
+9 0 obj
+<<
+/Dests 10 0 R
+>>
+endobj
+10 0 obj
+<<
+/Names [ (cite\056hysparse) 8 0 R ]
+>>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000015 00000 n 
+0000000054 00000 n 
+0000000119 00000 n 
+0000000181 00000 n 
+0000000296 00000 n 
+0000000464 00000 n 
+0000000579 00000 n 
+0000000818 00000 n 
+0000000871 00000 n 
+0000000906 00000 n 
+trailer
+<<
+/Size 11
+/Root 3 0 R
+/Info 1 0 R
+>>
+startxref
+964
+%%EOF
