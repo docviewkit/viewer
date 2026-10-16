@@ -9246,30 +9246,7 @@ fn push_odp_math(
             },
         },
         visual: layer_visual(
-            Visual::RichText {
-                geometry: Geometry::Rectangle,
-                fill: Paint::None,
-                stroke: Paint::None,
-                stroke_width: 0.0,
-                align: TextAlign::Center,
-                line_height: 0.0,
-                runs: vec![TextRun {
-                    paint: None,
-                    east_asian_line_breaks: true,
-                    text: math.text.clone(),
-                    font_family: "Cambria Math".to_owned(),
-                    font_size: 18.0 * CSS_PIXELS_PER_INCH / 72.0,
-                    color: 0x0000_00ff,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                    strikethrough: false,
-                    highlight: 0,
-                    baseline_shift: 0.0,
-                    letter_spacing: 0.0,
-                    horizontal_scale: 1.0,
-                }],
-            },
+            math.visual(18.0 * CSS_PIXELS_PER_INCH / 72.0, TextAlign::Center),
             frame.transform,
             1.0,
         ),
@@ -11337,6 +11314,23 @@ mod tests {
             .find(|o| o.text.as_deref() == Some("1+1"))
             .unwrap();
         assert_eq!(formula.source.part, "Object 1/content.xml");
+        let Visual::TextLayout { layout, visual } = &formula.visual else {
+            panic!("embedded math must carry its unwrapped layout");
+        };
+        assert!(!layout.wrap);
+        assert_eq!(
+            (
+                layout.inset_left,
+                layout.inset_right,
+                layout.inset_top,
+                layout.inset_bottom
+            ),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+        assert!(
+            matches!(&**visual, Visual::RichText { runs, align: TextAlign::Center, .. }
+            if runs.len() == 1 && runs[0].text == "1+1" && runs[0].font_size == 24.0)
+        );
     }
 
     #[test]

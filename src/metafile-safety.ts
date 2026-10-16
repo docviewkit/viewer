@@ -25,6 +25,45 @@ const EMF_PLUS_BITMAP_TYPE_COMPRESSED = 2;
 const MAX_METAFILE_RECORDS = 200_000;
 const MAX_EMF_PLUS_CONTINUATION_BYTES = 64 * 1024 * 1024;
 
+/** Conservative font demand for EMF/EMF+; uncertain or nested content stays eager. */
+export function metafileMayUseFonts(bytes: Uint8Array): boolean {
+  if (bytes.length < 88 || u32le(bytes, 0) !== 1) return true;
+  let offset = 0;
+  for (let count = 0; count < MAX_METAFILE_RECORDS && offset + 8 <= bytes.length; count++) {
+    const kind = u32le(bytes, offset), size = u32le(bytes, offset + 4);
+    if (size < 8 || size % 4 !== 0 || offset + size > bytes.length) return true;
+    // Font creation and all GDI text operations supported by the converter.
+    if ([82, 83, 84, 96, 97, 108].includes(kind)) return true;
+    if (kind === EMR_COMMENT) {
+      if (size < 16) return true;
+      const length = u32le(bytes, offset + 8);
+      if (length > size - 12) return true;
+      if (u32le(bytes, offset + 12) === EMF_PLUS_SIGNATURE) {
+        const end = offset + 12 + length;
+        let cursor = offset + 16, records = 0;
+        while (cursor + 12 <= end && records++ < MAX_METAFILE_RECORDS) {
+          const type = u16le(bytes, cursor), flags = u16le(bytes, cursor + 2);
+          const length = u32le(bytes, cursor + 4), dataSize = u32le(bytes, cursor + 8);
+          if (length < 12 || length % 4 !== 0 || cursor + length > end || dataSize > length - 12) return true;
+          if (type === 0x401c || type === 0x4036) return true; // DrawString / DrawDriverString
+          if (type === EMF_PLUS_OBJECT) {
+            const objectType = (flags >> 8) & 0x7f;
+            if (objectType === 6) return true; // Font
+            if (objectType === EMF_PLUS_OBJECT_TYPE_IMAGE
+              && ((flags & 0x8000) !== 0 || dataSize < 8
+                || u32le(bytes, cursor + 16) !== EMF_PLUS_IMAGE_TYPE_BITMAP)) return true;
+          }
+          cursor += length;
+        }
+        if (cursor !== end) return true;
+      }
+    }
+    if (kind === 14) return false;
+    offset += size;
+  }
+  return true;
+}
+
 interface MetafileBudget {
   readonly maxBytes: number;
   readonly maxPixels: number;

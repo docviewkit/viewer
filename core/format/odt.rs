@@ -3407,38 +3407,33 @@ fn finish_frame(
                     text_range: Some((0, text_length)),
                 },
             },
-            visual: Visual::RichText {
-                geometry: Geometry::Rectangle,
-                fill: Paint::None,
-                stroke: Paint::None,
-                stroke_width: 0.0,
-                align: TextAlign::Start,
-                line_height: if frame.math.is_some() {
-                    0.0
-                } else {
-                    LINE_HEIGHT
-                },
-                runs: vec![TextRun {
-                    paint: None,
-                    east_asian_line_breaks: true,
-                    text: frame.text,
-                    font_family: if frame.math.is_some() {
-                        "Cambria Math"
-                    } else {
-                        "Arial"
-                    }
-                    .to_owned(),
-                    font_size: FONT_SIZE,
-                    color: 0x0000_00ff,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                    strikethrough: false,
-                    highlight: 0,
-                    baseline_shift: 0.0,
-                    letter_spacing: 0.0,
-                    horizontal_scale: 1.0,
-                }],
+            visual: if let Some(math) = &frame.math {
+                math.visual(FONT_SIZE, TextAlign::Start)
+            } else {
+                Visual::RichText {
+                    geometry: Geometry::Rectangle,
+                    fill: Paint::None,
+                    stroke: Paint::None,
+                    stroke_width: 0.0,
+                    align: TextAlign::Start,
+                    line_height: LINE_HEIGHT,
+                    runs: vec![TextRun {
+                        paint: None,
+                        east_asian_line_breaks: true,
+                        text: frame.text,
+                        font_family: "Arial".to_owned(),
+                        font_size: FONT_SIZE,
+                        color: 0x0000_00ff,
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        strikethrough: false,
+                        highlight: 0,
+                        baseline_shift: 0.0,
+                        letter_spacing: 0.0,
+                        horizontal_scale: 1.0,
+                    }],
+                }
             },
         });
     }
@@ -8547,8 +8542,22 @@ mod tests {
             "inline formula must stay in the first text line: {:?}",
             formula.bounds
         );
+        let Visual::TextLayout { layout, visual } = &formula.visual else {
+            panic!("embedded math must carry its unwrapped layout");
+        };
+        assert!(!layout.wrap);
+        assert_eq!(
+            (
+                layout.inset_left,
+                layout.inset_right,
+                layout.inset_top,
+                layout.inset_bottom
+            ),
+            (0.0, 0.0, 0.0, 0.0)
+        );
         assert!(
-            matches!(&formula.visual, Visual::RichText { runs, .. } if runs.len() == 1 && runs[0].text == "1+1")
+            matches!(&**visual, Visual::RichText { runs, align: TextAlign::Start, .. }
+            if runs.len() == 1 && runs[0].text == "1+1" && runs[0].font_size == super::FONT_SIZE)
         );
         assert!(
             !document

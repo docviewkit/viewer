@@ -1854,7 +1854,19 @@ export class DocViewKitViewerElement extends HTMLElement {
       }
       throw cause;
     } finally {
-      if (this.#openController === controller) this.#openController = undefined;
+      if (this.#openController === controller) {
+        if (this.#status !== "ready") this.#openController = undefined;
+        else requestAnimationFrame(() => setTimeout(() => {
+          if (this.#openController !== controller) return;
+          // Release speculative work after the visible canvas has had a paint
+          // opportunity, including when decoding runs on the main thread.
+          this.#openController = undefined;
+          this.#renderNavigationWindow(this.#unitIndex, true);
+          for (const [index, record] of this.#continuousPages) {
+            if (record.visible) void this.#renderContinuousPage(index);
+          }
+        }, 0));
+      }
     }
   }
 
@@ -3871,6 +3883,7 @@ export class DocViewKitViewerElement extends HTMLElement {
     }
     view.append(fragment);
     this.#refreshObjectHighlights();
+    let initialRender = true;
 
     if (typeof IntersectionObserver === "function") {
       this.#continuousObserver = new IntersectionObserver((entries) => {
@@ -3883,7 +3896,7 @@ export class DocViewKitViewerElement extends HTMLElement {
           record.element.style.contentVisibility = entry.isIntersecting ? "visible" : "auto";
           if (entry.isIntersecting) {
             record.lastUsed = performance.now();
-            void this.#renderContinuousPage(unitIndex, revision);
+            if (!initialRender) void this.#renderContinuousPage(unitIndex, revision);
           }
         }
         this.#evictContinuousPages();
@@ -3913,10 +3926,12 @@ export class DocViewKitViewerElement extends HTMLElement {
 
     this.#zoom = scale;
     this.#updateControls();
-    await Promise.all([
-      this.#renderContinuousPage(this.#unitIndex, revision),
-      this.#renderContinuousPage(this.#unitIndex + 1, revision),
-    ]);
+    // First paint waits for the visible viewport, not an offscreen adjacent page.
+    const viewport = this.#workspace().getBoundingClientRect();
+    await Promise.all([...this.#continuousPages].filter(([index, record]) => {
+      const bounds = record.element.getBoundingClientRect();
+      return index === this.#unitIndex || (bounds.bottom > viewport.top && bounds.top < viewport.bottom);
+    }).map(([index]) => this.#renderContinuousPage(index, revision)));
     if (revision !== this.#continuousRevision || this.#pageMode !== "continuous") return;
     await this.#revealContinuousUnit(this.#unitIndex, false);
     this.#zoom = this.#continuousPages.get(this.#unitIndex)?.scale ?? this.#zoom;
@@ -3924,6 +3939,13 @@ export class DocViewKitViewerElement extends HTMLElement {
     this.#setMessage(this.#info?.format.toUpperCase() ?? "");
     this.#renderDiagnostics();
     this.#updateControls();
+    requestAnimationFrame(() => {
+      if (revision !== this.#continuousRevision || this.#pageMode !== "continuous") return;
+      initialRender = false;
+      for (const [index, record] of this.#continuousPages) {
+        if (record.visible) void this.#renderContinuousPage(index, revision);
+      }
+    });
   }
 
   async #renderContinuousPage(unitIndex: number, revision = this.#continuousRevision): Promise<void> {
@@ -3934,6 +3956,11 @@ export class DocViewKitViewerElement extends HTMLElement {
       || this.#pinchZoomTimer !== undefined || record.rendering
       || (record.rendered && Math.abs(record.renderedScale - record.scale) < .005)
       || revision !== this.#continuousRevision || this.#pageMode !== "continuous") return;
+    if (this.#openController !== undefined && unitIndex !== this.#unitIndex) {
+      const viewport = this.#workspace().getBoundingClientRect();
+      const bounds = record.element.getBoundingClientRect();
+      if (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom) return;
+    }
     record.rendering = true;
     if (!record.rendered) this.#showThumbnailPreview(unitIndex, record.canvas);
     const scale = record.scale;
@@ -4511,6 +4538,8 @@ export class DocViewKitViewerElement extends HTMLElement {
   }
 
   async #renderThumbnail(unitIndex: number): Promise<void> {
+    // Do not let speculative page/font decoding hold up the first visible frame.
+    if (this.#openController !== undefined) return;
     const document = this.#document;
     const unit = this.#info?.units[unitIndex];
     if (document === undefined || unit === undefined) return;

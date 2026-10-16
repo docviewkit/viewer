@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { readZipEntries } from "../scripts/accuracy-metamorphic.mjs";
 import { gzipSync } from "node:zlib";
 
+import { metafileMayUseFonts } from "../dist/metafile-safety.js";
 import { decodeOfficeImagePayload } from "../dist/image-codecs.js";
 
 const PNG_1X1 = Uint8Array.from([
@@ -1348,4 +1349,16 @@ test("complex0 Marlett checkbox layers render their authored bevel instead of La
     assert.equal(paths.length, 10);
 
   } finally { environment.restore(); }
+});
+
+
+test("metafile font demand excludes bitmap-only EMF but preserves GDI, EMF+ and uncertain text", () => {
+  assert.equal(metafileMayUseFonts(makeEmf()), false);
+  assert.equal(metafileMayUseFonts(makeEmf([emfPlusRasterObject(1, PNG_1X1), emfPlusDrawImage(1)])), false);
+  assert.equal(metafileMayUseFonts(makeEmfRecords([emfTextRecord("Text")])), true);
+  assert.equal(metafileMayUseFonts(makeEmf(emfPlusTextRecords("Text"))), true);
+  assert.equal(metafileMayUseFonts(makeEmf([emfPlusMetafileObject(1, makeEmf())])), true);
+  assert.equal(metafileMayUseFonts(makeEmf([emfPlusContinuedMetafileObject(1, makeEmf())].flat())), true);
+  assert.equal(metafileMayUseFonts(makeEmf().subarray(0, 91)), true);
+  assert.equal(metafileMayUseFonts(new Uint8Array(0)), true);
 });

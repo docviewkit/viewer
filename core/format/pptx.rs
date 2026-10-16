@@ -67,7 +67,7 @@ use super::{
     ContentTypes, diamond_geometry, local_name, normalize_symbol_font_character, polygon_geometry,
     regular_polygon_geometry, star_geometry,
 };
-use drawingml_presets::PRESET_SHAPE_DEFINITIONS;
+use drawingml_presets::{PRESET_SHAPE_DEFINITIONS, PRESET_TEXT_WARP_DEFINITIONS};
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
 const POINTS_TO_CSS_PIXELS: f32 = 96.0 / 72.0;
@@ -831,7 +831,7 @@ struct ShapeState {
     baseline_shift: f32,
     font_color: u32,
     font_paint: Option<Box<Paint>>,
-    explicit_text_color: bool,
+    font_reference_color: Option<u32>,
     diagram_text_color: Option<u32>,
     letter_spacing: f32,
     east_asian_line_breaks: bool,
@@ -856,6 +856,7 @@ struct ShapeState {
     run_properties_target: Option<RunPropertiesTarget>,
     text_body_properties_depth: Option<usize>,
     fill_reference_depth: Option<usize>,
+    style_fill_index: Option<u64>,
     line_reference_depth: Option<usize>,
     font_reference_depth: Option<usize>,
     align: TextAlign,
@@ -873,6 +874,8 @@ struct ShapeState {
     text_vertical_overflow: TextVerticalOverflow,
     text_wrap: bool,
     text_warp: Option<String>,
+    text_warp_depth: Option<usize>,
+    text_warp_adjustments: HashMap<String, f32>,
     text_inset_left: f32,
     text_inset_right: f32,
     text_inset_top: f32,
@@ -966,7 +969,7 @@ impl ShapeState {
             baseline_shift: 0.0,
             font_paint: None,
             font_color: 0x0000_00ff,
-            explicit_text_color: false,
+            font_reference_color: None,
             diagram_text_color: None,
             letter_spacing: 0.0,
             east_asian_line_breaks: true,
@@ -991,6 +994,7 @@ impl ShapeState {
             run_properties_target: None,
             text_body_properties_depth: None,
             fill_reference_depth: None,
+            style_fill_index: None,
             line_reference_depth: None,
             font_reference_depth: None,
             align: TextAlign::Start,
@@ -1008,6 +1012,8 @@ impl ShapeState {
             text_vertical_overflow: TextVerticalOverflow::Overflow,
             text_wrap: true,
             text_warp: None,
+            text_warp_depth: None,
+            text_warp_adjustments: HashMap::new(),
             text_inset_left: 9.6,
             text_inset_right: 9.6,
             text_inset_top: 4.8,
@@ -1239,11 +1245,12 @@ impl CustomGeometryState {
         if let Ok(value) = token.parse::<f32>() {
             return value.is_finite().then_some(value);
         }
-        if let Some(value) = self.builtin(token) {
-            return Some(value);
-        }
         if let Some(value) = self.formula_cache.borrow().get(token).copied() {
             return Some(value);
+        }
+        // Authored guides can shadow built-ins (the ring text presets define `r`).
+        if !self.formulas.contains_key(token) {
+            return self.builtin(token);
         }
         if !visiting.insert(token.to_owned()) {
             return None;
@@ -1728,10 +1735,15 @@ pub(super) fn drawingml_preset_geometry(
             }),
         ));
     }
-    let index = PRESET_SHAPE_DEFINITIONS
+    let definitions = if preset.starts_with("text") {
+        PRESET_TEXT_WARP_DEFINITIONS
+    } else {
+        PRESET_SHAPE_DEFINITIONS
+    };
+    let index = definitions
         .binary_search_by_key(&preset, |(name, _)| *name)
         .ok()?;
-    let definition = PRESET_SHAPE_DEFINITIONS[index].1;
+    let definition = definitions[index].1;
     let mut geometry = CustomGeometryState::new(0, bounds.width, bounds.height);
     geometry.preserve_formula_cache_across_paths = true;
     let mut depth = 0_usize;
@@ -1779,9 +1791,17 @@ pub(super) fn drawingml_preset_geometry(
     )
     .ok()?;
     let text_rectangle = geometry.text_rectangle(bounds);
-    geometry
-        .into_geometry(bounds)
-        .map(|geometry| (geometry, text_rectangle))
+    geometry.into_geometry(bounds).map(|mut geometry| {
+        if preset.starts_with("text")
+            && let Geometry::LayeredPath { layers } = &mut geometry
+        {
+            for layer in layers {
+                layer.fill = PathFillMode::None;
+                layer.stroke = false;
+            }
+        }
+        (geometry, text_rectangle)
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3350,6 +3370,7 @@ fn resolve_pptx_theme_fill(
     index: u64,
     placeholder: u32,
 ) -> Result<Option<super::drawingml::ChartFill>, Diagnostic> {
+    // PaintCapture preserves PPTX system/scRGB colors and empty-fill defaults, unlike ChartFillCapture.
     let Some((list, index)) = pptx_theme_fill_slot(index) else {
         return Ok(None);
     };
@@ -3908,7 +3929,7 @@ fn parse_speaker_notes(
                         }
                         "br" => {
                             begin_shape_paragraph(current, true);
-                            append_shape_line_break(current, depth, '\u{2028}');
+                            begin_shape_line_break(current, depth, empty);
                         }
                         "rPr" | "defRPr" => {
                             begin_shape_run_properties(current, &attributes, depth, empty, part)?;
@@ -3974,7 +3995,7 @@ fn parse_speaker_notes(
                         current.run_properties_depth = None;
                         current.run_properties_target = None;
                     }
-                    if matches!(local, "r" | "fld")
+                    if matches!(local, "r" | "fld" | "br")
                         && current.run.as_ref().is_some_and(|run| run.depth == depth)
                     {
                         finish_speaker_note_run(current, part)?;
@@ -5188,9 +5209,7 @@ fn begin_shape_paragraph(shape: &mut ShapeState, emit_prefix: bool) {
     if let Some(font_size) = style.font_size {
         shape.font_size = font_size;
     }
-    if !shape.explicit_text_color
-        && let Some(font_color) = style.font_color
-    {
+    if let Some(font_color) = style.font_color {
         shape.font_color = font_color;
     }
     if let Some(bold) = style.bold {
@@ -5670,6 +5689,17 @@ fn append_table_cell_line_break(cell: &mut TableCellState, depth: usize, separat
     cell.runs.push(line_break);
     cell.run_effects
         .push(cell.run_effects.last().cloned().unwrap_or_default());
+}
+
+fn begin_shape_line_break(shape: &mut ShapeState, depth: usize, empty: bool) {
+    if empty {
+        append_shape_line_break(shape, depth, '\u{2028}');
+    } else {
+        shape.text.push('\n');
+        let mut run = TextRunState::from_shape(shape, depth);
+        run.text.push('\u{2028}');
+        shape.run = Some(run);
+    }
 }
 
 fn append_shape_line_break(shape: &mut ShapeState, depth: usize, separator: char) {
@@ -6395,7 +6425,7 @@ fn parse_presentation_part(
                                 }
                             };
                         }
-                        "gd" if current.preset.is_some() => {
+                        "gd" if current.preset.is_some() || current.text_warp_depth.is_some() => {
                             if let (Some(name), Some(formula)) = (
                                 string_attribute(&attributes, "name", part)?,
                                 string_attribute(&attributes, "fmla", part)?,
@@ -6404,7 +6434,11 @@ fn parse_presentation_part(
                                 .and_then(|value| value.parse::<f32>().ok())
                                 .filter(|value| value.is_finite())
                             {
-                                current.preset_adjustments.insert(name, value);
+                                if current.text_warp_depth.is_some() {
+                                    current.text_warp_adjustments.insert(name, value);
+                                } else {
+                                    current.preset_adjustments.insert(name, value);
+                                }
                             }
                         }
                         "headEnd" if current.line_depth.is_some() => {
@@ -6532,6 +6566,8 @@ fn parse_presentation_part(
                             current.text_line_spacing_reduction = 0.0;
                         }
                         "prstTxWarp" => {
+                            current.text_warp_depth = (!empty).then_some(depth);
+                            current.text_warp_adjustments.clear();
                             current.text_warp = string_attribute(&attributes, "prst", part)?
                                 .filter(|value| !value.is_empty() && value != "textNoShape");
                             if current.text_warp.is_some() && !wordart_warp_reported {
@@ -6816,7 +6852,7 @@ fn parse_presentation_part(
                         }
                         "br" => {
                             begin_shape_paragraph(current, true);
-                            append_shape_line_break(current, depth, '\u{2028}');
+                            begin_shape_line_break(current, depth, empty);
                         }
                         "endParaRPr" => {
                             if let Some(size) = numeric_attribute(&attributes, "sz", part)? {
@@ -6859,6 +6895,7 @@ fn parse_presentation_part(
                             apply_shape_run_typeface(current, local, &attributes, part, theme)?;
                         }
                         "fillRef" => {
+                            current.style_fill_index = numeric_attribute(&attributes, "idx", part)?;
                             current.fill_reference_depth = (!empty
                                 && drawingml_fill_reference_has_paint(&attributes, part)?)
                                 .then_some(depth);
@@ -6881,9 +6918,8 @@ fn parse_presentation_part(
                                 } else if current.line_reference_depth.is_some() {
                                     current.style_stroke = Some(Paint::Solid(color));
                                 } else if current.font_reference_depth.is_some() {
-                                    current.font_color =
-                                        current.diagram_text_color.unwrap_or(color);
-                                    current.explicit_text_color = true;
+                                    current.font_reference_color =
+                                        Some(current.diagram_text_color.unwrap_or(color));
                                 }
                             }
                         }
@@ -6901,12 +6937,10 @@ fn parse_presentation_part(
                                 if let Some(stroke) = current.style_stroke.as_mut() {
                                     apply_paint_color_transform(stroke, local, ratio);
                                 }
-                            } else if current.font_reference_depth.is_some() {
-                                apply_drawingml_color_transform(
-                                    &mut current.font_color,
-                                    local,
-                                    ratio,
-                                );
+                            } else if current.font_reference_depth.is_some()
+                                && let Some(color) = current.font_reference_color.as_mut()
+                            {
+                                apply_drawingml_color_transform(color, local, ratio);
                             }
                         }
                         "t" if current.math_capture.is_none() => {
@@ -8429,13 +8463,16 @@ fn parse_presentation_part(
                     {
                         current.text_body_properties_depth = None;
                     }
+                    if local == "prstTxWarp" && current.text_warp_depth == Some(depth) {
+                        current.text_warp_depth = None;
+                    }
                     if matches!(local, "rPr" | "defRPr")
                         && current.run_properties_depth == Some(depth)
                     {
                         current.run_properties_depth = None;
                         current.run_properties_target = None;
                     }
-                    if matches!(local, "r" | "fld")
+                    if matches!(local, "r" | "fld" | "br")
                         && current.run.as_ref().is_some_and(|run| run.depth == depth)
                     {
                         let run = current.run.take().ok_or_else(|| {
@@ -8452,12 +8489,35 @@ fn parse_presentation_part(
                         current.runs.extend(runs);
                     }
                     if local == "fillRef" && current.fill_reference_depth == Some(depth) {
+                        if !current.explicit_fill
+                            && let (Some(index), Some(theme_part)) = (current.style_fill_index, theme.part.as_deref()) {
+                            let placeholder = match current.style_fill { Some(Paint::Solid(color)) => color, _ => 0x0000_00ff };
+                            match super::drawingml::drawingml_theme_fill(package, theme_part, index, placeholder, &|name| theme.color(name)) {
+                                Ok(Some(fill)) => current.style_fill = Some(fill.paint(shape_bounds(current))),
+                                Ok(None) => {},
+                                Err(mut error) => {
+                                    error.severity = crate::diagnostic::Severity::Warning;
+                                    error.fidelity = Fidelity::Approximate;
+                                    state.diagnostics.push(error);
+                                }
+                            }
+                        }
                         current.fill_reference_depth = None;
                     } else if local == "lnRef" && current.line_reference_depth == Some(depth) {
                         current.line_reference_depth = None;
                     } else if local == "fontRef"
                         && current.font_reference_depth == Some(depth)
                     {
+                        // A shape fontRef overrides inherited text defaults, but
+                        // subsequent local list/paragraph/run properties override it.
+                        // Seed each level instead of locking the shape's text color:
+                        // unused list levels must never supply the active run color.
+                        if let Some(color) = current.font_reference_color.take() {
+                            current.font_color = color;
+                            for style in &mut current.paragraph_styles {
+                                style.font_color = Some(color);
+                            }
+                        }
                         current.font_reference_depth = None;
                     }
                 }
@@ -16475,7 +16535,18 @@ fn push_shape(
     };
     let text_length = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
     let has_text = !text.is_empty();
-    let separate_shape_and_text = text_transform_bounds.is_some()
+    let text_envelope = shape.text_warp.as_deref().and_then(|preset| {
+        drawingml_preset_geometry(
+            preset,
+            text_transform_bounds.unwrap_or(bounds),
+            &shape.text_warp_adjustments,
+        )
+        .map(|(geometry, _)| geometry)
+    });
+    if text_envelope.is_some() {
+        shape.text_warp = Some("text-envelope-arc".to_owned());
+    }
+    let mut separate_shape_and_text = text_transform_bounds.is_some()
         || (has_text && (shape.flip_horizontal || shape.flip_vertical));
     let transform = shape_transform(
         bounds,
@@ -16512,6 +16583,8 @@ fn push_shape(
     } else {
         fill
     };
+    separate_shape_and_text |=
+        text_envelope.is_some() && (fill != Paint::None || stroke != Paint::None);
     let text_font_size = shape
         .runs
         .iter()
@@ -16680,11 +16753,13 @@ fn push_shape(
         }
         run_effects.resize(runs.len(), TextEffect::default());
         let visual = Visual::RichText {
-            geometry: if separate_shape_and_text {
-                Geometry::Rectangle
-            } else {
-                shape.geometry.clone()
-            },
+            geometry: text_envelope.unwrap_or_else(|| {
+                if separate_shape_and_text {
+                    Geometry::Rectangle
+                } else {
+                    shape.geometry.clone()
+                }
+            }),
             fill: if separate_shape_and_text {
                 Paint::None
             } else {
@@ -20691,6 +20766,88 @@ mod tests {
                     stroke: Paint::Solid(0xffff_ffff), stroke_width, ..
                 } if *stroke_width > 0.0)
         ));
+    }
+
+    #[test]
+    fn shape_local_paragraph_colors_override_font_reference_without_level_leaks() {
+        // Minimized from the supplied brochure's page-7 cards: local lvl1pPr
+        // is dark gray, whereas fontRef and the unused levels are near white.
+        let slide = br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp>
+          <p:nvSpPr><p:cNvPr id="39"/></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3810000" cy="3810000"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr>
+          <p:style><a:fontRef idx="minor"><a:schemeClr val="lt1"><a:shade val="99000"/></a:schemeClr></a:fontRef></p:style>
+          <p:txBody><a:bodyPr/><a:lstStyle>
+            <a:defPPr><a:defRPr lang="en-US"/></a:defPPr>
+            <a:lvl1pPr><a:defRPr><a:solidFill><a:srgbClr val="404040"/></a:solidFill></a:defRPr></a:lvl1pPr>
+            <a:lvl2pPr><a:defRPr><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:defRPr></a:lvl2pPr>
+          </a:lstStyle>
+          <a:p><a:r><a:rPr sz="1200"/><a:t>Our ecosystem</a:t></a:r></a:p>
+          <a:p><a:pPr lvl="1"/><a:r><a:t>Level two</a:t></a:r></a:p>
+          <a:p><a:pPr lvl="2"/><a:r><a:t>Font reference</a:t></a:r></a:p>
+          <a:p><a:pPr><a:defRPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></a:defRPr></a:pPr><a:r><a:t>Paragraph override</a:t></a:r></a:p>
+          <a:p><a:r><a:rPr><a:solidFill><a:srgbClr val="445566"/></a:solidFill></a:rPr><a:t>Run override</a:t></a:r></a:p>
+          <a:p><a:r><a:t>Level one again</a:t></a:r></a:p>
+          </p:txBody>
+        </p:sp></p:spTree></p:cSld></p:sld>"#;
+        let bytes = stored_zip(&[
+            (SLIDE_PART, slide),
+            ("ppt/slides/_rels/slide1.xml.rels", b"<Relationships/>"),
+        ]);
+        let package = Package::open(&bytes, Limits::default()).unwrap();
+        let mut objects = Vec::new();
+        parse_test_slide(&package, &mut objects, &mut Vec::new()).unwrap();
+        let Visual::TextLayout { visual, .. } = &objects[0].visual else {
+            panic!("shape text keeps its text layout");
+        };
+        let Visual::RichText { runs, .. } = visual.as_ref() else {
+            panic!("shape text remains rich text");
+        };
+        for (text, color) in [
+            ("Our ecosystem", 0x4040_40ff),
+            ("Level two", 0xffff_ffff),
+            // DrawingML shade is applied in linear RGB, then encoded as sRGB.
+            ("Font reference", 0xfefe_feff),
+            ("Paragraph override", 0x1122_33ff),
+            ("Run override", 0x4455_66ff),
+            ("Level one again", 0x4040_40ff),
+        ] {
+            assert_eq!(
+                runs.iter().find(|run| run.text == text).unwrap().color,
+                color,
+                "{text}"
+            );
+        }
+        // DOCX locked canvases use the same DrawingML parser. Exercise that
+        // adapter boundary without introducing a second color cascade.
+        let drawing = std::str::from_utf8(slide)
+            .unwrap()
+            .split("<p:spTree>")
+            .nth(1)
+            .unwrap()
+            .split("</p:spTree>")
+            .next()
+            .unwrap();
+        let word = format!(
+            r#"<w:document xmlns:w="w" xmlns:p="p" xmlns:a="a" xmlns:lc="lc"><lc:lockedCanvas><p:nvGrpSpPr><p:cNvPr id="1"/></p:nvGrpSpPr>{drawing}</lc:lockedCanvas></w:document>"#
+        );
+        let word_bytes = stored_zip(&[
+            ("word/document.xml", word.as_bytes()),
+            ("word/_rels/document.xml.rels", b"<Relationships/>"),
+        ]);
+        let word_package = Package::open(&word_bytes, Limits::default()).unwrap();
+        let (canvases, diagnostics) = super::parse_ooxml_locked_canvases(
+            &word_package,
+            "word/document.xml",
+            &FontMetricTable::default(),
+        )
+        .unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(canvases.len(), 1);
+        let text = canvases[0]
+            .iter()
+            .find(|object| object.text.is_some())
+            .unwrap();
+        assert_eq!(text.visual, objects[0].visual);
     }
 
     #[test]

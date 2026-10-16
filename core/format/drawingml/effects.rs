@@ -634,6 +634,57 @@ pub(super) fn parse_three_d_bevel(
 }
 
 #[cfg(feature = "native-formats")]
+pub(super) fn drawingml_main_theme(package: &Package<'_>) -> Result<Option<String>, Diagnostic> {
+    let Some(main) = package.relationships(None)?.into_iter()
+        .find(|r| !r.external && r.type_uri.ends_with("/officeDocument")) else { return Ok(None); };
+    Ok(package.relationships(Some(&main.target))?.into_iter()
+        .find(|r| !r.external && r.type_uri.ends_with("/theme")).map(|r| r.target))
+}
+
+#[cfg(feature = "native-formats")]
+pub(super) fn drawingml_theme_fill(
+    package: &Package<'_>,
+    part: &str,
+    index: u64,
+    placeholder: u32,
+    color: &dyn Fn(&str) -> Option<u32>,
+) -> Result<Option<ChartFill>, Diagnostic> {
+    let (list, index) = match index {
+        0 | 1000 => return Ok(Some(ChartFill::Image(Paint::None))),
+        1..=999 => ("fillStyleLst", index - 1),
+        _ => ("bgFillStyleLst", index - 1001),
+    };
+    let scheme = |name: &str| if name == "phClr" { Some(placeholder) } else { color(name) };
+    let mut fill = None;
+    let mut capture = None::<ChartFillCapture>;
+    visit_drawingml_theme_style(package, part, list, index, |event, depth| {
+        match event {
+            XmlEvent::StartElement { name, attributes, empty } => {
+                let local = local_name(name);
+                if local == "noFill" { fill = Some(ChartFill::Image(Paint::None)); }
+                if capture.is_none() { capture = ChartFillCapture::new(local, depth); }
+                if let Some(capture) = capture.as_mut() {
+                    capture.start(local, &attributes, part, &scheme)?;
+                    if empty { capture.end(local); }
+                }
+                if empty && capture.as_ref().is_some_and(|c| c.closes_at(depth)) {
+                    fill = capture.take().unwrap().finish(package, part)?;
+                }
+            }
+            XmlEvent::EndElement { name } => {
+                if let Some(capture) = capture.as_mut() { capture.end(local_name(name)); }
+                if capture.as_ref().is_some_and(|c| c.closes_at(depth)) {
+                    fill = capture.take().unwrap().finish(package, part)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(fill)
+}
+
+#[cfg(feature = "native-formats")]
 pub(super) fn visit_drawingml_theme_style(
     package: &Package<'_>,
     part: &str,

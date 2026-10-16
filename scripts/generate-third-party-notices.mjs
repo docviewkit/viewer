@@ -200,6 +200,8 @@ const notice = [
   "| --- | --- | --- | --- |",
   ...rows,
   "",
+  "The mtx-decompressor 1.6.0 glyph-buffer allocation and adaptive Huffman storage/bit-read patches and complete modified MPL-2.0 source are supplied in third-party-licenses/mtx-decompressor-1.6.0-modified.mjs.",
+  "",
 ].join("\n");
 await writeFile(resolve(dist, "THIRD_PARTY_NOTICES.md"), notice);
 await writeFile(resolve(dist, "third-party-license-issues.json"), `${JSON.stringify(issues, null, 2)}\n`);

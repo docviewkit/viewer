@@ -15,6 +15,7 @@ import {
   fallbackFontSizeFactor,
   fallbackSpaceAdvanceEm,
   FontProviderCache,
+  EmbeddedFontLoader,
   fontShorthand,
   prepareEmbeddedFontAssets,
   prepareFontAssets,
@@ -25,6 +26,7 @@ import {
 import { Core, DEFAULT_LIMITS } from "../dist/core.js";
 import { SceneRenderer } from "../dist/render.js";
 import { createZip } from "./zip-fixture.mjs";
+import { readZipEntries } from "../scripts/accuracy-metamorphic.mjs";
 
 const wasm = await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url));
 const odfWasm = await readFile(new URL("../dist/office-viewer-odf.wasm", import.meta.url));
@@ -2173,4 +2175,103 @@ test("supplied bnc910045 table uses Carlito when Calibri is missing", async () =
     doc.close();
     core.close();
   }
+});
+
+
+test("embedded font demand preserves lazy faces, aliases, codec order and cumulative budgets", () => {
+  const asset = family => ({ family, bytes: embeddedFontBytes, style: "normal", weight: 400 });
+  const scene = (families, embeddedFonts = []) => ({ embeddedFonts, objects: families.map((fontFamily, unitIndex) => ({
+    unitIndex, text: "Text", visual: { kind: "text", fontFamily, fontSize: 12, bold: false, italic: false },
+  })) });
+  const loader = new EmbeddedFontLoader(embeddedFontBytes.length * 3);
+  const first = loader.prepare(scene(["Second"], [asset("First"), asset("Second"), asset("Third")]));
+  assert.deepEqual(first.map(font => font.family), ["Second"]);
+  assert.equal(loader.byteLength, embeddedFontBytes.length);
+  assert.deepEqual(loader.prepare(scene(["Second"])), []);
+  const second = loader.prepare(scene(["First"]));
+  assert.deepEqual(second.map(font => font.family), ["First"]);
+  assert.deepEqual(loader.codecFonts({ imageCodecFonts: () => [...first, ...second] }).map(font => font.family),
+    ["First", "Second"], "isolated vector codecs retain original default font order");
+  loader.reserveProviderBytes(1);
+  assert.throws(() => loader.prepare(scene(["Third"])), { code: "FONT_BYTES_LIMIT" });
+  loader.close();
+
+  const host = new EmbeddedFontLoader(1024, [{ ...asset("First"), stretch: "normal" }]);
+  assert.deepEqual(host.prepare(scene([], [asset("First"), asset("Second")])).map(font => font.family), ["First"],
+    "embedded face still precedes a host face before later pages request it");
+  const aliased = new EmbeddedFontLoader(1024);
+  const aliasedScene = scene(["Localized"], [asset("Original")]);
+  aliasedScene.fontAlternateNames = [{ family: "Localized", names: ["Original"] }];
+  assert.deepEqual(aliased.prepare(aliasedScene).map(font => font.family), ["Original"]);
+});
+
+test("opaque vector text loads full font inventory only for the requested image unit", () => {
+  const loader = new EmbeddedFontLoader(1024);
+  const scene = { embeddedFonts: [{ family: "Vector Font", bytes: embeddedFontBytes, style: "normal", weight: 400 }],
+    objects: [{ unitIndex: 1, visual: { mediaType: "image/svg+xml", bytes: new TextEncoder().encode('<svg><text>Font</text></svg>') } }] };
+  assert.equal(loader.prepare(scene, 0).length, 0);
+  assert.equal(loader.prepare({ ...scene, embeddedFonts: [] }, 1).length, 1);
+  assert.equal(loader.prepare(scene, 1).length, 0);
+});
+
+
+test("inline PPTX loads later-page embedded faces before concurrent public queries return", async () => {
+  const entries = Object.fromEntries(readZipEntries(pptxWithEmbeddedFont).map(({ name, data }) => [name, data]));
+  const presentation = "ppt/presentation.xml", rels = "ppt/_rels/presentation.xml.rels";
+  entries[presentation] = Buffer.from(entries[presentation]).toString().replace("</p:sldIdLst>", '<p:sldId id="257" r:id="rIdLater"/><p:sldId id="258" r:id="rIdThird"/></p:sldIdLst>')
+    .replace("</p:embeddedFontLst>", '<p:embeddedFont><p:font typeface="Later Embed"/><p:regular r:id="rIdLaterFont"/></p:embeddedFont></p:embeddedFontLst>');
+  entries[rels] = Buffer.from(entries[rels]).toString().replace("</Relationships>", `
+    <Relationship Id="rIdLater" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+    <Relationship Id="rIdThird" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide3.xml"/>
+    <Relationship Id="rIdLaterFont" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/font" Target="fonts/font2.fntdata"/>
+    </Relationships>`);
+  entries["ppt/slides/slide2.xml"] = Buffer.from(entries["ppt/slides/slide1.xml"]).toString().replaceAll("Presentation Embed", "Later Embed");
+  entries["ppt/slides/slide3.xml"] = entries["ppt/slides/slide2.xml"];
+  entries["ppt/fonts/font2.fntdata"] = embeddedFontBytes;
+  const fontSet = new FakeFontSet(), restore = installFontRuntime(fontSet);
+  const canvasDescriptor = Object.getOwnPropertyDescriptor(globalThis, "OffscreenCanvas");
+  const context = { save() {}, restore() {}, scale() {}, translate() {}, fillRect() {},
+    beginPath() {}, moveTo() {}, lineTo() {}, rect() {}, fill() {}, stroke() {}, clip() {}, fillText() {},
+    measureText() { return { width: 30 }; } };
+  class Canvas { getContext() { return context; } transferToImageBitmap() { return { close() {} }; } }
+  Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: Canvas });
+  let engine, document;
+  try {
+    engine = await createOfficeEngine({ execution: "inline", wasm });
+    document = await engine.open(createZip(entries, { compress: false }));
+    assert.equal(fontSet.faces.size, 1, "later-page face is not registered while opening");
+    const initial = await document.render({ unitIndex: 0 });
+    const expectedObjectCount = initial.renderedObjectCount; initial.bitmap.close();
+    assert.ok(expectedObjectCount > 0);
+    const [later, concurrent] = await Promise.all([
+      document.listObjects({ unitIndex: 1, textOnly: true }),
+      document.listObjects({ unitIndex: 1, textOnly: true }),
+      document.listObjects({ unitIndex: 2, textOnly: true }),
+    ]);
+    assert.deepEqual(later, concurrent);
+    assert.equal(fontSet.faces.size, 2);
+    assert.equal(later.find(object => object.text === "Embedded")?.fontRuns[0].source, "embedded");
+    const frame = await document.render({ unitIndex: 2 });
+    assert.equal(frame.renderedObjectCount, expectedObjectCount, "concurrent lazy loads must not append objects already included by a font refresh");
+    frame.bitmap.close();
+    await document.listObjects();
+    assert.equal(fontSet.faces.size, 2, "full-scene queries do not reload fonts");
+  } finally {
+    document?.close(); engine?.close(); restore();
+    if (canvasDescriptor) Object.defineProperty(globalThis, "OffscreenCanvas", canvasDescriptor);
+    else delete globalThis.OffscreenCanvas;
+  }
+});
+
+
+test("deferred embedded fonts retain managed fallback and failed-face behavior", () => {
+  const font = family => ({ family, bytes: embeddedFontBytes, style: "normal", weight: 400 });
+  const scene = { embeddedFonts: [font("Custom"), font("Carlito")], objects: [{ text: "Latin",
+    visual: { kind: "text", fontFamily: "Custom", fontSize: 12, bold: false, italic: false } }] };
+  const loader = new EmbeddedFontLoader(1024);
+  assert.deepEqual(loader.prepare(scene).map(asset => asset.family), ["Custom"]);
+  assert.deepEqual(loader.prepare(scene, undefined, { resolveFace: () => ({ source: "fallback" }) }).map(asset => asset.family),
+    ["Carlito"], "failed authored font preserves the same managed fallback inventory");
+  const fallbackOnly = new EmbeddedFontLoader(1024);
+  assert.deepEqual(fallbackOnly.prepare({ ...scene, embeddedFonts: [font("Carlito")] }).map(asset => asset.family), ["Carlito"]);
 });

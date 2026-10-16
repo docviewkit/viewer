@@ -8,9 +8,10 @@ import { Core, DEFAULT_LIMITS } from "../dist/core.js";
 const coreWasm = await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url));
 
 test("optimized core stays within the size budget", () => {
-  // Reading-color provenance and shared rotated chart labels add 4,639 bytes
-  // over v0.2.76: 3,802,963 -> 3,807,602; no dependencies or font binaries added.
-  assert.ok(coreWasm.byteLength <= 3_810_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3810000`);
+  // v0.2.78 adds shared theme fills, WordArt envelopes and paragraph-color fixes:
+  // published v0.2.77 3,807,620 -> 3,823,898 bytes (+3,783 gzip bytes).
+  // Real-document scene baselines below remain unchanged; no new fonts/dependencies.
+  assert.ok(coreWasm.byteLength <= 3_825_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3825000`);
 });
 
 test("calculator contains only its runtime ABI and stays within its size budget", async () => {
@@ -26,9 +27,10 @@ test("calculator contains only its runtime ABI and stays within its size budget"
 
 test("PDF pack stays within the reviewed binary size budget", async () => {
   const bytes = await readFile(new URL("../dist/office-viewer-pdf.wasm", import.meta.url));
-  // Shared font-name protocol metadata and formatted source locations change
-  // v0.2.74's 3,139,335 bytes to 3,140,235; no font binaries are added or changed.
-  assert.ok(bytes.byteLength <= 3_141_000, `PDF Wasm is ${bytes.byteLength} bytes`);
+  // v0.2.78 preserves complete raw inline images and Type 3 bitmap glyphs:
+  // published v0.2.77 3,140,237 -> 3,141,589 bytes (+768 gzip bytes).
+  // Glyph regressions cover delimiter boundaries; no font binaries changed.
+  assert.ok(bytes.byteLength <= 3_143_000, `PDF Wasm is ${bytes.byteLength} bytes`);
 });
 
 test("binary Dingbats font preserves the original decoded font bytes", async () => {

@@ -2349,7 +2349,7 @@ impl<'a> ContentParser<'a> {
         }
     }
 
-    fn inline_image(&mut self) -> Result<Option<PdfValue>, Diagnostic> {
+    fn inline_image(&mut self, store: &ObjectStore) -> Result<Option<PdfValue>, Diagnostic> {
         let bytes = self.parser.bytes;
         let mut dict = BTreeMap::new();
         loop {
@@ -2396,6 +2396,29 @@ impl<'a> ContentParser<'a> {
             self.parser.position += 1;
         }
         let start = self.parser.position;
+        // Raw samples have an exact row-padded length. Searching for EI can
+        // mistake pixel bytes for syntax, or trim a final NUL/space sample.
+        // Also accept producers that put EI directly after the last sample.
+        if let Some(end) = unfiltered_inline_image_length(&dict, store)
+            .and_then(|length| start.checked_add(length))
+            .filter(|end| *end <= bytes.len())
+        {
+            let mut marker = end;
+            while bytes.get(marker).is_some_and(|byte| is_pdf_space(*byte)) {
+                marker += 1;
+            }
+            if bytes.get(marker..marker.saturating_add(2)) == Some(b"EI")
+                && bytes
+                    .get(marker + 2)
+                    .is_none_or(|byte| is_pdf_space(*byte) || is_pdf_delimiter(*byte))
+            {
+                self.parser.position = marker + 2;
+                return Ok(Some(PdfValue::Stream {
+                    dict,
+                    bytes: bytes[start..end].to_vec(),
+                }));
+            }
+        }
         let mut position = start;
         while position + 2 <= bytes.len() {
             if &bytes[position..position + 2] == b"EI"
@@ -2424,6 +2447,38 @@ impl<'a> ContentParser<'a> {
         self.parser.position = bytes.len();
         Ok(None)
     }
+}
+
+fn unfiltered_inline_image_length(dict: &PdfDict, store: &ObjectStore) -> Option<usize> {
+    if !filter_names(dict).is_empty() {
+        return None;
+    }
+    let width = dict.get("Width").and_then(number_usize)?;
+    let height = dict.get("Height").and_then(number_usize)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mask = matches!(dict.get("ImageMask"), Some(PdfValue::Bool(true)));
+    let bits = if mask {
+        1
+    } else {
+        dict.get("BitsPerComponent").and_then(number_usize)?
+    };
+    if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+        return None;
+    }
+    let components = if mask {
+        1
+    } else {
+        let color = store.resolve(dict.get("ColorSpace")?)?;
+        if matches!(color, PdfValue::Array(values) if matches!(values.first(), Some(PdfValue::Name(name)) if name == "Indexed" || name == "I"))
+        {
+            1
+        } else {
+            image_color_space(color, store, 0)?.components()
+        }
+    };
+    packed_image_row_bytes(width, components, bits)?.checked_mul(height)
 }
 
 fn inline_image_key(name: &str) -> &str {
@@ -5284,7 +5339,7 @@ fn interpret_content(
                         }
                     }
                     "BI" => {
-                        if let Some(image) = parser.inline_image()? {
+                        if let Some(image) = parser.inline_image(context.store)? {
                             paint_inline_image(&image, resources, &state, context, offset)?;
                         } else {
                             context.warning(
@@ -18427,8 +18482,7 @@ fn decode_image_predictor(
         return None;
     }
     let row_samples = width.checked_mul(components)?;
-    let row_bits = row_samples.checked_mul(bits)?;
-    let row_bytes = row_bits.checked_add(7)?.checked_div(8)?;
+    let row_bytes = packed_image_row_bytes(width, components, bits)?;
     let expected = row_bytes.checked_mul(height)?;
     if predictor <= 1 {
         return unpack_image_samples(
@@ -18512,6 +18566,14 @@ fn decode_image_predictor(
     unpack_image_samples(&packed, width, height, components, bits)
 }
 
+fn packed_image_row_bytes(width: usize, components: usize, bits: usize) -> Option<usize> {
+    width
+        .checked_mul(components)?
+        .checked_mul(bits)?
+        .checked_add(7)?
+        .checked_div(8)
+}
+
 fn unpack_image_samples(
     packed: &[u8],
     width: usize,
@@ -18520,10 +18582,7 @@ fn unpack_image_samples(
     bits: usize,
 ) -> Option<Vec<u8>> {
     let row_samples = width.checked_mul(components)?;
-    let row_bytes = row_samples
-        .checked_mul(bits)?
-        .checked_add(7)?
-        .checked_div(8)?;
+    let row_bytes = packed_image_row_bytes(width, components, bits)?;
     if packed.len() != row_bytes.checked_mul(height)? {
         return None;
     }
@@ -18630,7 +18689,7 @@ fn monochrome_bmp(width: usize, height: usize, samples: &[u8]) -> Option<Vec<u8>
     if samples.len() != pixels {
         return None;
     }
-    let row_bytes = width.checked_add(7)?.checked_div(8)?;
+    let row_bytes = packed_image_row_bytes(width, 1, 1)?;
     let row_stride = row_bytes.checked_add(3)? & !3;
     let pixel_bytes = row_stride.checked_mul(height)?;
     const PIXEL_OFFSET: usize = 14 + 40 + 8;
@@ -28244,6 +28303,95 @@ trailer << /Root 1 0 R >>
                 .iter()
                 .all(|diagnostic| !diagnostic.message.contains("PDF_IMAGE_FILTER_UNSUPPORTED"))
         );
+    }
+
+    #[test]
+    fn raw_inline_images_preserve_embedded_ei_and_row_padding() {
+        let store = super::ObjectStore::scan(b"", Limits::default()).unwrap();
+        for (dictionary, pixels) in [
+            (
+                "/W 3 /H 2 /BPC 8 /CS /RGB",
+                b" EI 0123456789ab\r\n".as_slice(),
+            ),
+            ("/W 9 /H 2 /IM true", b"\xff\x00\x80\x00".as_slice()),
+            (
+                "/W 3 /H 2 /BPC 4 /CS [/Indexed /DeviceRGB 1 <000000ffffff>]",
+                b"\x10\x00\x01\x00".as_slice(),
+            ),
+        ] {
+            for separator in [b"".as_slice(), b" ", b"\r\n"] {
+                let mut input = format!("{dictionary} ID ").into_bytes();
+                input.extend_from_slice(pixels);
+                input.extend_from_slice(separator);
+                input.extend_from_slice(b"EI Q");
+                let mut parser = super::ContentParser::new(&input, Limits::default());
+                let Some(PdfValue::Stream { bytes, .. }) = parser.inline_image(&store).unwrap()
+                else {
+                    panic!("known-size raw image must parse");
+                };
+                assert_eq!(bytes, pixels);
+                assert!(matches!(
+                    parser.next().unwrap(),
+                    Some(super::ContentToken::Operator("Q", _))
+                ));
+            }
+        }
+        assert!(super::packed_image_row_bytes(usize::MAX, 4, 16).is_none());
+    }
+
+    #[test]
+    fn preserves_unfiltered_type3_glyph_bytes_adjacent_to_ei() {
+        // Reduced from the supplied statement's Type 3 CharProcs: bitmap data
+        // immediately precedes EI, and its last byte may itself be PDF whitespace.
+        for last in [0x00, 0x09, 0x0a, 0x0d, 0x20, 0x1f] {
+            let mut bytes = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >> endobj
+4 0 obj << >> stream
+1 0 0 rg BT /F1 1 Tf 1 0 0 1 10 20 Tm (A) Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type3 /FontBBox [0 0 8 24] /FontMatrix [1 0 0 1 0 0] /CharProcs << /A 6 0 R >> /Encoding << /Differences [65 /A] >> /FirstChar 65 /LastChar 65 /Widths [9] >> endobj
+6 0 obj << >> stream
+q 9 0 1 0 9 24 d1 8 0 0 24 1 0 cm BI /W 8 /H 24 /BPC 1 /D [1 0] /IM true ID "
+                .to_vec();
+            let mut bitmap = [0x38; 24];
+            bitmap[23] = last;
+            bytes.extend_from_slice(&bitmap);
+            bytes.extend_from_slice(b"EI Q\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF");
+            let document = detect_and_parse(&bytes, Limits::default())
+                .unwrap()
+                .unwrap();
+            let image = document
+                .objects
+                .iter()
+                .find(|object| object.kind == ObjectKind::Image)
+                .expect("the original Type 3 bitmap must remain visible");
+            let mut visual = &image.visual;
+            while let Visual::Layer { visual: child, .. } = visual {
+                visual = child;
+            }
+            let Visual::Image { bytes, .. } = visual else {
+                panic!("glyph must materialize as an image");
+            };
+            // Top-down 32-bit BMP: preserve all 24 rows and the final sample bits.
+            let offset = u32::from_le_bytes(bytes[10..14].try_into().unwrap()) as usize;
+            for (y, row) in bitmap.iter().enumerate() {
+                for x in 0..8 {
+                    let pixel = offset + (y * 8 + x) * 4;
+                    assert_eq!(
+                        bytes[pixel + 3],
+                        if row & (0x80 >> x) != 0 { 255 } else { 0 }
+                    );
+                }
+            }
+            assert!(
+                !document
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("PDF_INLINE_IMAGE_UNSUPPORTED"))
+            );
+        }
     }
 
     #[test]

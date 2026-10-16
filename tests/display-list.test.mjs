@@ -3074,6 +3074,136 @@ test("renderer inherits group transforms and opacity while painting rounded grad
   }
 });
 
+test("tdf114848 line break formatting does not leak into the next paragraph", async () => {
+ const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+ const doc = core.open(await readFile(new URL("./fixtures/tdf114848-fill-mapping.pptx", import.meta.url)));
+ try {
+  let visual = doc.scene.objects.find(o=>o.text?.includes("Plain after gradient")).visual;
+  while(visual.visual) visual=visual.visual;
+  const run=visual.runs.find(r=>r.text.includes("Plain after gradient"));
+  assert.equal(run.bold,false);
+  assert.equal(run.letterSpacing,0);
+ } finally {doc.close();core.close();}
+});
+
+test("tdf114848 page 1 preserves the inverted triangle WordArt envelope", async () => {
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  const doc = core.open(await readFile(new URL("./fixtures/tdf114848-fill-mapping.pptx", import.meta.url)));
+  try {
+    const object = doc.scene.objects.find(o => o.text?.startsWith("Test solid line border"));
+    let visual = object.visual;
+    while (visual.kind !== "text-layout" && visual.visual) visual = visual.visual;
+    assert.equal(visual.layout.warp, "text-envelope-arc");
+    while (visual.visual) visual = visual.visual;
+    assert.equal(visual.geometry.layers[1].commands.length, 3);
+    assert.ok(Math.abs(visual.geometry.layers[1].commands[1].y - object.bounds.height) < .001);
+  } finally { doc.close(); core.close(); }
+});
+
+test("tdf114848 page 2 uses authored WordArt envelopes", async () => {
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  const doc = core.open(await readFile(new URL("./fixtures/tdf114848-fill-mapping.pptx", import.meta.url)));
+  try {
+    doc.loadUnit(1);
+    const objects = doc.scene.objects.filter(o => o.unitIndex === 1 && /Wave|Can |Ring /u.test(o.text ?? ""));
+    assert.equal(objects.length, 8);
+    for (const object of objects) {
+      let visual = object.visual;
+      while (visual.kind !== "text-layout" && visual.visual) visual = visual.visual;
+      assert.equal(visual.layout.warp, "text-envelope-arc", object.text);
+      while (visual.visual) visual = visual.visual;
+      assert.equal(visual.geometry.kind, "layered-path", object.text);
+      assert.equal(visual.geometry.layers.length, 2, object.text);
+      assert.ok(visual.geometry.layers.every(layer => layer.fill === "none" && !layer.stroke));
+      for (const layer of visual.geometry.layers) {
+        let previous = layer.commands[0];
+        for (const command of layer.commands.slice(1)) {
+          for (let step = 0; step <= 32; step++) {
+            const t = step / 32, u = 1 - t;
+            for (const [axis, limit] of [["x", object.bounds.width], ["y", object.bounds.height]]) {
+              const coordinate = command.kind === "bezierCurveTo"
+                ? u ** 3 * previous[axis] + 3 * u * u * t * command[`cp1${axis}`]
+                  + 3 * u * t * t * command[`cp2${axis}`] + t ** 3 * command[axis]
+                : u * previous[axis] + t * command[axis];
+              assert.ok(coordinate >= -1 && coordinate <= limit + 1, `${object.text}: ${axis} stays inside its authored envelope`);
+            }
+          }
+          previous = command;
+        }
+      }
+    }
+  } finally { doc.close(); core.close(); }
+});
+
+test("tdf114848 page 6 resolves theme fill references to gradients", async () => {
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  const doc = core.open(await readFile(new URL("./fixtures/tdf114848-fill-mapping.pptx", import.meta.url)));
+  try {
+    doc.loadUnit(5);
+    for (const name of ["Pie 7", "Teardrop 8", "Plaque 13", "Can 14", "Regular Pentagon 19"]) {
+      let visual = doc.scene.objects.find(o => o.unitIndex === 5 && o.name === name).visual;
+      while (visual.visual) visual = visual.visual;
+      assert.equal(visual.fill.kind, "linear-gradient", name);
+      assert.equal(visual.fill.stops.length, 3, name);
+      assert.ok(visual.fill.start.y > visual.fill.end.y, `${name}: 270 degree theme gradient`);
+      if (name === "Regular Pentagon 19") assert.equal(visual.fill.stops[0].color, 0xffbd87ff);
+    }
+  } finally { doc.close(); core.close(); }
+});
+
+test("tdf114848 theme fills share DOCX and XLSX semantics with explicit-fill priority", async () => {
+  const { readZipEntries } = await import("../scripts/accuracy-metamorphic.mjs");
+  const { createZip } = await import("./zip-fixture.mjs");
+  const parts = Object.fromEntries(readZipEntries(await readFile(new URL("./fixtures/tdf114848-fill-mapping.pptx", import.meta.url))).map(({ name, data }) => [name, data]));
+  const slide = new TextDecoder().decode(parts["ppt/slides/slide6.xml"]);
+  const shape = slide.match(/<p:sp>\s*<p:nvSpPr>\s*<p:cNvPr id="8"[\s\S]*?<\/p:sp>/u)[0];
+  const ns = "http://schemas.openxmlformats.org/";
+  const rels = entries => `<Relationships xmlns="${ns}package/2006/relationships">${entries.map(([id, type, target]) => `<Relationship Id="${id}" Type="${ns}officeDocument/2006/relationships/${type}" Target="${target}"/>`).join("")}</Relationships>`;
+  const packageFor = (host, xml, damagedTheme = false) => {
+    const main = host === "docx" ? "word/document.xml" : "xl/workbook.xml";
+    const type = host === "docx" ? "wordprocessingml.document" : "spreadsheetml.sheet";
+    const common = {
+      "[Content_Types].xml": `<Types xmlns="${ns}package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/${main}" ContentType="application/vnd.openxmlformats-officedocument.${type}.main+xml"/></Types>`,
+      "_rels/.rels": rels([["root", "officeDocument", main]]),
+      "theme.xml": damagedTheme ? new TextDecoder().decode(parts["ppt/theme/theme1.xml"]).replaceAll('ang="16200000"', 'ang="invalid"') : parts["ppt/theme/theme1.xml"],
+    };
+    if (host === "docx") return createZip({ ...common,
+      "word/_rels/document.xml.rels": rels([["theme", "theme", "../theme.xml"]]),
+      "word/document.xml": `<w:document xmlns:w="${ns}wordprocessingml/2006/main" xmlns:wp="${ns}drawingml/2006/wordprocessingDrawing" xmlns:a="${ns}drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="1357322" cy="1143008"/><a:graphic><a:graphicData>${xml.replaceAll("p:", "wps:").replaceAll("wps:sp>", "wps:wsp>")}</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>`,
+    });
+    return createZip({ ...common,
+      "xl/_rels/workbook.xml.rels": rels([["theme", "theme", "../theme.xml"], ["sheet", "worksheet", "worksheets/sheet1.xml"]]),
+      "xl/workbook.xml": `<workbook xmlns="${ns}spreadsheetml/2006/main" xmlns:r="${ns}officeDocument/2006/relationships"><sheets><sheet name="Theme" sheetId="1" r:id="sheet"/></sheets></workbook>`,
+      "xl/worksheets/sheet1.xml": `<worksheet xmlns="${ns}spreadsheetml/2006/main" xmlns:r="${ns}officeDocument/2006/relationships"><sheetData/><drawing r:id="drawing"/></worksheet>`,
+      "xl/worksheets/_rels/sheet1.xml.rels": rels([["drawing", "drawing", "../drawings/drawing1.xml"]]),
+      "xl/drawings/drawing1.xml": `<xdr:wsDr xmlns:xdr="${ns}drawingml/2006/spreadsheetDrawing" xmlns:a="${ns}drawingml/2006/main"><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1357322" cy="1143008"/>${xml.replaceAll("p:", "xdr:")}<xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>`,
+    });
+  };
+  const core = await Core.create(await readFile(process.env.FILL_BASELINE_WASM ?? new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  try {
+    for (const host of ["docx", "xlsx"]) for (const [label, xml, kind] of [
+      ["theme", shape, "linear-gradient"],
+      ["saturated-theme", shape.replaceAll('val="accent2"', 'val="accent6"'), "linear-gradient"],
+      ["explicit", shape.replace("</p:spPr>", '<a:solidFill><a:srgbClr val="123456"/></a:solidFill></p:spPr>'), "solid"],
+      ["noFill", shape.replace("</p:spPr>", "<a:noFill/></p:spPr>"), "none"],
+      ["damaged-theme", shape, "solid"],
+    ]) {
+      const doc = core.open(packageFor(host, xml, label === "damaged-theme"));
+      try {
+        doc.loadUnit(0);
+        const visuals = doc.scene.objects.map(o => { let v = o.visual; while (v.visual) v = v.visual; return v; });
+        const visual = visuals.find(v => v.geometry?.kind === "path");
+        assert.ok(visual, `${host}/${label}: original pie geometry`);
+        assert.equal(visual.fill.kind, kind, `${host}/${label}`);
+        if (kind === "linear-gradient") assert.equal(visual.fill.stops.length, 3);
+        if (label === "saturated-theme") assert.equal(visual.fill.stops[0].color, 0xffbd87ff);
+        if (label === "explicit") assert.equal(visual.fill.color, 0x123456ff);
+        if (label === "damaged-theme") assert.ok(doc.scene.diagnostics.some(d => /gradient angle/u.test(d.message)));
+      } finally { doc.close(); }
+    }
+  } finally { core.close(); }
+});
+
 // Derived from tdf114848: map its first linear fill through defRPr and append
 // a plain paragraph to check that the default paint does not leak between paragraphs.
 test("DrawingML gradient mapping survives the PPTX adapter and protocol", async () => {

@@ -263,47 +263,9 @@ fn apply_diagram_quick_style(
             color(name)
         }
     };
-    if !explicit_fill && let Some(index) = quick.fill_index {
-        if index == 0 || index == 1000 {
-            style.fill = Some(ChartFill::Image(Paint::None));
-        } else {
-            let (list, index) = if index >= 1001 {
-                ("bgFillStyleLst", index - 1001)
-            } else {
-                ("fillStyleLst", index - 1)
-            };
-            let mut capture = None::<ChartFillCapture>;
-            visit_drawingml_theme_style(package, part, list, index, |event, depth| {
-                match event {
-                    XmlEvent::StartElement {
-                        name, attributes, ..
-                    } => {
-                        let local = local_name(name);
-                        if local == "noFill" {
-                            style.fill = Some(ChartFill::Image(Paint::None));
-                        }
-                        if capture.is_none() {
-                            capture = ChartFillCapture::new(local, depth);
-                        }
-                        if let Some(capture) = capture.as_mut() {
-                            capture.start(local, &attributes, part, &scheme)?;
-                        }
-                    }
-                    XmlEvent::EndElement { name } => {
-                        if let Some(capture) = capture.as_mut() {
-                            capture.end(local_name(name));
-                        }
-                        if capture.as_ref().is_some_and(|c| c.closes_at(depth)) {
-                            if let Some(fill) = capture.take().unwrap().finish(package, part)? {
-                                style.fill = Some(fill);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                Ok(())
-            })?;
-        }
+    if !explicit_fill && let Some(index) = quick.fill_index
+        && let Some(fill) = drawingml_theme_fill(package, part, index, placeholder, color)? {
+        style.fill = Some(fill);
     }
     if let Some(index) = quick.line_index.and_then(|i| i.checked_sub(1)) {
         visit_drawingml_theme_style(package, part, "lnStyleLst", index, |event, _| {
@@ -967,16 +929,7 @@ fn parse_diagram_shared(
         }
     }
     let fallback_theme = if theme_part.is_none() && !quick_styles.is_empty() {
-        package
-            .relationships(None)?
-            .into_iter()
-            .find(|r| !r.external && r.type_uri.ends_with("/officeDocument"))
-            .map(|r| package.relationships(Some(&r.target)))
-            .transpose()?
-            .unwrap_or_default()
-            .into_iter()
-            .find(|r| !r.external && r.type_uri.ends_with("/theme"))
-            .map(|r| r.target)
+        drawingml_main_theme(package)?
     } else {
         None
     };

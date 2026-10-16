@@ -621,6 +621,40 @@ async function createOdfEngine() {
   return createOfficeEngine({ wasm, execution: "inline" });
 }
 
+test("keeps the real embedded ODT formula on one painted line", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "OffscreenCanvas");
+  const fills = [];
+  const context = {
+    save() {}, restore() {}, translate() {}, rotate() {}, transform() {}, scale() {},
+    fillRect() {}, strokeRect() {}, clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {},
+    rect() {}, closePath() {}, clip() {}, fill() {}, stroke() {}, setLineDash() {},
+    fillText(text, x, y) { fills.push({ text, x, y }); }, strokeText() {},
+    measureText(text) { return { width: text.length * 10 }; }, letterSpacing: "0px",
+  };
+  class FakeCanvas {
+    constructor(width, height) { this.width = width; this.height = height; context.canvas = this; }
+    getContext() { return context; }
+    transferToImageBitmap() { return { close() {} }; }
+  }
+  Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: FakeCanvas });
+  const engine = await createOdfEngine();
+  let document, frame;
+  try {
+    document = await engine.open(await readFile(new URL("./fixtures/math_OOo311.odt", import.meta.url)));
+    frame = await document.render({ unitIndex: 0 });
+    assert.equal(fills.map(({ text }) => text).join(""), "1+1");
+    assert.equal(new Set(fills.map(({ y }) => y)).size, 1, "formula must not wrap inside its narrow frame");
+    const formula = (await document.listObjects()).find(object => object.text === "1+1");
+    assert.equal(fills[0].x, formula.bounds.x, "math must not inherit text-box padding");
+  } finally {
+    frame?.bitmap.close();
+    document?.close();
+    engine.close();
+    if (descriptor) Object.defineProperty(globalThis, "OffscreenCanvas", descriptor);
+    else delete globalThis.OffscreenCanvas;
+  }
+});
+
 test("ODT contextual spacing keeps the supplied section document on one page", async () => {
   const engine = await createOdfEngine();
   const document = await engine.open(await readFile(new URL("./fixtures/oasis-contextual-spacing-section.odt", import.meta.url)));
