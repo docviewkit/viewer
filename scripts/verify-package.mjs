@@ -55,6 +55,7 @@ try {
     "dist/office-viewer-ofd.wasm",
     "dist/ofd-formats.js",
     "dist/THIRD_PARTY_NOTICES.md",
+    "dist/third-party-licenses/mtx-decompressor-1.6.0-modified.mjs",
   ]) {
     if (!files.includes(required)) throw new Error(`Package is missing ${required}`);
   }

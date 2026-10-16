@@ -16,6 +16,7 @@ import { immutableDiagnostics, OfficeEngineError } from "./types.js";
 import { copyByteSource, isArrayBuffer, isUint8Array } from "./bytes.js";
 import { nestedFontVisual, type SceneDocument, type SceneEmbeddedFont, type SceneObject, type SceneVisual } from "./scene.js";
 import { semanticSymbolFontText as semanticSymbolFontTextBase } from "./symbol-font-mappings.js";
+import { metafileMayUseFonts } from "./metafile-safety.js";
 
 /** Base size of a mixed text box, weighted by authored character coverage. */
 export function dominantDocumentFontSize(runs: readonly DocumentFontRun[]): number | undefined {
@@ -453,6 +454,84 @@ export function prepareEmbeddedFontAssets(
     weight: asset.weight,
     stretch: "normal" as const,
   })));
+}
+
+/** Document-scoped demand loading shared by inline and Worker execution. */
+export class EmbeddedFontLoader {
+  readonly #pending = new Map<string, SceneEmbeddedFont>();
+  readonly #seen = new Set<string>();
+  readonly #order = new Map<PreparedFontAsset, number>();
+  readonly #hostFamilies: ReadonlySet<string>;
+  #alternateNames: SceneDocument["fontAlternateNames"] = [];
+  #bytes = 0;
+  #limit: number;
+
+  constructor(byteLimit: number, hostFonts: readonly PreparedFontAsset[] = []) {
+    this.#limit = byteLimit;
+    this.#hostFamilies = new Set(hostFonts.map(font => normalizeFamily(font.family)));
+  }
+
+  get byteLength(): number { return this.#bytes; }
+
+  reserveProviderBytes(bytes: number): void { this.#limit -= bytes; }
+
+  codecFonts(fonts: RegisteredFonts): readonly PreparedFontAsset[] {
+    return [...fonts.imageCodecFonts()].sort((a, b) => (this.#order.get(a) ?? Infinity) - (this.#order.get(b) ?? Infinity));
+  }
+
+  prepare(scene: SceneDocument, imageUnitIndex?: number, registeredFonts?: RegisteredFonts): readonly PreparedFontAsset[] {
+    if (scene.fontAlternateNames?.length) this.#alternateNames = scene.fontAlternateNames;
+    for (const asset of scene.embeddedFonts) {
+      const key = exactFaceKey({ ...asset, stretch: "normal" });
+      if (!this.#seen.has(key)) {
+        this.#seen.add(key);
+        this.#pending.set(key, asset);
+      }
+    }
+    if (this.#pending.size === 0) return [];
+    const requests = collectFontRequests(scene.objects, this.#alternateNames);
+    const families = new Set(requests.map(request => normalizeFamily(request.family)));
+    const knownFamilies = new Set([...this.#seen].map(key => key.split("\u0000")[0]!));
+    for (const request of requests) {
+      const sourceFamily = pdfObjectSourceFamily(request.family);
+      if (sourceFamily !== undefined) families.add(normalizeFamily(sourceFamily));
+      if (registeredFonts !== undefined) {
+        if (registeredFonts.resolveFace(request).source !== "fallback") continue;
+      } else if (knownFamilies.has(normalizeFamily(request.family)) || this.#hostFamilies.has(normalizeFamily(request.family))) continue;
+      const demand = classifyFontScriptDemand(request.codePoints ?? []);
+      const approximate = approximateFontFamilyForDemand(normalizeFamily(sourceFamily ?? request.family), demand);
+      for (const family of managedFallbackFamilyNames(approximate, demand)) families.add(normalizeFamily(family));
+    }
+    // Opaque vector text may select default fonts inside an isolated codec.
+    // Preserve the full original font inventory when its demand is uncertain.
+    const needsAll = scene.objects.some(object => (imageUnitIndex === undefined || object.unitIndex === imageUnitIndex)
+      && imageNeedsFontInventory(object.visual));
+    const selected = [...this.#pending].filter(([, asset]) => needsAll || families.has(normalizeFamily(asset.family))
+      || this.#hostFamilies.has(normalizeFamily(asset.family)));
+    const prepared = prepareEmbeddedFontAssets(selected.map(([, asset]) => asset));
+    const bytes = fontAssetBytes(prepared);
+    if (this.#bytes + bytes > this.#limit) {
+      throw new OfficeEngineError("FONT_BYTES_LIMIT", "Decoded embedded fonts exceed the configured font byte limit");
+    }
+    this.#bytes += bytes;
+    const order = new Map([...this.#seen].map((key, index) => [key, index]));
+    prepared.forEach((asset, index) => this.#order.set(asset, order.get(selected[index]![0])!));
+    for (const [key] of selected) this.#pending.delete(key);
+    return prepared;
+  }
+
+  close(): void { this.#pending.clear(); this.#seen.clear(); this.#order.clear(); }
+}
+
+function imageNeedsFontInventory(value: unknown, depth = 0): boolean {
+  if (value === null || typeof value !== "object" || ArrayBuffer.isView(value)) return false;
+  if (depth > 64) return true;
+  if ("mediaType" in value && "bytes" in value && value.bytes instanceof Uint8Array) {
+    if (value.mediaType === "image/x-emf") return metafileMayUseFonts(value.bytes);
+    // SVG CSS/nested resources and compressed metafiles have opaque font demand.
+    if (["image/x-wmf", "image/x-emz", "image/x-wmz", "image/svg+xml"].includes(String(value.mediaType))) return true;
+  }
+  return Object.values(value).some(child => imageNeedsFontInventory(child, depth + 1));
 }
 
 function browserFontBytes(source: Uint8Array): ArrayBuffer {

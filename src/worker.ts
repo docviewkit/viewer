@@ -9,7 +9,7 @@ import {
   collectFontRequests,
   documentFontRuns,
   fontAssetBytes,
-  prepareEmbeddedFontAssets,
+  EmbeddedFontLoader,
   registerFonts,
   type RegisteredFonts,
 } from "./font.js";
@@ -26,6 +26,7 @@ const scope = globalThis as unknown as WorkerScope;
 let document: CoreDocument | undefined;
 let renderer: SceneRenderer | undefined;
 let fonts: RegisteredFonts | undefined;
+let embeddedFontLoader: EmbeddedFontLoader | undefined;
 let fontPolicy: "deterministic" | "local-first" = "deterministic";
 let additionalDocumentDiagnostics: readonly Diagnostic[] = [];
 let objectsById = new Map<string, SceneObject>();
@@ -118,7 +119,7 @@ function replaceScene(scene: CoreDocument["scene"], registeredFonts: RegisteredF
     scene.objects,
     document!.limits,
     registeredFonts,
-    registeredFonts.imageCodecFonts(),
+    embeddedFontLoader!.codecFonts(registeredFonts),
     document!.scene.info!.format,
   );
   renderer?.close();
@@ -128,12 +129,13 @@ function replaceScene(scene: CoreDocument["scene"], registeredFonts: RegisteredF
   publicObjects.clear();
 }
 
-function appendScene(scene: CoreDocument["scene"]): void {
-  renderer!.appendObjects(scene.objects);
+function appendScene(scene: CoreDocument["scene"], fontsChanged: boolean): void {
   for (const object of scene.objects) {
     objectsById.set(object.id, object);
     objectsByNumericId.set(object.numericId, object);
   }
+  if (fontsChanged) renderer!.replaceObjects([...objectsByNumericId.values()], embeddedFontLoader!.codecFonts(fonts!));
+  else renderer!.appendObjects(scene.objects);
 }
 
 async function ensureUnitLoaded(
@@ -144,20 +146,28 @@ async function ensureUnitLoaded(
   const loaded = formulaBounds === undefined
     ? state.document.loadUnit(unitIndex)
     : state.document.loadUnitRegion(unitIndex, formulaBounds.maxRow, formulaBounds.maxColumn);
-  if (loaded === undefined) return state;
-  const { scene, replace } = loaded;
-  await state.fonts.addEmbeddedAssets(prepareEmbeddedFontAssets(scene.embeddedFonts));
+  const scene = loaded?.scene ?? { ...state.document.scene,
+    objects: state.document.scene.objects.filter(object => object.unitIndex === unitIndex), embeddedFonts: [] };
+  const assets = embeddedFontLoader!.prepare(scene);
+  if (loaded === undefined && assets.length === 0) return state;
+  await state.fonts.addEmbeddedAssets(assets);
+  const fallbacks = embeddedFontLoader!.prepare(scene, undefined, state.fonts);
+  await state.fonts.addEmbeddedAssets(fallbacks);
   if (fontPolicy === "local-first") await state.fonts.addLocalRequests(collectFontRequests(scene.objects));
-  if (replace) replaceScene(scene, state.fonts);
-  else appendScene(scene);
+  if (loaded === undefined) replaceScene(state.document.scene, state.fonts);
+  else if (loaded.replace) replaceScene(scene, state.fonts);
+  else appendScene(scene, assets.length + fallbacks.length > 0);
   return requireOpenDocument();
 }
 
 async function ensureAllLoaded(): Promise<ReturnType<typeof requireOpenDocument>> {
   const state = requireOpenDocument();
-  const scene = state.document.loadAll();
-  if (scene === undefined) return state;
-  await state.fonts.addEmbeddedAssets(prepareEmbeddedFontAssets(scene.embeddedFonts));
+  const loaded = state.document.loadAll();
+  const scene = loaded ?? state.document.scene;
+  const assets = embeddedFontLoader!.prepare(scene);
+  if (loaded === undefined && assets.length === 0) return state;
+  await state.fonts.addEmbeddedAssets(assets);
+  await state.fonts.addEmbeddedAssets(embeddedFontLoader!.prepare(scene, undefined, state.fonts));
   if (fontPolicy === "local-first") await state.fonts.addLocalRequests(collectFontRequests(scene.objects));
   replaceScene(scene, state.fonts);
   return requireOpenDocument();
@@ -225,6 +235,7 @@ async function handle(request: WorkerRequest): Promise<void> {
           // Calculation is optional; the Core diagnostic preserves best-effort rendering.
         }
       }
+      const fontLoader = new EmbeddedFontLoader(request.limits.fontBytes, request.fonts);
       let loadedFonts: RegisteredFonts | undefined;
       let preflightFonts: RegisteredFonts | undefined;
       try {
@@ -237,7 +248,7 @@ async function handle(request: WorkerRequest): Promise<void> {
           );
         }
         const fontRequests = collectFontRequests(provisionalScene.objects, provisionalScene.fontAlternateNames);
-        const embeddedFonts = prepareEmbeddedFontAssets(provisionalScene.embeddedFonts);
+        const embeddedFonts = fontLoader.prepare(provisionalScene, 0);
         preflightFonts = await registerFonts(
           request.fonts,
           undefined,
@@ -261,6 +272,7 @@ async function handle(request: WorkerRequest): Promise<void> {
             "Document-embedded and provider fonts exceed the configured font byte limit",
           );
         }
+        fontLoader.reserveProviderBytes(fontAssetBytes(provider.fonts));
         if (request.fontPolicy === "local-first" && provider.fonts.length === 0) {
           loadedFonts = preflightFonts;
           preflightFonts = undefined;
@@ -282,6 +294,7 @@ async function handle(request: WorkerRequest): Promise<void> {
             },
           );
         }
+        await loadedFonts.addEmbeddedAssets(fontLoader.prepare(provisionalScene, 0, loadedFonts));
         const additionalDiagnostics: Diagnostic[] = [...provider.diagnostics];
         const measuredLayoutFormat = provisionalScene.info.format;
         const metricObjects = fontMetricLayoutObjects(provisionalScene.objects, measuredLayoutFormat);
@@ -343,7 +356,7 @@ async function handle(request: WorkerRequest): Promise<void> {
           scene.objects,
           request.limits,
           loadedFonts,
-          loadedFonts.imageCodecFonts(),
+          fontLoader.codecFonts(loadedFonts),
           scene.info.format,
         );
         scope.postMessage({
@@ -362,6 +375,7 @@ async function handle(request: WorkerRequest): Promise<void> {
         document = opened;
         renderer = loadedRenderer;
         fonts = loadedFonts;
+        embeddedFontLoader = fontLoader;
         fontPolicy = request.fontPolicy;
         additionalDocumentDiagnostics = additionalDiagnostics;
         objectsById = new Map(scene.objects.map((object) => [object.id, object]));
@@ -370,6 +384,7 @@ async function handle(request: WorkerRequest): Promise<void> {
       } catch (cause) {
         preflightFonts?.close();
         loadedFonts?.close();
+        fontLoader.close();
         opened.close();
         core.close();
         throw cause;

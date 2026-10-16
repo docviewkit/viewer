@@ -1277,6 +1277,7 @@ impl ThemeFontCollection {
 
 #[derive(Clone, Debug, Default)]
 struct DocxTheme {
+    part: Option<String>,
     major: ThemeFontCollection,
     minor: ThemeFontCollection,
     colors: HashMap<String, u32>,
@@ -3705,6 +3706,7 @@ struct Drawing {
     wordprocessing_shape: bool,
     shape_geometry: Option<Geometry>,
     shape_fill: Paint,
+    theme_fill_index: Option<u64>,
     shape_stroke: Paint,
     shape_stroke_width: f32,
     shape_stroke_style: StrokeStyle,
@@ -3780,6 +3782,7 @@ impl Drawing {
             wordprocessing_shape: false,
             shape_geometry: None,
             shape_fill: Paint::None,
+            theme_fill_index: None,
             shape_stroke: Paint::None,
             shape_stroke_width: 0.0,
             shape_stroke_style: StrokeStyle::default(),
@@ -3900,6 +3903,7 @@ struct DrawingState {
     shape_style_depth: Option<usize>,
     shape_style_line_ref_depth: Option<usize>,
     shape_style_fill_ref_depth: Option<usize>,
+    shape_style_fill_index: Option<u64>,
     shape_fill_explicit: bool,
     shape_stroke_explicit: bool,
     shape_line_explicit: bool,
@@ -4828,11 +4832,12 @@ pub(super) fn parse_with_font_metrics_at(
         .map_or(parsed.page, |section| section.spec);
     parsed.even_and_odd_headers = settings.even_and_odd_headers;
     parsed.default_tab_stop = settings.default_tab_stop;
-    resolve_embedded_equations(
+    resolve_drawing_resources(
         package,
         main_part,
         &mut parsed.blocks,
         &mut parsed.diagnostics,
+        &theme,
     )?;
     parsed.images =
         resolve_document_images(package, main_part, &parsed.blocks, &mut parsed.diagnostics)?;
@@ -8250,6 +8255,7 @@ fn parse_document_xml_with_styles(
                             shape_style_depth: None,
                             shape_style_line_ref_depth: None,
                             shape_style_fill_ref_depth: None,
+                            shape_style_fill_index: None,
                             shape_fill_explicit: false,
                             shape_stroke_explicit: false,
                             shape_line_explicit: false,
@@ -8690,6 +8696,7 @@ fn parse_document_xml_with_styles(
                                 drawing.drawing.shape_stroke_width = 12_700.0 / EMU_PER_CSS_PIXEL;
                             }
                         } else {
+                            drawing.shape_style_fill_index = super::drawingml::numeric_attribute(&attributes, "idx", part)?;
                             drawing.shape_style_fill_ref_depth = (!empty
                                 && drawingml_fill_reference_has_paint(&attributes, part)?)
                                 .then_some(depth);
@@ -9497,6 +9504,9 @@ fn parse_document_xml_with_styles(
                                 drawing.shape_style_line_ref_depth = None;
                             }
                             if drawing.shape_style_fill_ref_depth == Some(depth) {
+                                if !drawing.shape_fill_explicit {
+                                    drawing.drawing.theme_fill_index = drawing.shape_style_fill_index;
+                                }
                                 drawing.shape_style_fill_ref_depth = None;
                             }
                         }
@@ -11525,7 +11535,10 @@ fn resolve_docx_theme(
 }
 
 fn parse_docx_theme_xml(bytes: &[u8], limits: Limits, part: &str) -> Result<DocxTheme, Diagnostic> {
-    let mut theme = DocxTheme::default();
+    let mut theme = DocxTheme {
+        part: Some(part.to_owned()),
+        ..DocxTheme::default()
+    };
     let mut depth = 0_usize;
     let mut color_scheme_depth = None;
     let mut color_slot: Option<(usize, String)> = None;
@@ -13400,11 +13413,12 @@ fn resolve_story(
         theme,
         diagnostics,
     )?;
-    resolve_embedded_equations(
+    resolve_drawing_resources(
         package,
         &relationship.target,
         &mut story.blocks,
         diagnostics,
+        theme,
     )?;
     story.paragraphs = story_paragraphs(&story.blocks);
     story.images = resolve_requested_images(
@@ -13593,11 +13607,12 @@ fn resolve_story_collection(
             .cloned()
             .map(|paragraph| Block::Paragraph(Box::new(paragraph)))
             .collect();
-        resolve_embedded_equations(
+        resolve_drawing_resources(
             package,
             &relationship.target,
             &mut story.blocks,
             diagnostics,
+            theme,
         )?;
         story.paragraphs = story_paragraphs(&story.blocks);
         story.images = resolve_requested_images(
@@ -14290,11 +14305,12 @@ fn resolve_document_images(
     resolve_requested_images(package, part, requested, diagnostics)
 }
 
-fn resolve_embedded_equations(
+fn resolve_drawing_resources(
     package: &Package<'_>,
     part: &str,
     blocks: &mut [Block],
     diagnostics: &mut Vec<Diagnostic>,
+    theme: &DocxTheme,
 ) -> Result<(), Diagnostic> {
     let relationships = package.relationships(Some(part))?;
     let relationship_map = relationships
@@ -14303,6 +14319,37 @@ fn resolve_embedded_equations(
         .collect::<HashMap<_, _>>();
     let mut resolve_paragraph = |paragraph: &mut Paragraph| -> Result<(), Diagnostic> {
         for drawing in &mut paragraph.drawings {
+            if let (Some(index), Some(theme_part)) =
+                (drawing.theme_fill_index, theme.part.as_deref())
+            {
+                let placeholder = match drawing.shape_fill {
+                    Paint::Solid(color) => color,
+                    _ => 0x0000_00ff,
+                };
+                match super::drawingml::drawingml_theme_fill(
+                    package,
+                    theme_part,
+                    index,
+                    placeholder,
+                    &|name| theme.color(name),
+                ) {
+                    Ok(Some(fill)) => {
+                        drawing.shape_fill = fill.paint(Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: drawing.width,
+                            height: drawing.height,
+                        })
+                    }
+                    Ok(None) => {}
+                    Err(mut error) => {
+                        error.severity = crate::diagnostic::Severity::Warning;
+                        error.fidelity = Fidelity::Approximate;
+                        diagnostics.push(error);
+                    }
+                }
+            }
+
             let Some(relationship_id) = drawing.embedded_object_relationship_id.as_deref() else {
                 continue;
             };

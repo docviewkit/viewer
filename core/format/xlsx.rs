@@ -624,6 +624,7 @@ struct WorksheetShapeState {
     shadow_depth: Option<usize>,
     style_line_depth: Option<usize>,
     style_fill_depth: Option<usize>,
+    style_fill_index: Option<u64>,
     hidden_style_depth: Option<usize>,
     text_body_depth: Option<usize>,
     text_line_depth: Option<usize>,
@@ -678,6 +679,7 @@ impl WorksheetShapeState {
             shadow_depth: None,
             style_line_depth: None,
             style_fill_depth: None,
+            style_fill_index: None,
             hidden_style_depth: None,
             text_body_depth: None,
             text_line_depth: None,
@@ -1241,6 +1243,7 @@ fn parse_with_mode(
                     &row_metrics,
                     &styles.theme_colors,
                     &styles.theme_line_styles,
+                    &mut state.diagnostics,
                 )?
             } else {
                 push_worksheet_drawings(
@@ -4613,6 +4616,7 @@ fn parse_worksheet_metadata(
         &row_metrics,
         theme_colors,
         &styles.theme_line_styles,
+        &mut diagnostics,
     )?;
     columns = columns.max(column_metrics.count_for_extent(drawing_width, MAX_COLUMNS));
     rows = rows.max(row_metrics.count_for_extent(drawing_height, MAX_ROWS));
@@ -4708,6 +4712,7 @@ fn worksheet_drawing_extent(
     row_metrics: &AxisMetrics,
     theme_colors: &ThemeColors,
     theme_line_styles: &DrawingMlThemeLineStyles,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<(f32, f32), Diagnostic> {
     if relationship_ids.is_empty() {
         return Ok((0.0, 0.0));
@@ -4732,6 +4737,7 @@ fn worksheet_drawing_extent(
             row_metrics,
             theme_colors,
             theme_line_styles,
+            diagnostics,
         )? {
             let drawing_extent = worksheet_drawing_visual_extent(&drawing);
             extent.0 = extent.0.max(drawing_extent.0);
@@ -6018,8 +6024,10 @@ fn parse_worksheet_drawing(
     row_metrics: &AxisMetrics,
     theme_colors: &ThemeColors,
     theme_line_styles: &DrawingMlThemeLineStyles,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<Vec<WorksheetDrawing>, Diagnostic> {
     let bytes = package.required_part(part)?;
+    let theme_part = super::drawingml::drawingml_main_theme(package)?;
     let mut depth = 0_usize;
     let mut anchor = None::<DrawingAnchorState>;
     let mut groups = Vec::<DrawingGroupState>::new();
@@ -6499,6 +6507,8 @@ fn parse_worksheet_drawing(
                                 active.stroke_width = width;
                             }
                         } else if local == "fillRef" {
+                            active.style_fill_index =
+                                super::drawingml::numeric_attribute(&attributes, "idx", part)?;
                             active.style_fill_depth = (!empty
                                 && drawingml_fill_reference_has_paint(&attributes, part)?)
                             .then_some(depth);
@@ -6971,7 +6981,43 @@ fn parse_worksheet_drawing(
                             drawing_id,
                             payload: DrawingPayload::Shape(Box::new(WorksheetShape {
                                 geometry,
-                                fill: completed.fill,
+                                fill: if !completed.fill_explicit
+                                    && !completed.is_connector
+                                    && let (Some(index), Some(theme_part)) =
+                                        (completed.style_fill_index, theme_part.as_deref())
+                                {
+                                    let placeholder = match completed.fill {
+                                        Paint::Solid(color) => color,
+                                        _ => 0x0000_00ff,
+                                    };
+                                    match super::drawingml::drawingml_theme_fill(
+                                        package,
+                                        theme_part,
+                                        index,
+                                        placeholder,
+                                        &|name| {
+                                            drawing_color_value(
+                                                "schemeClr",
+                                                name,
+                                                theme_colors,
+                                                part,
+                                            )
+                                            .ok()
+                                        },
+                                    ) {
+                                        Ok(fill) => {
+                                            fill.map_or(completed.fill, |fill| fill.paint(bounds))
+                                        }
+                                        Err(mut error) => {
+                                            error.severity = crate::diagnostic::Severity::Warning;
+                                            error.fidelity = Fidelity::Approximate;
+                                            diagnostics.push(error);
+                                            completed.fill
+                                        }
+                                    }
+                                } else {
+                                    completed.fill
+                                },
                                 image_fill: completed.image_fill,
                                 stroke: if !completed.text.is_empty()
                                     && !completed.shape_stroke_authored
@@ -7796,6 +7842,7 @@ fn push_worksheet_drawings(
             row_metrics,
             theme_colors,
             theme_line_styles,
+            &mut state.diagnostics,
         )?;
         let drawing_relationships = package.relationships(Some(drawing_part))?;
         let drawing_relationships = drawing_relationships
@@ -12759,6 +12806,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .expect("unsupported zero-sized shapes must not prevent supported drawings from loading");
 
@@ -12783,6 +12831,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .unwrap();
 
@@ -12814,6 +12863,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .expect("picture adjustments remain attached to the image payload");
 
@@ -12930,6 +12980,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .unwrap();
         let presets = drawings
@@ -12972,6 +13023,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .unwrap();
         let super::DrawingPayload::Shape(shape) = &drawings[0].payload else {
@@ -13057,6 +13109,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .unwrap();
         let super::DrawingPayload::Shape(shape) = &drawings[0].payload else {
@@ -13127,6 +13180,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .expect("supported worksheet shapes remain renderable");
 
@@ -13179,6 +13233,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &colors,
             &line_styles,
+            &mut Vec::new(),
         )
         .unwrap();
         let widths = drawings
@@ -13212,6 +13267,7 @@ mod tests {
             &AxisMetrics::new(20.0, Vec::new()),
             &default_theme_colors(),
             &super::DrawingMlThemeLineStyles::default(),
+            &mut Vec::new(),
         )
         .expect("SmartArt relationship remains available for best-effort diagnostics");
 

@@ -9,7 +9,7 @@ import {
   FontProviderCache,
   fontAssetBytes,
   prepareFontAssets,
-  prepareEmbeddedFontAssets,
+  EmbeddedFontLoader,
   registerFonts,
   verifyFontAssetIntegrity,
   type PreparedFontAsset,
@@ -123,6 +123,7 @@ class InlineDocument implements OfficeDocument {
   readonly #objectsById = new Map<string, DocumentObject>();
   #renderer: SceneRenderer | undefined;
   #fonts: RegisteredFonts | undefined;
+  readonly #embeddedFonts: EmbeddedFontLoader;
   #onClose: ((document: InlineDocument) => void) | undefined;
   readonly info;
   #diagnostics: readonly Diagnostic[];
@@ -130,12 +131,14 @@ class InlineDocument implements OfficeDocument {
   readonly #localFonts: boolean;
   readonly #unitLoads = new Map<number, Promise<void>>();
   #allLoad: Promise<void> | undefined;
+  #fontLoad: Promise<void> = Promise.resolve();
   #fontDiagnosticCount = 0;
   #closed = false;
 
   constructor(
     coreDocument: CoreDocument,
     fonts: RegisteredFonts,
+    embeddedFonts: EmbeddedFontLoader,
     onClose: (document: InlineDocument) => void,
     additionalDiagnostics: readonly Diagnostic[] = [],
     localFonts = false,
@@ -150,6 +153,7 @@ class InlineDocument implements OfficeDocument {
     }
     this.#coreDocument = coreDocument;
     this.#fonts = fonts;
+    this.#embeddedFonts = embeddedFonts;
     this.#onClose = onClose;
     this.info = immutableDocumentInfo(scene.info);
     this.#additionalDiagnostics = additionalDiagnostics;
@@ -266,15 +270,27 @@ class InlineDocument implements OfficeDocument {
     const loaded = formulaBounds === undefined
       ? this.#coreDocument!.loadUnit(unitIndex)
       : this.#coreDocument!.loadUnitRegion(unitIndex, formulaBounds.maxRow, formulaBounds.maxColumn);
-    if (loaded === undefined) return;
-    const { scene, replace } = loaded;
-    const pending = this.#fonts!
-      .addEmbeddedAssets(prepareEmbeddedFontAssets(scene.embeddedFonts))
+    const scene = loaded?.scene ?? { ...this.#coreDocument!.scene,
+      objects: this.#coreDocument!.scene.objects.filter(object => object.unitIndex === unitIndex), embeddedFonts: [] };
+    const assets = this.#embeddedFonts.prepare(scene);
+    if (loaded === undefined && assets.length === 0) return this.#fontLoad;
+    let fontsChanged = assets.length > 0;
+    const fontLoad = this.#fontLoad.then(async () => {
+      await this.#fonts!.addEmbeddedAssets(assets);
+      const fallbacks = this.#embeddedFonts.prepare(scene, undefined, this.#fonts!);
+      fontsChanged ||= fallbacks.length > 0;
+      await this.#fonts!.addEmbeddedAssets(fallbacks);
+    })
       .then(() => this.#localFonts ? this.#fonts!.addLocalRequests(collectFontRequests(scene.objects)) : undefined)
+      .then(() => undefined);
+    this.#fontLoad = fontLoad.catch(() => undefined);
+    const pending = fontLoad
       .then(() => {
         if (this.#closed) return;
-        if (replace) this.#replaceScene(scene);
-        else this.#appendScene(scene);
+        if (loaded === undefined) this.#replaceScene({ ...this.#coreDocument!.scene,
+          objects: [...this.#objectsByNumericId.values()] });
+        else if (loaded.replace) this.#replaceScene(scene);
+        else this.#appendScene(scene, fontsChanged);
       })
       .finally(() => this.#unitLoads.delete(unitIndex));
     this.#unitLoads.set(unitIndex, pending);
@@ -286,9 +302,12 @@ class InlineDocument implements OfficeDocument {
     const pending = (async () => {
       await Promise.all(this.#unitLoads.values());
       if (this.#closed) return;
-      const scene = this.#coreDocument!.loadAll();
-      if (scene === undefined) return;
-      await this.#fonts!.addEmbeddedAssets(prepareEmbeddedFontAssets(scene.embeddedFonts));
+      const loaded = this.#coreDocument!.loadAll();
+      const scene = loaded ?? this.#coreDocument!.scene;
+      const assets = this.#embeddedFonts.prepare(scene);
+      if (loaded === undefined && assets.length === 0) return;
+      await this.#fonts!.addEmbeddedAssets(assets);
+      await this.#fonts!.addEmbeddedAssets(this.#embeddedFonts.prepare(scene, undefined, this.#fonts!));
       if (this.#localFonts) await this.#fonts!.addLocalRequests(collectFontRequests(scene.objects));
       if (!this.#closed) this.#replaceScene(scene);
     })().finally(() => {
@@ -315,11 +334,11 @@ class InlineDocument implements OfficeDocument {
         scene.objects,
         this.#coreDocument!.limits,
         fonts,
-        fonts.imageCodecFonts(),
+        this.#embeddedFonts.codecFonts(fonts),
         this.info.format,
       );
     } else {
-      this.#renderer.replaceObjects(scene.objects, fonts.imageCodecFonts());
+      this.#renderer.replaceObjects(scene.objects, this.#embeddedFonts.codecFonts(fonts));
     }
     this.#fontDiagnosticCount = fontDiagnostics.length;
     this.#diagnostics = immutableDiagnostics([
@@ -329,7 +348,7 @@ class InlineDocument implements OfficeDocument {
     ]);
   }
 
-  #appendScene(scene: CoreDocument["scene"]): void {
+  #appendScene(scene: CoreDocument["scene"], fontsChanged: boolean): void {
     const fonts = this.#fonts!;
     const fontDiagnostics = fonts.diagnostics();
     for (const object of scene.objects) this.#objectsByNumericId.set(object.numericId, object);
@@ -339,7 +358,11 @@ class InlineDocument implements OfficeDocument {
         documentObject(object, this.#objectsByNumericId, fonts, this.info.format === "odp"),
       );
     }
-    this.#renderer!.appendObjects(scene.objects);
+    // Other unit loads may already be parsed in Core while their fonts are
+    // awaiting registration. Refresh only committed objects, or those units
+    // will be appended twice when their pending loads complete.
+    if (fontsChanged) this.#renderer!.replaceObjects([...this.#objectsByNumericId.values()], this.#embeddedFonts.codecFonts(fonts));
+    else this.#renderer!.appendObjects(scene.objects);
     this.#diagnostics = immutableDiagnostics([
       ...this.#diagnostics,
       ...scene.diagnostics,
@@ -363,6 +386,7 @@ class InlineDocument implements OfficeDocument {
     this.#objectsById.clear();
     renderer?.close();
     fonts?.close();
+    this.#embeddedFonts.close();
     coreDocument?.close();
     onClose?.(this);
   }
@@ -447,12 +471,13 @@ class InlineEngine implements OfficeEngine {
         { diagnostics },
       );
     }
+    const embeddedFontLoader = new EmbeddedFontLoader(core.limits.fontBytes, fonts);
     let registeredFonts: RegisteredFonts | undefined;
     let preflightFonts: RegisteredFonts | undefined;
     const additionalDiagnostics: Diagnostic[] = [];
     try {
       const requests = collectFontRequests(coreDocument.scene.objects, coreDocument.scene.fontAlternateNames);
-      const embeddedFonts = prepareEmbeddedFontAssets(coreDocument.scene.embeddedFonts);
+      const embeddedFonts = embeddedFontLoader.prepare(coreDocument.scene, 0);
       const hostFonts = copyPreparedFonts(fonts);
       let providerRequests = requests;
       if (this.#fontProvider !== undefined) {
@@ -477,6 +502,7 @@ class InlineEngine implements OfficeEngine {
       additionalDiagnostics.push(...providerResult.diagnostics);
       const providerBudget = Math.max(0, core.limits.fontBytes - fontAssetBytes(embeddedFonts));
       const providerFonts = prepareFontAssets(providerResult.assets, providerBudget);
+      embeddedFontLoader.reserveProviderBytes(fontAssetBytes(providerFonts));
       if (this.#fontPolicy === "local-first" && providerFonts.length === 0 && preflightFonts !== undefined) {
         registeredFonts = preflightFonts;
         preflightFonts = undefined;
@@ -498,6 +524,7 @@ class InlineEngine implements OfficeEngine {
           },
         );
       }
+      await registeredFonts.addEmbeddedAssets(embeddedFontLoader.prepare(coreDocument.scene, 0, registeredFonts));
       throwIfAborted(options.signal);
       this.#assertOpen();
       const measuredLayoutFormat = coreDocument.scene.info?.format;
@@ -564,12 +591,14 @@ class InlineEngine implements OfficeEngine {
     } catch (cause) {
       preflightFonts?.close();
       registeredFonts?.close();
+      embeddedFontLoader.close();
       coreDocument.close();
       throw cause;
     }
     const document = new InlineDocument(
       coreDocument,
       registeredFonts,
+      embeddedFontLoader,
       (closed) => this.#documents.delete(closed),
       additionalDiagnostics,
       this.#fontPolicy === "local-first",

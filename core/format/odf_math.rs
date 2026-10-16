@@ -1,7 +1,8 @@
-//! Shared ODF embedded MathML text semantics; host adapters retain their own layout.
+//! Shared ODF embedded MathML semantics and unwrapped text visuals.
 use super::local_name;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, Phase};
 use crate::limits::Limits;
+use crate::model::{Geometry, Paint, TextAlign, TextLayout, TextRun, Visual};
 use crate::xml::{XmlEvent, decode_xml_text, parse_xml};
 
 fn format_error(part: &str, message: &str) -> Diagnostic {
@@ -16,6 +17,46 @@ pub(super) struct OdfMath {
     pub source_part: String,
     pub text: String,
     pub approximate: bool,
+}
+
+impl OdfMath {
+    pub(super) fn visual(&self, font_size: f32, align: TextAlign) -> Visual {
+        Visual::TextLayout {
+            layout: TextLayout {
+                // Formula frames measure the expression itself, without text-box padding or wrapping.
+                wrap: false,
+                inset_left: 0.0,
+                inset_right: 0.0,
+                inset_top: 0.0,
+                inset_bottom: 0.0,
+                ..TextLayout::default()
+            },
+            visual: Box::new(Visual::RichText {
+                geometry: Geometry::Rectangle,
+                fill: Paint::None,
+                stroke: Paint::None,
+                stroke_width: 0.0,
+                align,
+                line_height: 0.0,
+                runs: vec![TextRun {
+                    text: self.text.clone(),
+                    font_family: "Cambria Math".to_owned(),
+                    font_size,
+                    color: 0x0000_00ff,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strikethrough: false,
+                    highlight: 0,
+                    baseline_shift: 0.0,
+                    letter_spacing: 0.0,
+                    horizontal_scale: 1.0,
+                    paint: None,
+                    east_asian_line_breaks: true,
+                }],
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -201,6 +242,15 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!((math.text.as_str(), math.approximate), (text, approximate));
+            let Visual::TextLayout { layout, visual } = math.visual(16.0, TextAlign::Start) else {
+                panic!("math must use the shared text layout");
+            };
+            assert!(!layout.wrap);
+            assert_eq!(
+                layout.inset_left + layout.inset_right + layout.inset_top + layout.inset_bottom,
+                0.0
+            );
+            assert!(matches!(*visual, Visual::RichText { runs, .. } if runs[0].text == text));
         }
         for xml in [
             r#"<!DOCTYPE math:math SYSTEM "https://example.com/math.dtd"><math:math/>"#,

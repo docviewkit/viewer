@@ -1963,7 +1963,7 @@ pub(super) fn color_from_hsl(color: u32, hue: f32, saturation: f32, luminance: f
             hsl_component(p, q, hue - 1.0 / 3.0),
         )
     };
-    let channel = |value: f32| (value * 255.0).round() as u32;
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u32;
     (channel(r) << 24) | (channel(g) << 16) | (channel(b) << 8) | (color & 0xff)
 }
 

@@ -144,7 +144,56 @@ try {
           console.info("fill-check: gradient mapping and outlines");
           const mapping = await open("tdf114848-fill-mapping.pptx");
           try {
-            await render(mapping);
+            const firstPage = await render(mapping);
+            const plainPixels = firstPage.getImageData(130, 207, 200, 22).data;
+            let plainRight = 0;
+            for (let y=0;y<22;y++) for(let x=0;x<200;x++) {
+              const i=(y*200+x)*4;
+              if(plainPixels[i]<100 && plainPixels[i+1]<100 && plainPixels[i+2]<100) plainRight=Math.max(plainRight,x);
+            }
+            check(plainRight > 100 && plainRight < 150, "Plain after gradient must retain regular weight and zero inherited tracking");
+            const triangle = mapping.scene.objects.find(o => o.text?.startsWith("Test solid line border"));
+            const triangleContext = await render(mapping, 0, [triangle]);
+            const blueBottom = (left, right) => {
+              const pixels = triangleContext.getImageData(left, 600, right-left, 100).data;
+              let bottom = 0;
+              for (let y=0;y<100;y++) for(let x=0;x<right-left;x++) {
+                const i=(y*(right-left)+x)*4;
+                if(pixels[i+2]-pixels[i]>35 && pixels[i]<100) bottom=Math.max(bottom,y);
+              }
+              return bottom;
+            };
+            check(blueBottom(400,550) > blueBottom(40,180)+15, "Page 1 WordArt must taper to the inverted triangle at its center");
+            mapping.loadUnit(1);
+            const wordArt = mapping.scene.objects.filter(o => o.unitIndex === 1 && /Wave|Can |Ring /u.test(o.text ?? ""));
+            check(wordArt.length === 8, "Page 2 must retain all eight authored WordArt objects");
+            for (const object of wordArt) {
+              const context = await render(mapping, 1, [object]);
+              const {width, height} = context.canvas;
+              const pixels = context.getImageData(0, 0, width, height).data;
+              let outside = 0, dark = 0, ink = 0;
+              for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+                const i = (y * width + x) * 4;
+                if (pixels[i + 2] - pixels[i] < 20) continue;
+                ink++;
+                if (pixels[i] < 50) dark++;
+                if (x < object.bounds.x - 2 || x > object.bounds.x + object.bounds.width + 2
+                  || y < object.bounds.y - 2 || y > object.bounds.y + object.bounds.height + 2) outside++;
+              }
+              check(ink > 500 && dark > 80, `${object.text}: retain blue gradient glyphs`);
+              check(outside === 0, `${object.text}: warped glyphs must fit their authored envelope (${outside} outside pixels)`);
+            }
+            mapping.loadUnit(5);
+            const themed = await render(mapping, 5);
+            // Interior pixels sampled from a Microsoft PowerPoint PDF export of this exact fixture.
+            const native = [[710,60,255,218,217], [710,130,255,180,179],
+              [820,190,235,228,247], [820,270,214,198,237],
+              [550,440,255,143,40], [550,550,212,114,31],
+              [690,340,154,194,71], [690,460,123,155,56],
+              [745,540,255,223,197], [745,600,255,197,149]];
+            result.themeFillError = Math.max(...native.flatMap(([x,y,...rgb]) =>
+              pixel(themed,x,y).slice(0,3).map((value,i) => Math.abs(value-rgb[i]))));
+            check(result.themeFillError <= 5, `Page 6 theme fills must match PowerPoint interior colors (${result.themeFillError})`);
             const object = structuredClone(mapping.scene.objects.find(o => o.text?.includes("Word Art Perspective")));
             object.bounds = { x: 0, y: 0, width: 100, height: 60 };
             object.visual = { kind: "painted-shape", geometry: "rectangle", strokeWidth: 0, stroke: { kind: "none" },
@@ -189,6 +238,19 @@ try {
       console.log(`${name}: original Office fill pixels PASS ${JSON.stringify(fills)}`);
       await page.screenshot({ path: `/tmp/n820786-${name}.png` });
       assert.ok(result.white > 40 && result.dark > 20, `${name}: pct30 must show both background and dots: ${JSON.stringify(result)}`);
+      await page.goto(`${url}examples/viewer.html?fixture=tdf114848-fill-mapping.pptx`);
+      await page.waitForFunction(() => document.documentElement.dataset.ready === "true");
+      for (const number of [1, 2, 6]) {
+        await page.getByRole("option", { name: `Slide ${number}`, exact: true }).click();
+        await page.waitForFunction(index => {
+          const root = document.querySelector("#viewer").shadowRoot;
+          const slide = root.querySelector(`.continuous-page[data-unit-index="${index}"]`);
+          const workspace = root.querySelector(".workspace");
+          const top = Math.min(slide.offsetTop - 28, workspace.scrollHeight - workspace.clientHeight);
+          return slide.dataset.rendered === "true" && Math.abs(workspace.scrollTop - top) < 3;
+        }, number - 1);
+        await page.screenshot({ path: `/tmp/tdf114848-page${number}-${name}.png` });
+      }
       assert.deepEqual(errors, []);
       console.log(`${name}: grouped pct30 pixels PASS ${JSON.stringify(result)}`);
     } finally { await browser.close(); }

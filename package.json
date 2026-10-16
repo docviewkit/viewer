@@ -1,6 +1,6 @@
 {
   "name": "@docviewkit/sdk",
-  "version": "0.2.77",
+  "version": "0.2.78",
   "private": true,
   "description": "Frontend-local Office, PDF and OFD viewer with independently lazy-loaded format packs",
   "type": "module",

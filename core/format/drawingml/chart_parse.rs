@@ -3725,18 +3725,7 @@ fn chart_theme_effects(
     index: u64,
     color: &dyn Fn(&str) -> Option<u32>,
 ) -> Result<Option<DrawingMlPictureEffects>, Diagnostic> {
-    let mut theme = None;
-    if let Some(main) = package
-        .relationships(None)?
-        .iter()
-        .find(|r| !r.external && r.type_uri.ends_with("/officeDocument"))
-    {
-        theme = package
-            .relationships(Some(&main.target))?
-            .into_iter()
-            .find(|r| !r.external && r.type_uri.ends_with("/theme"))
-            .map(|r| r.target);
-    }
+    let mut theme = drawingml_main_theme(package)?;
     if let Some(part) = theme_part {
         theme = Some(part.to_owned());
     }

@@ -1643,7 +1643,8 @@ fn transform_saturation(color: u32, multiplier: f32, offset: f32) -> u32 {
     color_from_hsl(
         color,
         hue,
-        (saturation * multiplier + offset).clamp(0.0, 1.0),
+        // DrawingML percentages may exceed 100%; clip the resulting RGB channels.
+        (saturation * multiplier + offset).max(0.0),
         luminance,
     )
 }

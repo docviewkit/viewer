@@ -1841,6 +1841,15 @@ mod tests {
     }
 
     #[test]
+    fn tdf114848_theme_saturation_can_exceed_one_before_rgb_clipping() {
+        // Page 6, Regular Pentagon 19: accent6, first stop of fillStyleLst[2].
+        let mut color = 0xf796_4680;
+        apply_color_transform(&mut color, "tint", 0.5);
+        apply_color_transform(&mut color, "satMod", 3.0);
+        assert_eq!(color, 0xffbd_8780);
+    }
+
+    #[test]
     fn drawingml_bevel_uses_schema_dimensions_when_omitted() {
         let bevel = parse_three_d_bevel(&[], "ppt/slides/slide2.xml").unwrap();
 

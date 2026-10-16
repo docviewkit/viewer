@@ -1678,7 +1678,19 @@ function drawWithThreeD(
       if (style.contourColor !== undefined) context.shadowColor = color(style.contourColor);
       context.shadowBlur = style.contourWidth;
       context.filter = threeDMaterialFilter(style, 0.55);
-      draw(context);
+      const contour = style.appliesToText && style.contourColor !== undefined
+        ? colorizedLayer(context, style.contourColor, draw) : undefined;
+      if (contour !== undefined) {
+        const matrix = context.getTransform();
+        const radius = style.contourWidth / 2;
+        context.setTransform(1, 0, 0, 1, 0, 0);
+        context.filter = "none";
+        for (let i = 0; i < 8; i++) {
+          const x = Math.cos(i * Math.PI / 4) * radius;
+          const y = Math.sin(i * Math.PI / 4) * radius;
+          context.drawImage(contour, matrix.a * x + matrix.c * y, matrix.b * x + matrix.d * y);
+        }
+      } else draw(context);
     } finally {
       context.restore();
     }
@@ -5902,8 +5914,23 @@ function coalescePaintTextRuns(
   return result;
 }
 
-// Two open rails describe a text envelope, independent of the source format.
-// ponytail: single line/cubic rails; add piecewise rails when a real document needs them.
+function textPaintStyle(
+  context: OffscreenCanvasRenderingContext2D, object: SceneObject, paint: ScenePaint,
+  glyphBounds: SceneObject["bounds"], paintStyles?: ReadonlyMap<ScenePaint, string | CanvasGradient | CanvasPattern>,
+): string | CanvasGradient | CanvasPattern | undefined {
+  if (paint.kind === "linear-gradient") {
+    const scaleX = glyphBounds.width / Math.max(1, object.bounds.width);
+    const scaleY = glyphBounds.height / Math.max(1, object.bounds.height);
+    return paintStyle(context, { ...object, bounds: glyphBounds }, {
+      ...paint,
+      start: { x: paint.start.x * scaleX, y: paint.start.y * scaleY },
+      end: { x: paint.end.x * scaleX, y: paint.end.y * scaleY },
+    });
+  }
+  return paintStyles?.get(paint) ?? paintStyle(context, object, paint);
+}
+
+// ODF uses curve parameters; DrawingML maps the text rectangle along each rail's arc length.
 function drawTextEnvelope(
   context: OffscreenCanvasRenderingContext2D,
   object: SceneObject,
@@ -5916,17 +5943,40 @@ function drawTextEnvelope(
   if (typeof geometry !== "object" || geometry.kind !== "layered-path"
     || geometry.layers.length !== 2) return false;
   const rails = geometry.layers.map(layer => layer.commands);
-  if (!rails.every(commands => commands.length === 2 && commands[0]?.kind === "moveTo"
-    && (commands[1]?.kind === "lineTo" || commands[1]?.kind === "bezierCurveTo"))) return false;
-  const point = (rail: number, t: number): { x: number; y: number } => {
-    const start = rails[rail]?.[0];
-    const end = rails[rail]?.[1];
-    if (start?.kind !== "moveTo" || end === undefined || end.kind === "closePath") return { x: 0, y: 0 };
+  if (!rails.every(commands => commands.length >= 2 && commands[0]?.kind === "moveTo"
+    && commands.slice(1).every(c => c.kind === "lineTo" || c.kind === "bezierCurveTo"))) return false;
+  const curvePoint = (rail: number, fraction: number): { x: number; y: number } => {
+    const commands = rails[rail]!;
+    const segment = Math.min(commands.length - 2, Math.floor(fraction * (commands.length - 1)));
+    const t = fraction * (commands.length - 1) - segment;
+    const start = commands[segment]!;
+    const end = commands[segment + 1]!;
+    if (start.kind === "closePath" || end.kind === "closePath") return { x: 0, y: 0 };
     const u = 1 - t;
     return end.kind === "bezierCurveTo" ? {
       x: u ** 3 * start.x + 3 * u * u * t * end.cp1x + 3 * u * t * t * end.cp2x + t ** 3 * end.x,
       y: u ** 3 * start.y + 3 * u * u * t * end.cp1y + 3 * u * t * t * end.cp2y + t ** 3 * end.y,
     } : { x: u * start.x + t * end.x, y: u * start.y + t * end.y };
+  };
+  const samples = textLayout.warp === "text-envelope-arc" ? rails.map((commands, rail) => {
+    const points = [{ ...curvePoint(rail, 0), length: 0 }];
+    const count = (commands.length - 1) * 64;
+    for (let i = 1; i <= count; i++) {
+      const p = curvePoint(rail, i / count);
+      const previous = points[i - 1]!;
+      points.push({ ...p, length: previous.length + Math.hypot(p.x - previous.x, p.y - previous.y) });
+    }
+    return points;
+  }) : undefined;
+  const point = (rail: number, t: number): { x: number; y: number } => {
+    const points = samples?.[rail];
+    if (points === undefined) return curvePoint(rail, t);
+    const distance = t * points[points.length - 1]!.length;
+    let lo = 1, hi = points.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >>> 1; if (points[mid]!.length < distance) lo = mid + 1; else hi = mid; }
+    const a = points[lo - 1]!, b = points[lo]!;
+    const fraction = (distance - a.length) / Math.max(Number.EPSILON, b.length - a.length);
+    return { x: a.x + (b.x - a.x) * fraction, y: a.y + (b.y - a.y) * fraction };
   };
   const layout = layoutTextRuns(context, runs, { maxWidth: object.bounds.width,
     wrap: false, align: "start",
@@ -5942,7 +5992,9 @@ function drawTextEnvelope(
     const line = lines[placement.line];
     if (line !== undefined) {
       line.left = Math.min(line.left, placement.x - metrics.actualBoundingBoxLeft * horizontalScale);
-      line.right = Math.max(line.right, placement.x + metrics.actualBoundingBoxRight * horizontalScale);
+      const right = textLayout.warp === "text-envelope-arc"
+        ? Math.max(metrics.actualBoundingBoxRight, metrics.width) : metrics.actualBoundingBoxRight;
+      line.right = Math.max(line.right, placement.x + right * horizontalScale);
     }
     top = Math.min(top, placement.y - metrics.actualBoundingBoxAscent);
     bottom = Math.max(bottom, placement.y + metrics.actualBoundingBoxDescent);
@@ -5950,8 +6002,8 @@ function drawTextEnvelope(
   const naturalWidth = lines.reduce((width, line) => Math.max(width, line.right - line.left), 0);
   if (!(naturalWidth > 0) || !Number.isFinite(naturalWidth) || !(bottom > top) || !Number.isFinite(bottom - top)) return false;
   const transform = context.getTransform();
-  const width = Math.min(2048, Math.max(256, Math.ceil(object.bounds.width * Math.hypot(transform.a, transform.b))));
-  const height = Math.min(2048, Math.max(64, Math.ceil(width * (bottom - top) / naturalWidth)));
+  const width = Math.min(2048, Math.max(256, Math.ceil(object.bounds.width * Math.hypot(transform.a, transform.b) * 2)));
+  const height = Math.min(2048, Math.max(128, Math.ceil(width * (bottom - top) / naturalWidth)));
   const canvas = new OffscreenCanvas(width, height);
   const target = canvas.getContext("2d");
   if (target === null) return false;
@@ -5964,33 +6016,65 @@ function drawTextEnvelope(
     target.save();
     target.translate(offsetX, 0);
     target.scale(scaleX, height / (bottom - top));
+    const horizontalScale = runHorizontalScale(placement.style);
+    target.scale(horizontalScale, 1);
     applyRunFont(target, placement.style, 1, resolveFontFamily);
     target.textBaseline = "alphabetic";
     const glyphPaint = placement.style.paint ?? textLayout.textPaint;
+    const effect = placement.style.textEffect;
+    const glyphBounds = { x: 0, y: 0, width: lineWidth / horizontalScale, height: bottom - top };
     target.fillStyle = glyphPaint === undefined
-      ? color(placement.style.color) : paintStyles?.get(glyphPaint) ?? paintStyle(target, object, glyphPaint) ?? color(placement.style.color);
-    target.translate(placement.x - line.left, placement.y - top);
-    target.scale(runHorizontalScale(placement.style), 1);
-    if (textLayout.textFill ?? true) target.fillText(placement.text, 0, 0);
-    const stroke = textStrokeStyle(target, object, textLayout);
+      ? color(placement.style.color)
+      : (effect?.fillToText ? textPaintStyle(target, object, glyphPaint, glyphBounds, paintStyles)
+        : paintStyles?.get(glyphPaint) ?? paintStyle(target, object, glyphPaint)) ?? color(placement.style.color);
+    const stroke = effect?.stroke === undefined ? textStrokeStyle(target, object, textLayout)
+      : textPaintStyle(target, object, effect.stroke, glyphBounds, paintStyles);
+    const x = (placement.x - line.left) / horizontalScale;
+    const y = placement.y - top;
+    if (textLayout.textFill ?? true) target.fillText(placement.text, x, y);
     if (stroke !== undefined) {
       target.strokeStyle = stroke;
-      target.lineWidth = textLayout.textStrokeWidth ?? 0;
-      target.strokeText(placement.text, 0, 0);
+      target.lineWidth = effect?.strokeWidth ?? textLayout.textStrokeWidth ?? 0;
+      target.strokeText(placement.text, x, y);
     }
     target.restore();
   }
-  // Rasterize authored text once, then map bounded strips between the actual rails.
+  const edges = Array.from({ length: width + 1 }, (_, i) => [point(0, i / width), point(1, i / width)] as const);
+  const minX = Math.min(...edges.flatMap(pair => pair.map(p => p.x)));
+  const minY = Math.min(...edges.flatMap(pair => pair.map(p => p.y)));
+  const spanX = Math.max(...edges.flatMap(pair => pair.map(p => p.x))) - minX;
+  const spanY = Math.max(...edges.flatMap(pair => pair.map(p => p.y))) - minY;
+  if (!(spanX > 0 && spanY > 0)) return false;
+  const size = gradientRasterSize(spanX, spanY,
+    Math.min(Math.hypot(transform.a, transform.b) * 2, 2048 / spanX),
+    Math.min(Math.hypot(transform.c, transform.d) * 2, 2048 / spanY));
+  const surface = new OffscreenCanvas(size.width, size.height);
+  const warped = surface.getContext("2d");
+  if (warped === null) return false;
+  warped.scale(size.scaleX, size.scaleY);
+  warped.translate(-minX, -minY);
+  // Add adjacent strip coverage on an isolated surface to avoid translucent seams.
+  warped.globalCompositeOperation = "lighter";
   for (let column = 0; column < width; column += 1) {
-    const a = point(0, column / width);
-    const b = point(0, (column + 1) / width);
-    const c = point(1, column / width);
-    context.save();
-    context.transform(b.x - a.x, b.y - a.y, c.x - a.x, c.y - a.y,
-      object.bounds.x + a.x, object.bounds.y + a.y);
-    context.drawImage(canvas, column, 0, 1, height, 0, 0, 1.01, 1);
-    context.restore();
+    const [a, c] = edges[column]!;
+    const b = edges[column + 1]![0];
+    warped.save();
+    warped.transform(b.x - a.x, b.y - a.y, c.x - a.x, c.y - a.y, a.x, a.y);
+    warped.drawImage(canvas, column, 0, 1, height, 0, 0, 1, 1);
+    warped.restore();
   }
+  context.save();
+  const shadow = runs[0]?.shadow;
+  // shortcut: shared run shadows are applied after deformation; mixed shadows need per-run masks.
+  if (shadow !== undefined && runs.every(run => run.shadow?.color === shadow.color
+    && run.shadow.blur === shadow.blur && run.shadow.offsetX === shadow.offsetX && run.shadow.offsetY === shadow.offsetY)) {
+    context.shadowColor = color(shadow.color);
+    context.shadowBlur = shadow.blur * Math.hypot(transform.a, transform.b);
+    context.shadowOffsetX = shadow.offsetX * transform.a + shadow.offsetY * transform.c;
+    context.shadowOffsetY = shadow.offsetX * transform.b + shadow.offsetY * transform.d;
+  }
+  context.drawImage(surface, object.bounds.x + minX, object.bounds.y + minY, spanX, spanY);
+  context.restore();
   return true;
 }
 
@@ -6028,7 +6112,7 @@ function drawText(
   });
   const expandedRuns = expandRuns === undefined ? sourceRuns : expandRuns(sourceRuns);
   const preparedRuns = prepareRun === undefined ? expandedRuns : expandedRuns.map(prepareRun);
-  if (textLayout?.warp === "text-envelope" && visual.kind === "rich-text") {
+  if ((textLayout?.warp === "text-envelope" || textLayout?.warp === "text-envelope-arc") && visual.kind === "rich-text") {
     context.save();
     try {
       if (drawTextEnvelope(context, object, visual.geometry, preparedRuns, textLayout, resolveFontFamily, paintStyles)) return;
@@ -6409,16 +6493,7 @@ function drawText(
     // DrawingML run gradients span the glyphs on each laid-out line, whereas
     // page-space paints (e.g. PDF) keep their authored coordinates.
     const glyphStyle = (paint: ScenePaint): string | CanvasGradient | CanvasPattern | undefined => {
-      if (paint.kind === "linear-gradient") {
-        const scaleX = glyphBounds.width / Math.max(1, object.bounds.width);
-        const scaleY = glyphBounds.height / Math.max(1, object.bounds.height);
-        return paintStyle(context, { ...object, bounds: glyphBounds }, {
-          ...paint,
-          start: { x: paint.start.x * scaleX, y: paint.start.y * scaleY },
-          end: { x: paint.end.x * scaleX, y: paint.end.y * scaleY },
-        });
-      }
-      return paintStyles?.get(paint) ?? paintStyle(context, object, paint);
+      return textPaintStyle(context, object, paint, glyphBounds, paintStyles);
     };
     const runColor = automaticTextColor !== undefined && glyphPaint === undefined
       && (placement.style.highlight & 255) === 0 ? automaticTextColor : placement.style.color;
