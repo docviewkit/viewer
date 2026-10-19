@@ -9204,7 +9204,8 @@ export class SceneRenderer {
   #imageResourceKey(bytes: Uint8Array, mediaType: string): string {
     let fingerprint = this.#imageFingerprints.get(bytes);
     if (fingerprint === undefined) {
-      fingerprint = byteFingerprint(bytes);
+      // Bucket selection is bounded; candidates still require full byte equality.
+      fingerprint = byteFingerprint(bytes, 4_096);
       this.#imageFingerprints.set(bytes, fingerprint);
     }
     const baseKey = `${mediaType}:${fingerprint}`;

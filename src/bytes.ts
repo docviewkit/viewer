@@ -1,10 +1,12 @@
 const objectTag = Object.prototype.toString;
 
-/** A bucket key only; callers must compare bytes before reusing a resource. */
-export function byteFingerprint(bytes: Uint8Array): string {
+/** A bucket key only, optionally sampled; callers must compare all bytes before reuse. */
+export function byteFingerprint(bytes: Uint8Array, maxSamples = Infinity): string {
+  if (!(maxSamples > 0)) throw new RangeError("Fingerprint sample budget must be positive");
+  const stride = Math.max(1, Math.ceil(bytes.length / maxSamples));
   let first = 0x811c9dc5;
   let second = 0x9e3779b9;
-  for (let index = 0; index < bytes.length; index += 1) {
+  for (let index = 0; index < bytes.length; index += stride) {
     const byte = bytes[index]!;
     first = Math.imul(first ^ byte, 0x01000193);
     second = Math.imul(second ^ byte, 0x85ebca6b);

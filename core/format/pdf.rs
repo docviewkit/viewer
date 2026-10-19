@@ -18659,6 +18659,14 @@ fn rgba_bmp(
     if alpha.len() < pixels {
         return None;
     }
+    // Exact per-image memoization: large CMYK JPEGs often repeat colors.
+    // Bound this to 128 KiB, retain the full key to resolve collisions, and
+    // keep alpha out of the cache so soft masks remain pixel-specific.
+    let mut cmyk_cache = if color_space == RasterColorSpace::Cmyk {
+        vec![(0_u32, cmyk_to_rgb([0.0; 4])); pixels.clamp(1, 16_384).next_power_of_two()]
+    } else {
+        Vec::new()
+    };
     for (pixel, mask) in alpha.iter().copied().enumerate().take(pixels) {
         let source = pixel * components;
         let (red, green, blue) = match color_space {
@@ -18668,12 +18676,23 @@ fn rgba_bmp(
             }
             RasterColorSpace::Rgb => (samples[source], samples[source + 1], samples[source + 2]),
             RasterColorSpace::Cmyk => {
-                let [red, green, blue] = cmyk_to_rgb([
-                    f32::from(samples[source]) / 255.0,
-                    f32::from(samples[source + 1]) / 255.0,
-                    f32::from(samples[source + 2]) / 255.0,
-                    f32::from(samples[source + 3]) / 255.0,
-                ]);
+                let samples = [
+                    samples[source],
+                    samples[source + 1],
+                    samples[source + 2],
+                    samples[source + 3],
+                ];
+                let key = u32::from_le_bytes(samples);
+                let slot =
+                    ((key.wrapping_mul(0x9e37_79b9) >> 18) as usize) & (cmyk_cache.len() - 1);
+                let cached = &mut cmyk_cache[slot];
+                if cached.0 != key {
+                    *cached = (
+                        key,
+                        cmyk_to_rgb(samples.map(|value| f32::from(value) / 255.0)),
+                    );
+                }
+                let [red, green, blue] = cached.1;
                 (red, green, blue)
             }
         };
@@ -18753,13 +18772,20 @@ fn pdf_cmyk_jpeg_to_bmp(
     if samples.len() != decoded_bytes {
         return None;
     }
-    for pixel in samples.chunks_exact_mut(4) {
-        for component in 0..4 {
-            let source = 1.0 - f32::from(pixel[component]) / 255.0;
-            pixel[component] = channel(
+    // Decode maps depend only on the channel and its byte value. Keep the
+    // original floating-point formula, including rounding, for all 256 inputs.
+    let maps: [[u8; 256]; 4] = std::array::from_fn(|component| {
+        std::array::from_fn(|value| {
+            let source = 1.0 - value as f32 / 255.0;
+            channel(
                 decode[component * 2]
                     + source * (decode[component * 2 + 1] - decode[component * 2]),
-            );
+            )
+        })
+    });
+    for pixel in samples.chunks_exact_mut(4) {
+        for component in 0..4 {
+            pixel[component] = maps[component][usize::from(pixel[component])];
         }
     }
     rgba_bmp(
@@ -20734,10 +20760,7 @@ fn find_bytes(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || start > bytes.len() {
         return None;
     }
-    bytes[start..]
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|offset| start + offset)
+    super::find_bytes(bytes, needle, start)
 }
 
 fn find_indirect_object_header(
@@ -21425,6 +21448,47 @@ trailer << /Root 1 0 R >>\n%%EOF")
             .chunks_exact(2)
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn preserves_connected_car_cmyk_pixels_with_reuse_collisions_and_alpha() {
+        // 4,096 colors sampled from the supplied poster's 5,824 x 3,264 JPEG;
+        // RGB expectations were captured before adding the conversion cache.
+        let fixture = include_bytes!("../../tests/fixtures/connected-car-cmyk-colors.bin");
+        let colors: Vec<_> = fixture.chunks_exact(7).collect();
+        let white = [0, 0, 0, 0, 255, 255, 254];
+        let cases: Vec<&[u8]> = std::iter::once(white.as_slice())
+            .chain(colors.iter().copied())
+            .chain(colors.iter().rev().copied())
+            .chain(colors.iter().copied())
+            .collect();
+        let samples: Vec<_> = cases
+            .iter()
+            .flat_map(|color| color[..4].iter().copied())
+            .collect();
+        let alpha: Vec<_> = (0..cases.len()).map(|i| (i % 256) as u8).collect();
+        let bmp = super::rgba_bmp(
+            cases.len(),
+            1,
+            &samples,
+            &alpha,
+            super::RasterColorSpace::Cmyk,
+        )
+        .unwrap();
+        for (index, color) in cases.iter().enumerate() {
+            assert_eq!(
+                &bmp[70 + index * 4..74 + index * 4],
+                &[color[6], color[5], color[4], alpha[index]],
+                "pixel {index}"
+            );
+        }
+        // Cache initialization, tiny tables, and image-local state must also
+        // preserve the existing scalar result across successive images.
+        for color in [white.as_slice(), colors[0], colors[2048]] {
+            let bmp =
+                super::rgba_bmp(1, 1, &color[..4], &[123], super::RasterColorSpace::Cmyk).unwrap();
+            assert_eq!(&bmp[70..74], &[color[6], color[5], color[4], 123]);
+        }
     }
 
     #[test]

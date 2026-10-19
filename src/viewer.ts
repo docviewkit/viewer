@@ -4406,7 +4406,13 @@ export class DocViewKitViewerElement extends HTMLElement {
     this.#thumbnailObserver?.disconnect();
     const list = this.#element<HTMLElement>(".unit-list");
     const fragment = document.createDocumentFragment();
-    const outline = this.#info?.outline ?? [];
+    let outline = this.#info?.outline ?? [];
+    // Preview absorbs a sole root into its filename row, once (not recursively).
+    // Keep a lone leaf here: Viewer has no filename tree item to retain its link.
+    const rootLevel = outline[0]?.level ?? 0;
+    if (outline.length > 1 && outline.every((item, index) => index === 0 || item.level > rootLevel)) {
+      outline = outline.slice(1).map(item => ({ ...item, level: item.level - rootLevel - 1 }));
+    }
     const ancestors: number[] = [];
     const siblings = new Map<number, HTMLElement[]>();
     for (const [index, item] of outline.entries()) {

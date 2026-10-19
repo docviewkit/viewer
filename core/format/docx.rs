@@ -2773,6 +2773,15 @@ impl Paragraph {
         self.line_pitch = line_pitch;
     }
 
+    fn uses_fixed_line_height(&self, line_height: f32, natural_line_height: f32) -> bool {
+        // Grid expansion distributes leading around the glyph box, unlike natural Word leading.
+        matches!(self.line_height, Some(LineHeight::Exact(_)))
+            || (self.line_height.is_none()
+                && self.snap_to_grid
+                && self.line_pitch.is_some()
+                && line_height > natural_line_height)
+    }
+
     fn resolve_relative_spacing(&mut self, font_metrics: &FontMetricTable) {
         let line_height = self.effective_line_height(font_metrics);
         if self.before_auto_spacing {
@@ -15792,6 +15801,10 @@ impl Layout<'_> {
                         inset_top: 0.0,
                         inset_bottom: 0.0,
                         wrap: false,
+                        fixed_line_height: paragraph.uses_fixed_line_height(
+                            height,
+                            paragraph.natural_line_height(self.font_metrics),
+                        ),
                         ..TextLayout::default()
                     },
                     visual: Box::new(Visual::RichText {
@@ -18261,19 +18274,13 @@ impl Layout<'_> {
                 }
                 self.cursor_y += before;
                 let y = self.cursor_y;
-                if fragment_index == 0 {
-                    if let Some(label) = numbering_label.take() {
-                        self.push_numbering_label(
-                            &paragraph,
-                            label,
-                            numbering_label_offset,
-                            y,
-                            height,
-                        )?;
-                    }
-                }
                 let mut line = paragraph.clone();
                 line.line_height = Some(LineHeight::Exact(height));
+                if fragment_index == 0 {
+                    if let Some(label) = numbering_label.take() {
+                        self.push_numbering_label(&line, label, numbering_label_offset, y, height)?;
+                    }
+                }
                 self.push_paragraph_object(
                     &line,
                     slice_chars(&paragraph.text, start, end),
@@ -24237,6 +24244,379 @@ impl Layout<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn push_table_fragment_rows(
+        &mut self,
+        table: &Table,
+        rows: &[(usize, f32, f32)],
+        column_edges: &[f32],
+        horizontal_spans: &HashMap<(u32, u32), u32>,
+        horizontal_continuations: &HashSet<(u32, u32)>,
+        vertical_spans: &HashMap<(u32, u32), u32>,
+        vertical_continuations: &HashSet<(u32, u32)>,
+        row_cell_margins: &[CellMargins],
+        fragment: &Option<(usize, u32, String, f32)>,
+        fragment_index: u32,
+    ) -> Result<(), Diagnostic> {
+        let Some((table_object_index, table_numeric_id, table_stable_id, _)) = fragment else {
+            return Ok(());
+        };
+        let table_numeric_id = *table_numeric_id;
+        let table_x = self.objects[*table_object_index].bounds.x;
+        let column_count = column_edges.len() as u32 - 1;
+        let cursor_y = self.cursor_y;
+        for (local_position, &(row_position, row_y, _)) in rows.iter().enumerate() {
+            self.cursor_y = row_y;
+            let row = &table.rows[row_position];
+            let mut column = 0_u32;
+            for cell in &row.cells {
+                let source_end_column = column
+                    .checked_add(cell.grid_span)
+                    .ok_or_else(|| format_error(&self.part, "table cell span overflow"))?;
+                let end_column = column
+                    .checked_add(
+                        horizontal_spans
+                            .get(&(row.index, column))
+                            .copied()
+                            .unwrap_or(cell.grid_span),
+                    )
+                    .ok_or_else(|| format_error(&self.part, "table cell merge span overflow"))?;
+                if end_column > column_count {
+                    return Err(format_error(
+                        &self.part,
+                        "table row exceeds its column grid",
+                    ));
+                }
+                if horizontal_continuations.contains(&(row.index, column)) {
+                    if cell.paragraphs().any(|paragraph| {
+                        !paragraph.text.is_empty() || !paragraph.drawings.is_empty()
+                    }) && !self.merged_cell_content_reported
+                    {
+                        self.diagnostics.push(
+                            Diagnostic::warning(
+                                DiagnosticCode::ApproximateLayout,
+                                Phase::Layout,
+                                Fidelity::Approximate,
+                                "nonstandard content stored in a DOCX horizontal-merge continuation is omitted from the visible restart cell",
+                            )
+                            .in_part(&self.part),
+                        );
+                        self.merged_cell_content_reported = true;
+                    }
+                    column = source_end_column;
+                    continue;
+                }
+                let continuation = vertical_continuations.contains(&(row.index, column));
+                if continuation {
+                    if cell.paragraphs().any(|paragraph| {
+                        !paragraph.text.is_empty() || !paragraph.drawings.is_empty()
+                    }) && !self.merged_cell_content_reported
+                    {
+                        self.diagnostics.push(Diagnostic::warning(
+                            DiagnosticCode::ApproximateLayout, Phase::Layout, Fidelity::Approximate,
+                            "nonstandard content stored in a DOCX vertical-merge continuation is omitted from the visible restart cell",
+                        ).in_part(&self.part));
+                        self.merged_cell_content_reported = true;
+                    }
+                    // An earlier row in this fragment already owns this merged region.
+                    if row_position != rows[0].0 {
+                        column = source_end_column;
+                        continue;
+                    }
+                }
+                let (origin_position, merged_height) = if continuation {
+                    vertical_spans
+                        .iter()
+                        .find_map(|(&(start, start_column), &span)| {
+                            (start_column == column
+                                && start < row.index
+                                && row.index < start + span)
+                                .then_some((start as usize, span as usize))
+                        })
+                        .ok_or_else(|| {
+                            format_error(&self.part, "DOCX merge continuation has no origin")
+                        })?
+                } else {
+                    (
+                        row_position,
+                        vertical_spans
+                            .get(&(row.index, column))
+                            .copied()
+                            .unwrap_or(1) as usize,
+                    )
+                };
+                let cell = if continuation {
+                    let mut origin_column = 0;
+                    table.rows[origin_position]
+                        .cells
+                        .iter()
+                        .find(|candidate| {
+                            let matches = origin_column == column;
+                            origin_column += candidate.grid_span;
+                            matches
+                        })
+                        .ok_or_else(|| {
+                            format_error(&self.part, "DOCX merged cell origin is missing")
+                        })?
+                } else {
+                    cell
+                };
+                let cell_margins = cell.content_margins(row_cell_margins[origin_position]);
+                let x = table_x + column_edges[column as usize];
+                let width = column_edges[end_column as usize] - column_edges[column as usize];
+                // Pagination owns the row placement. Use its actual page-local rows,
+                // not the remaining page height or a second pagination estimate.
+                let cell_height = rows
+                    .iter()
+                    .skip(local_position)
+                    .take(origin_position + merged_height - row_position)
+                    .map(|&(_, _, height)| height)
+                    .sum::<f32>()
+                    .min(self.body_bottom - row_y)
+                    .max(1.0);
+                let cell_stable_id = format!(
+                    "docx:table:{}:row:{}:column:{column}:fragment:{fragment_index}",
+                    table.index, row.index
+                );
+                let unit_index = self
+                    .unit_index
+                    .ok_or_else(|| format_error(&self.part, "DOCX layout has no active page"))?;
+                let cell_bounds = Rect {
+                    x,
+                    y: row_y,
+                    width,
+                    height: cell_height,
+                };
+                let borders = table.cell_borders(
+                    cell,
+                    origin_position,
+                    merged_height,
+                    column,
+                    end_column == column_count,
+                );
+                let cell_numeric_id = self.push_object(Object {
+                    numeric_id: 0,
+                    parent_numeric_id: Some(table_numeric_id),
+                    stable_id: cell_stable_id.clone(),
+                    parent_stable_id: Some(table_stable_id.clone()),
+                    kind: ObjectKind::Cell,
+                    unit_index,
+                    bounds: cell_bounds,
+                    z: 0,
+                    text: None,
+                    source: SourceRef {
+                        part: self.part.clone(),
+                        mapping: MappingQuality::Exact,
+                        locator: SourceLocator::Docx {
+                            kind: "table-cell",
+                            paragraph_id: None,
+                            paragraph_index: None,
+                            drawing_id: None,
+                            row: Some(row.index),
+                            column: Some(column),
+                            text_range: None,
+                            action: None,
+                        },
+                    },
+                    visual: table_cell_visual(
+                        cell.fill.clone(),
+                        table.border_color,
+                        table.border_width,
+                        table.border_compound,
+                        &borders,
+                    ),
+                })?;
+                let source_part = self.part.clone();
+                self.push_cell_borders(
+                    &borders,
+                    cell_bounds,
+                    cell_numeric_id,
+                    &cell_stable_id,
+                    &source_part,
+                    row.index,
+                    column,
+                    [
+                        row_position == 0,
+                        end_column == column_count,
+                        origin_position + merged_height >= table.rows.len(),
+                        column == 0,
+                    ],
+                    true,
+                    true,
+                )?;
+                if continuation {
+                    column = source_end_column;
+                    continue;
+                }
+                let inner_width = (width - cell_margins.left - cell_margins.right).max(1.0);
+                let content_height =
+                    measure_cell_content_height(&cell, inner_width, self.font_metrics)?;
+                if merged_height > 1
+                    && content_height + cell_margins.top + cell_margins.bottom > cell_height + 0.01
+                    && !self.merged_cell_clipped_reported
+                {
+                    self.diagnostics.push(Diagnostic::warning(
+                        DiagnosticCode::ApproximateLayout, Phase::Layout, Fidelity::Approximate,
+                        "DOCX merged-cell content exceeds its first page-local fragment; continuation borders are preserved",
+                    ).in_part(&self.part));
+                    self.merged_cell_clipped_reported = true;
+                }
+                let paragraph_y_offset = cell_vertical_offset(
+                    cell.vertical_align,
+                    cell_height,
+                    content_height,
+                    cell_margins,
+                );
+                let mut paragraph_y = row_y + cell_margins.top + paragraph_y_offset;
+                for (block_index, block) in cell.blocks.iter().enumerate() {
+                    let paragraph = match block {
+                        Block::Paragraph(paragraph) => paragraph,
+                        Block::Table(nested) => {
+                            let nested_width = nested.nested_layout_width(inner_width);
+                            let nested_x =
+                                nested.aligned_x(x + cell_margins.left, inner_width, nested_width);
+                            paragraph_y = self.push_contained_table(
+                                &nested,
+                                block_index,
+                                nested_x,
+                                paragraph_y,
+                                nested_width,
+                                row_y + cell_height - cell_margins.bottom,
+                                cell_numeric_id,
+                                &cell_stable_id,
+                                None,
+                                &source_part,
+                                None,
+                                None,
+                                TextOrientation::Horizontal,
+                            )?;
+                            continue;
+                        }
+                    };
+                    if cell.hides_end_marker(block_index, paragraph) {
+                        continue;
+                    }
+                    let text_width = paragraph.layout_width(inner_width);
+                    let line_height = paragraph.effective_line_height(self.font_metrics);
+                    let line_count =
+                        measure_paragraph_lines(&paragraph, text_width, self.font_metrics);
+                    let text_y = (paragraph_y + paragraph.before)
+                        .min(row_y + cell_height - cell_margins.bottom);
+                    let available = (row_y + cell_height - cell_margins.bottom - text_y).max(1.0);
+                    let height = (line_count as f32 * line_height).min(available);
+                    let mixed =
+                        paragraph.mixed_inline_drawing_layout(text_width, self.font_metrics);
+                    let (numeric_id, paragraph_stable_id, drawing_y) = if let Some(layout) = &mixed
+                    {
+                        let fragments = [
+                            (
+                                0,
+                                layout.before_end,
+                                0.0,
+                                0.0,
+                                text_width,
+                                layout.before_height,
+                            ),
+                            (
+                                layout.before_end,
+                                layout.inline_end,
+                                layout.inline_x,
+                                layout.inline_y,
+                                layout.inline_width,
+                                line_height,
+                            ),
+                            (
+                                layout.inline_end,
+                                paragraph.text_length,
+                                0.0,
+                                layout.remaining_y,
+                                text_width,
+                                layout.remaining_height,
+                            ),
+                        ];
+                        let mut first = None;
+                        for (fragment_index, &(start, end, offset_x, offset_y, width, height)) in
+                            fragments.iter().enumerate()
+                        {
+                            if start >= end || height <= 0.0 {
+                                continue;
+                            }
+                            let mut fragment_paragraph = paragraph.as_ref().clone();
+                            if fragment_index == 1 {
+                                fragment_paragraph.align = TextAlign::Start;
+                            }
+                            let id = self.push_paragraph_object(
+                                &fragment_paragraph,
+                                slice_chars(&paragraph.text, start, end),
+                                start,
+                                end,
+                                fragment_index as u32,
+                                text_y + offset_y,
+                                height.min((available - offset_y).max(1.0)),
+                                Some((cell_numeric_id, cell_stable_id.clone())),
+                                Some((row.index, column)),
+                            )?;
+                            let object = &mut self.objects[id as usize];
+                            object.bounds.x =
+                                x + cell_margins.left + paragraph.layout_origin() + offset_x;
+                            object.bounds.width = width;
+                            first.get_or_insert((id, object.stable_id.clone()));
+                        }
+                        let (id, stable_id) = first.ok_or_else(|| {
+                            format_error(&self.part, "mixed inline DOCX paragraph is empty")
+                        })?;
+                        (id, stable_id, text_y)
+                    } else {
+                        let id = self.push_paragraph_object(
+                            &paragraph,
+                            paragraph.text.clone(),
+                            0,
+                            paragraph.text_length,
+                            0,
+                            text_y,
+                            height,
+                            Some((cell_numeric_id, cell_stable_id.clone())),
+                            Some((row.index, column)),
+                        )?;
+                        let object = &mut self.objects[id as usize];
+                        object.bounds.x = x + cell_margins.left + paragraph.layout_origin();
+                        object.bounds.width = text_width;
+                        let drawing_y = if paragraph.text.is_empty()
+                            && paragraph
+                                .drawings
+                                .iter()
+                                .any(|drawing| !drawing.omitted && !drawing.floating)
+                        {
+                            text_y
+                        } else {
+                            text_y + height
+                        };
+                        (id, object.stable_id.clone(), drawing_y)
+                    };
+                    self.push_cell_drawings(
+                        &paragraph,
+                        x + cell_margins.left,
+                        drawing_y,
+                        paragraph_y,
+                        inner_width,
+                        (row_y + cell_height - cell_margins.bottom - drawing_y).max(1.0),
+                        numeric_id,
+                        paragraph_stable_id,
+                        row.index,
+                        column,
+                        mixed.as_ref(),
+                    )?;
+                    paragraph_y = text_y
+                        + measure_cell_paragraph_height(&paragraph, inner_width, self.font_metrics)
+                        + paragraph.after;
+                }
+                column = source_end_column;
+            }
+        }
+        self.cursor_y = cursor_y;
+        Ok(())
+    }
+
     fn table(&mut self, mut table: Table) -> Result<(), Diagnostic> {
         self.previous_paragraph_after = 0.0;
         self.previous_paragraph_style_id = None;
@@ -24411,6 +24791,26 @@ impl Layout<'_> {
             .map(|((row, height), cell_margins)| (row.clone(), height, cell_margins))
             .collect::<Vec<_>>();
         let mut repeat_headers = false;
+        let mut pending_rows = Vec::new();
+        let flush_rows = |layout: &mut Self,
+                          rows: &mut Vec<(usize, f32, f32)>,
+                          fragment: &Option<(usize, u32, String, f32)>,
+                          fragment_index| {
+            layout.push_table_fragment_rows(
+                &table,
+                rows,
+                &column_edges,
+                &horizontal_spans,
+                &horizontal_continuations,
+                &vertical_spans,
+                &vertical_continuations,
+                &row_cell_margins,
+                fragment,
+                fragment_index,
+            )?;
+            rows.clear();
+            Ok::<(), Diagnostic>(())
+        };
 
         for (row_position, row) in table.rows.iter().enumerate() {
             let row_height = row_heights[row_position];
@@ -24432,6 +24832,7 @@ impl Layout<'_> {
                 && row_height > self.body_content_height()
                 && row_can_split(&row)
             {
+                flush_rows(self, &mut pending_rows, &fragment, fragment_index)?;
                 let mut row_offset = 0.0_f32;
                 while row_offset + 0.01 < row_height {
                     if self.available_height() <= 0.5 {
@@ -24528,6 +24929,7 @@ impl Layout<'_> {
                 && required_row_height <= self.body_content_height()
                 && required_row_height > self.available_height()
             {
+                flush_rows(self, &mut pending_rows, &fragment, fragment_index)?;
                 let continued_fragment = fragment.is_some();
                 fragment = None;
                 self.next_column_or_page()?;
@@ -24553,6 +24955,14 @@ impl Layout<'_> {
                 self.clipped_row_reported = true;
             }
             if position.is_none() {
+                if self.page_has_content && clipped_height > self.available_height() {
+                    flush_rows(self, &mut pending_rows, &fragment, fragment_index)?;
+                    if fragment.take().is_some() {
+                        fragment_index = fragment_index.checked_add(1).ok_or_else(|| {
+                            format_error(&self.part, "table fragment count overflow")
+                        })?;
+                    }
+                }
                 self.ensure_vertical_space(clipped_height)?;
             }
 
@@ -24589,313 +24999,7 @@ impl Layout<'_> {
                 repeat_headers = false;
             }
 
-            let row_y = self.cursor_y;
-            let mut column = 0_u32;
-            for cell in &row.cells {
-                let cell_margins = cell.content_margins(cell_margins);
-                let source_end_column = column
-                    .checked_add(cell.grid_span)
-                    .ok_or_else(|| format_error(&self.part, "table cell span overflow"))?;
-                let end_column = column
-                    .checked_add(
-                        horizontal_spans
-                            .get(&(row.index, column))
-                            .copied()
-                            .unwrap_or(cell.grid_span),
-                    )
-                    .ok_or_else(|| format_error(&self.part, "table cell merge span overflow"))?;
-                if end_column > column_count {
-                    return Err(format_error(
-                        &self.part,
-                        "table row exceeds its column grid",
-                    ));
-                }
-                if horizontal_continuations.contains(&(row.index, column)) {
-                    if cell.paragraphs().any(|paragraph| {
-                        !paragraph.text.is_empty() || !paragraph.drawings.is_empty()
-                    }) && !self.merged_cell_content_reported
-                    {
-                        self.diagnostics.push(
-                            Diagnostic::warning(
-                                DiagnosticCode::ApproximateLayout,
-                                Phase::Layout,
-                                Fidelity::Approximate,
-                                "nonstandard content stored in a DOCX horizontal-merge continuation is omitted from the visible restart cell",
-                            )
-                            .in_part(&self.part),
-                        );
-                        self.merged_cell_content_reported = true;
-                    }
-                    column = source_end_column;
-                    continue;
-                }
-                if vertical_continuations.contains(&(row.index, column)) {
-                    if cell.paragraphs().any(|paragraph| {
-                        !paragraph.text.is_empty() || !paragraph.drawings.is_empty()
-                    }) && !self.merged_cell_content_reported
-                    {
-                        self.diagnostics.push(
-                            Diagnostic::warning(
-                                DiagnosticCode::ApproximateLayout,
-                                Phase::Layout,
-                                Fidelity::Approximate,
-                                "nonstandard content stored in a DOCX vertical-merge continuation is omitted from the visible restart cell",
-                            )
-                            .in_part(&self.part),
-                        );
-                        self.merged_cell_content_reported = true;
-                    }
-                    column = source_end_column;
-                    continue;
-                }
-                let x = table_x + column_edges[column as usize];
-                let width = column_edges[end_column as usize] - column_edges[column as usize];
-                let merged_height = vertical_spans
-                    .get(&(row.index, column))
-                    .copied()
-                    .unwrap_or(1) as usize;
-                let requested_cell_height = row_heights
-                    .iter()
-                    .skip(row_position)
-                    .take(merged_height)
-                    .sum::<f32>();
-                let cell_height = requested_cell_height.min(self.body_bottom - row_y).max(1.0);
-                if cell_height != requested_cell_height && !self.merged_cell_clipped_reported {
-                    self.diagnostics.push(
-                        Diagnostic::warning(
-                            DiagnosticCode::ApproximateLayout,
-                            Phase::Layout,
-                            Fidelity::Approximate,
-                            "a DOCX vertically merged cell crosses a page boundary and was clipped to its page-local fragment",
-                        )
-                        .in_part(&self.part),
-                    );
-                    self.merged_cell_clipped_reported = true;
-                }
-                let cell_stable_id = format!(
-                    "docx:table:{}:row:{}:column:{column}:fragment:{fragment_index}",
-                    table.index, row.index
-                );
-                let unit_index = self
-                    .unit_index
-                    .ok_or_else(|| format_error(&self.part, "DOCX layout has no active page"))?;
-                let cell_bounds = Rect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: cell_height,
-                };
-                let borders = table.cell_borders(
-                    cell,
-                    row_position,
-                    merged_height,
-                    column,
-                    end_column == column_count,
-                );
-                let cell_numeric_id = self.push_object(Object {
-                    numeric_id: 0,
-                    parent_numeric_id: Some(table_numeric_id),
-                    stable_id: cell_stable_id.clone(),
-                    parent_stable_id: Some(table_stable_id.clone()),
-                    kind: ObjectKind::Cell,
-                    unit_index,
-                    bounds: cell_bounds,
-                    z: 0,
-                    text: None,
-                    source: SourceRef {
-                        part: self.part.clone(),
-                        mapping: MappingQuality::Exact,
-                        locator: SourceLocator::Docx {
-                            kind: "table-cell",
-                            paragraph_id: None,
-                            paragraph_index: None,
-                            drawing_id: None,
-                            row: Some(row.index),
-                            column: Some(column),
-                            text_range: None,
-                            action: None,
-                        },
-                    },
-                    visual: table_cell_visual(
-                        cell.fill.clone(),
-                        table.border_color,
-                        table.border_width,
-                        table.border_compound,
-                        &borders,
-                    ),
-                })?;
-                let source_part = self.part.clone();
-                self.push_cell_borders(
-                    &borders,
-                    cell_bounds,
-                    cell_numeric_id,
-                    &cell_stable_id,
-                    &source_part,
-                    row.index,
-                    column,
-                    [
-                        row_position == 0,
-                        end_column == column_count,
-                        row_position + merged_height >= table.rows.len(),
-                        column == 0,
-                    ],
-                    true,
-                    true,
-                )?;
-                let inner_width = (width - cell_margins.left - cell_margins.right).max(1.0);
-                let content_height =
-                    measure_cell_content_height(&cell, inner_width, self.font_metrics)?;
-                let paragraph_y_offset = cell_vertical_offset(
-                    cell.vertical_align,
-                    cell_height,
-                    content_height,
-                    cell_margins,
-                );
-                let mut paragraph_y = row_y + cell_margins.top + paragraph_y_offset;
-                for (block_index, block) in cell.blocks.iter().enumerate() {
-                    let paragraph = match block {
-                        Block::Paragraph(paragraph) => paragraph,
-                        Block::Table(nested) => {
-                            let nested_width = nested.nested_layout_width(inner_width);
-                            let nested_x =
-                                nested.aligned_x(x + cell_margins.left, inner_width, nested_width);
-                            paragraph_y = self.push_contained_table(
-                                &nested,
-                                block_index,
-                                nested_x,
-                                paragraph_y,
-                                nested_width,
-                                row_y + cell_height - cell_margins.bottom,
-                                cell_numeric_id,
-                                &cell_stable_id,
-                                None,
-                                &source_part,
-                                None,
-                                None,
-                                TextOrientation::Horizontal,
-                            )?;
-                            continue;
-                        }
-                    };
-                    if cell.hides_end_marker(block_index, paragraph) {
-                        continue;
-                    }
-                    let text_width = paragraph.layout_width(inner_width);
-                    let line_height = paragraph.effective_line_height(self.font_metrics);
-                    let line_count =
-                        measure_paragraph_lines(&paragraph, text_width, self.font_metrics);
-                    let text_y = (paragraph_y + paragraph.before)
-                        .min(row_y + cell_height - cell_margins.bottom);
-                    let available = (row_y + cell_height - cell_margins.bottom - text_y).max(1.0);
-                    let height = (line_count as f32 * line_height).min(available);
-                    let mixed =
-                        paragraph.mixed_inline_drawing_layout(text_width, self.font_metrics);
-                    let (numeric_id, paragraph_stable_id, drawing_y) = if let Some(layout) = &mixed
-                    {
-                        let fragments = [
-                            (
-                                0,
-                                layout.before_end,
-                                0.0,
-                                0.0,
-                                text_width,
-                                layout.before_height,
-                            ),
-                            (
-                                layout.before_end,
-                                layout.inline_end,
-                                layout.inline_x,
-                                layout.inline_y,
-                                layout.inline_width,
-                                line_height,
-                            ),
-                            (
-                                layout.inline_end,
-                                paragraph.text_length,
-                                0.0,
-                                layout.remaining_y,
-                                text_width,
-                                layout.remaining_height,
-                            ),
-                        ];
-                        let mut first = None;
-                        for (fragment_index, &(start, end, offset_x, offset_y, width, height)) in
-                            fragments.iter().enumerate()
-                        {
-                            if start >= end || height <= 0.0 {
-                                continue;
-                            }
-                            let mut fragment_paragraph = paragraph.as_ref().clone();
-                            if fragment_index == 1 {
-                                fragment_paragraph.align = TextAlign::Start;
-                            }
-                            let id = self.push_paragraph_object(
-                                &fragment_paragraph,
-                                slice_chars(&paragraph.text, start, end),
-                                start,
-                                end,
-                                fragment_index as u32,
-                                text_y + offset_y,
-                                height.min((available - offset_y).max(1.0)),
-                                Some((cell_numeric_id, cell_stable_id.clone())),
-                                Some((row.index, column)),
-                            )?;
-                            let object = &mut self.objects[id as usize];
-                            object.bounds.x =
-                                x + cell_margins.left + paragraph.layout_origin() + offset_x;
-                            object.bounds.width = width;
-                            first.get_or_insert((id, object.stable_id.clone()));
-                        }
-                        let (id, stable_id) = first.ok_or_else(|| {
-                            format_error(&self.part, "mixed inline DOCX paragraph is empty")
-                        })?;
-                        (id, stable_id, text_y)
-                    } else {
-                        let id = self.push_paragraph_object(
-                            &paragraph,
-                            paragraph.text.clone(),
-                            0,
-                            paragraph.text_length,
-                            0,
-                            text_y,
-                            height,
-                            Some((cell_numeric_id, cell_stable_id.clone())),
-                            Some((row.index, column)),
-                        )?;
-                        let object = &mut self.objects[id as usize];
-                        object.bounds.x = x + cell_margins.left + paragraph.layout_origin();
-                        object.bounds.width = text_width;
-                        let drawing_y = if paragraph.text.is_empty()
-                            && paragraph
-                                .drawings
-                                .iter()
-                                .any(|drawing| !drawing.omitted && !drawing.floating)
-                        {
-                            text_y
-                        } else {
-                            text_y + height
-                        };
-                        (id, object.stable_id.clone(), drawing_y)
-                    };
-                    self.push_cell_drawings(
-                        &paragraph,
-                        x + cell_margins.left,
-                        drawing_y,
-                        paragraph_y,
-                        inner_width,
-                        (row_y + cell_height - cell_margins.bottom - drawing_y).max(1.0),
-                        numeric_id,
-                        paragraph_stable_id,
-                        row.index,
-                        column,
-                        mixed.as_ref(),
-                    )?;
-                    paragraph_y = text_y
-                        + measure_cell_paragraph_height(&paragraph, inner_width, self.font_metrics)
-                        + paragraph.after;
-                }
-                column = source_end_column;
-            }
+            pending_rows.push((row_position, self.cursor_y, clipped_height));
 
             self.cursor_y += clipped_height;
             self.page_has_content = true;
@@ -24905,6 +25009,7 @@ impl Layout<'_> {
                 self.cursor_y += bottom_border_width / 2.0;
             }
         }
+        flush_rows(self, &mut pending_rows, &fragment, fragment_index)?;
         if let (Some(position), Some(flow_y), Some(floating_y)) = (position, flow_y, floating_y) {
             self.floating_wrap_regions.push(Rect {
                 x: table_x - position.distances.left,
@@ -25194,12 +25299,7 @@ fn paragraph_visual(
                     .chars()
                     .nth(range_end.saturating_sub(1) as usize)
                     != Some('\n'),
-            // Grid expansion distributes leading around the glyph box, unlike natural Word leading.
-            fixed_line_height: matches!(paragraph.line_height, Some(LineHeight::Exact(_)))
-                || (paragraph.line_height.is_none()
-                    && paragraph.snap_to_grid
-                    && paragraph.line_pitch.is_some()
-                    && line_height > natural_line_height),
+            fixed_line_height: paragraph.uses_fixed_line_height(line_height, natural_line_height),
             text_baseline,
             orientation: if paragraph.orientation != TextOrientation::Horizontal {
                 paragraph.orientation
@@ -34408,6 +34508,79 @@ mod tests {
     }
 
     #[test]
+    fn numbering_uses_the_first_line_leading_policy() {
+        let relationships = br#"<Relationships xmlns="r"><Relationship Id="num" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#;
+        let numbering = br#"<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#;
+        for (name, spacing, grid, variable, expected_fixed) in [
+            ("natural", "", "", false, false),
+            (
+                "exact",
+                r#"<w:spacing w:line="600" w:lineRule="exact"/>"#,
+                "",
+                false,
+                true,
+            ),
+            (
+                "grid",
+                "",
+                r#"<w:docGrid w:type="lines" w:linePitch="600"/>"#,
+                false,
+                true,
+            ),
+            ("variable", "", "", true, true),
+        ] {
+            let runs = if variable {
+                format!(
+                    r#"<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:t>Large </w:t></w:r><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>{}</w:t></w:r>"#,
+                    "small ".repeat(50)
+                )
+            } else {
+                "<w:r><w:t>Heading</w:t></w:r>".to_string()
+            };
+            let xml = format!(
+                r#"<w:document xmlns:w="w"><w:body><w:p><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr>{spacing}</w:pPr>{runs}</w:p><w:sectPr><w:pgSz w:w="6000" w:h="12000"/><w:pgMar w:top="500" w:right="500" w:bottom="500" w:left="500"/>{grid}</w:sectPr></w:body></w:document>"#
+            );
+            let bytes = stored_zip(&[
+                (PART, xml.as_bytes()),
+                ("word/_rels/document.xml.rels", relationships),
+                ("word/numbering.xml", numbering),
+            ]);
+            let package = Package::open(&bytes, Limits::default()).unwrap();
+            let document = parse(&package, PART, Vec::new()).unwrap();
+            let number = document
+                .objects
+                .iter()
+                .find(|object| object.stable_id == "docx:numbering:0")
+                .unwrap();
+            let text = document
+                .objects
+                .iter()
+                .find(|object| object.stable_id == "docx:paragraph:0:fragment:0")
+                .unwrap();
+            for object in [text, number] {
+                let Visual::TextLayout { layout, .. } = &object.visual else {
+                    panic!("{name}: expected text layout")
+                };
+                assert_eq!(
+                    layout.fixed_line_height, expected_fixed,
+                    "{name}: {}",
+                    object.stable_id
+                );
+            }
+            assert_eq!(number.bounds.y, text.bounds.y, "{name}");
+            if variable {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .any(|object| object.stable_id == "docx:paragraph:0:fragment:1"
+                            && object.bounds.height < text.bounds.height)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn renders_numbering_inherited_from_a_paragraph_style() {
         let document_xml = br#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:r="r"><w:body>
           <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading1a</w:t></w:r></w:p>
@@ -36011,6 +36184,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn vertical_merges_continue_below_repeated_headers() {
+        let row = |label: &str, merge: &str, header: bool| {
+            format!(
+                r#"<w:tr><w:trPr><w:trHeight w:val="600"/>{}</w:trPr><w:tc><w:tcPr><w:gridSpan w:val="2"/>{merge}<w:shd w:fill="DDEEFF"/></w:tcPr><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>{label}</w:t></w:r></w:p></w:tc></w:tr>"#,
+                if header { "<w:tblHeader/>" } else { "" },
+                if merge.contains("restart") {
+                    "Merged"
+                } else {
+                    ""
+                },
+            )
+        };
+        let xml = format!(
+            r#"<w:document xmlns:w="w"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/><w:gridCol w:w="2000"/></w:tblGrid>{}{}{}{}{}</w:tbl><w:sectPr><w:pgSz w:w="5000" w:h="2100"/><w:pgMar w:top="150" w:right="150" w:bottom="150" w:left="150"/></w:sectPr></w:body></w:document>"#,
+            row("Header", "", true),
+            row("A", "<w:vMerge w:val=\"restart\"/>", false),
+            row("B", "<w:vMerge/>", false),
+            row("C", "<w:vMerge/>", false),
+            row("D", "<w:vMerge/>", false),
+        );
+        let document = layout_document(
+            parse_document_xml(xml.as_bytes(), Limits::default(), PART, Vec::new()).unwrap(),
+            Limits::default(),
+            PART,
+        )
+        .unwrap();
+        let merged = document
+            .objects
+            .iter()
+            .filter(|object| {
+                object.kind == ObjectKind::Cell
+                    && matches!(
+                        object.source.locator,
+                        SourceLocator::Docx {
+                            row: Some(1..),
+                            column: Some(0),
+                            ..
+                        }
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert!(merged.len() >= 2);
+        for cell in merged {
+            let header = document
+                .objects
+                .iter()
+                .find(|o| o.unit_index == cell.unit_index && o.text.as_deref() == Some("Header"))
+                .unwrap();
+            let header_cell = &document.objects[header.parent_numeric_id.unwrap() as usize];
+            assert!(
+                (cell.bounds.y - header_cell.bounds.y - header_cell.bounds.height).abs() < 0.01
+            );
+            let peers = document
+                .objects
+                .iter()
+                .filter(|o| {
+                    o.unit_index == cell.unit_index
+                        && o.kind == ObjectKind::Cell
+                        && matches!(
+                            o.source.locator,
+                            SourceLocator::Docx {
+                                row: Some(1..),
+                                column: Some(2),
+                                ..
+                            }
+                        )
+                })
+                .collect::<Vec<_>>();
+            let bottom = peers
+                .iter()
+                .map(|o| o.bounds.y + o.bounds.height)
+                .fold(0.0, f32::max);
+            assert!((cell.bounds.y + cell.bounds.height - bottom).abs() < 0.01);
+            assert!((cell.bounds.width - peers[0].bounds.width).abs() < 0.01);
+        }
+        assert_eq!(
+            document
+                .objects
+                .iter()
+                .filter(|o| o.text.as_deref() == Some("Merged"))
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -47,16 +47,10 @@ const THEME_COLOR_COUNT: usize = 12;
 type ThemeColors = [u32; THEME_COLOR_COUNT];
 
 fn contains_bytes(bytes: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty() && bytes.windows(needle.len()).any(|window| window == needle)
+    !needle.is_empty() && find_bytes(bytes, needle, 0).is_some()
 }
 
-fn find_bytes(bytes: &[u8], needle: &[u8], start: usize) -> Option<usize> {
-    bytes
-        .get(start..)?
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|offset| start + offset)
-}
+use super::find_bytes;
 
 #[derive(Debug)]
 struct Sheet {

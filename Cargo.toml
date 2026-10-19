@@ -1,6 +1,6 @@
 [package]
 name = "office-viewer-core"
-version = "0.2.78"
+version = "0.2.79"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ path = "core/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+memchr = "=2.8.3"
 brotli-decompressor = { version = "=5.0.3", optional = true }
 encoding_rs = { version = "=0.8.35", default-features = false, features = ["alloc"], optional = true }
 hayro-jbig2 = { version = "=0.3.0", default-features = false, optional = true }
