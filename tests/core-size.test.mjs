@@ -8,10 +8,18 @@ import { Core, DEFAULT_LIMITS } from "../dist/core.js";
 const coreWasm = await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url));
 
 test("optimized core stays within the size budget", () => {
-  // v0.2.78 adds shared theme fills, WordArt envelopes and paragraph-color fixes:
-  // published v0.2.77 3,807,620 -> 3,823,898 bytes (+3,783 gzip bytes).
-  // Real-document scene baselines below remain unchanged; no new fonts/dependencies.
-  assert.ok(coreWasm.byteLength <= 3_825_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3825000`);
+  // Shared binary references: 3,823,898 -> 3,827,003 bytes (+3,105).
+  // The supplied DOCX's repeated 5.7 MB header previously exceeded the 256 MiB
+  // transfer cap; its snapshot is now 8,704,908 bytes. The 47-page regression
+  // and all real-document scene baselines below preserve the document content.
+  // Page-local merged table cells add 1,381 bytes (3,827,079 -> 3,828,460).
+  // The supplied table regression verifies continued borders on all three pages.
+  // Reusing immutable resource preflight adds 2,266 bytes (-> 3,830,726).
+  // Original DOCX first paint: Chromium 1339 -> 864 ms, WebKit 1132 -> 699 ms;
+  // all 51 pages remain pixel-identical in both engines.
+  // Shared exact byte search adds 7,194 bytes; real PDF performance/pixel proof
+  // is recorded in docs/research/CONNECTED-CAR-PDF-PERFORMANCE.md.
+  assert.ok(coreWasm.byteLength <= 3_839_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3839000`);
 });
 
 test("calculator contains only its runtime ABI and stays within its size budget", async () => {
@@ -27,10 +35,12 @@ test("calculator contains only its runtime ABI and stays within its size budget"
 
 test("PDF pack stays within the reviewed binary size budget", async () => {
   const bytes = await readFile(new URL("../dist/office-viewer-pdf.wasm", import.meta.url));
-  // v0.2.78 preserves complete raw inline images and Type 3 bitmap glyphs:
-  // published v0.2.77 3,140,237 -> 3,141,589 bytes (+768 gzip bytes).
-  // Glyph regressions cover delimiter boundaries; no font binaries changed.
-  assert.ok(bytes.byteLength <= 3_143_000, `PDF Wasm is ${bytes.byteLength} bytes`);
+  // The same shared protocol adds 3,241 bytes: 3,141,589 -> 3,144,830.
+  // Repeated images, masks and color profiles share exact bytes; fonts and
+  // document rendering semantics remain unchanged.
+  // Shared preflight reuse adds 2,181 bytes (3,144,830 -> 3,147,011).
+  // Exact search and CMYK Decode tables: 3,147,815 -> 3,154,935 bytes.
+  assert.ok(bytes.byteLength <= 3_156_000, `PDF Wasm is ${bytes.byteLength} bytes`);
 });
 
 test("binary Dingbats font preserves the original decoded font bytes", async () => {
@@ -53,7 +63,10 @@ test("binary Dingbats font preserves the original decoded font bytes", async () 
 const scenes = {
   "core": {
     "chart-original.docx": "fff3cf84016fa0ed9d5c7ad28584e66a7333423aa77501d1c75bdf199e7db3f2",
-    "complex2005_12rtm.docx": "1ce107a8851679071bf771936dabaaf98010d10a7bd26975f3e4c22ec8f8395b",
+    // Three numbering labels now share their paragraph's fixed leading policy;
+    // page-local cells also remove a spurious merge-clipping warning caused by
+    // float rounding in a nonmerged cell. All other fields match across 102 loads.
+    "complex2005_12rtm.docx": "ad97735306afa0ca8fa145bd765bb4d5917ffa6795ee8250b7a1e3af25999345",
     "word-data-label-borders.docx": "5a7c82fdfb7bdbb33d656f763df9cb98e00d178c22a4264bf5cb49ea2cb2b3d3",
     "chart_pt_color_bg1.pptx": "c3a40615d11e2ad4057daa21265786dbdff5fd1c104862c090aa83fa7fd29597",
     "corpus-stacked-mix.pptx": "8078699c48e1abc96a8717f87e33602cbf2c44f15d41d73b75668317d58361a8",

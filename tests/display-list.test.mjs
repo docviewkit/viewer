@@ -7799,6 +7799,49 @@ test("supplied Word 2006 table centers fixed-line glyphs inside centered cells",
   }
 });
 
+test("supplied Word heading number shares its measured paragraph baseline", async () => {
+  const { measureSceneFontMetrics } = await import("../dist/font-metrics.js");
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  // Source paragraphs, styles, numbering and section from the supplied DOCX.
+  const bytes = await readFile(new URL("./fixtures/word-heading-number-baseline.docx", import.meta.url));
+  const initial = core.open(bytes);
+  const context = recordingContext();
+  context.measureText = function (text) {
+    const size = Number(this.font.match(/([\d.]+)px/u)?.[1] ?? 10);
+    return { width: [...text].length * size * .7,
+      fontBoundingBoxAscent: size * (this.textBaseline === "top" ? -.04 : .86),
+      fontBoundingBoxDescent: size * (this.textBaseline === "top" ? 1.04 : .14) };
+  };
+  const metrics = measureSceneFontMetrics(initial.scene.objects,
+    { resolve: family => ({ family, source: "browser" }) }, { createContext: () => context });
+  const measured = core.open(bytes, metrics.table);
+  const original = Object.getOwnPropertyDescriptor(globalThis, "OffscreenCanvas");
+  class FakeCanvas { getContext() { return context; } transferToImageBitmap() { return { close() {} }; } }
+  Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: FakeCanvas });
+  try {
+    for (const document of [initial, measured]) {
+      const heading = document.scene.objects.find(o => o.text === "设计原则");
+      const number = document.scene.objects.find(o => o.id.startsWith("docx:numbering:")
+        && o.source.paragraphIndex === heading.source.paragraphIndex);
+      assert.equal(number.text, "1.2");
+      assert.equal(heading.visual.layout.fixedLineHeight ?? false, document === measured);
+      context.calls.length = 0;
+      const frame = await new SceneRenderer([number, heading], DEFAULT_LIMITS)
+        .render(document.scene.info.units[heading.unitIndex], { unitIndex: heading.unitIndex });
+      frame.bitmap.close();
+      const labelDraw = context.calls.find(c => c[0] === "fillText" && c[1] === "1.2");
+      const headingDraw = context.calls.find(c => c[0] === "fillText" && c[1] === "设计原则");
+      assert.ok(labelDraw && headingDraw);
+      assert.ok(Math.abs(labelDraw[3] - headingDraw[3]) < .01,
+        `shared baseline: number ${labelDraw[3]}, heading ${headingDraw[3]}`);
+    }
+  } finally {
+    if (original) Object.defineProperty(globalThis, "OffscreenCanvas", original);
+    else delete globalThis.OffscreenCanvas;
+    measured.close(); initial.close(); core.close();
+  }
+});
+
 test("supplied Word heading retains natural leading below the table rule", async () => {
   const { measureSceneFontMetrics } = await import("../dist/font-metrics.js");
   const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);

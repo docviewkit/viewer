@@ -318,9 +318,26 @@ function decodeDib(
   }
   const output = new Uint8ClampedArray(width * height * 4);
   let hasNonZeroAlpha = false;
+  // Standard eight-bit BGRA bitfields need no per-pixel mask normalization.
+  // Other layouts retain the general decoder; ICO's AND mask still runs below.
+  const packedBgra = bits === 32 && (compression === 3 || compression === 6)
+    && redMask === 0x00ff0000 && greenMask === 0x0000ff00
+    && blueMask === 0x000000ff && alphaMask === 0xff000000;
   for (let y = 0; y < height; y += 1) {
     const sourceY = topDown ? y : height - 1 - y;
     const row = pixelOffset + sourceY * rowStride;
+    if (packedBgra) {
+      let target = y * width * 4;
+      for (let source = row; source < row + width * 4; source += 4, target += 4) {
+        output[target] = bytes[source + 2]!;
+        output[target + 1] = bytes[source + 1]!;
+        output[target + 2] = bytes[source]!;
+        const alpha = bytes[source + 3]!;
+        output[target + 3] = alpha;
+        hasNonZeroAlpha ||= alpha !== 0;
+      }
+      continue;
+    }
     for (let x = 0; x < width; x += 1) {
       let color: readonly [number, number, number, number];
       if (bits <= 8) {

@@ -1482,9 +1482,7 @@ fn read_be_usize(bytes: &[u8], offset: usize, width: usize) -> Result<usize, Dia
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+    super::find_bytes(haystack, needle, 0)
 }
 
 fn plist_error(message: impl Into<String>) -> Diagnostic {

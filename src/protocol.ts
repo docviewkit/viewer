@@ -34,7 +34,7 @@ import { OfficeEngineError } from "./types.js";
 
 const MAGIC = 0x3144564f;
 const MIN_VERSION = 3;
-const VERSION = 76;
+const VERSION = 77;
 const NONE = 0xffff_ffff;
 const MAX_VISUAL_DEPTH = 64;
 const MAX_PATH_COMMANDS = 65_536;
@@ -106,6 +106,7 @@ class Reader {
   readonly #binaryResources = new Map<string, Uint8Array[]>();
   readonly #imageResources = new Map<number, Pick<Extract<SceneVisual, { kind: "image" }>, "mediaType" | "bytes">>();
   readonly #imageMasks = new Map<number, NonNullable<Extract<SceneVisual, { kind: "image" }>["alphaMask"]>>();
+  binaryReferences: Uint8Array[] | undefined;
   #offset = 0;
 
   constructor(bytes: Uint8Array) {
@@ -172,10 +173,20 @@ class Reader {
 
   byteArray(): Uint8Array {
     const length = this.u32();
+    if (length === NONE && this.binaryReferences !== undefined) {
+      const resource = this.binaryReferences[this.u32()];
+      if (resource === undefined) throw this.#invalid("unresolved binary resource reference");
+      return resource;
+    }
     this.#need(length);
     const source = this.#bytes.subarray(this.#offset, this.#offset + length);
     this.#offset += length;
     if (length < 4_096) return source.slice();
+    if (this.binaryReferences !== undefined) {
+      const value = source.slice();
+      this.binaryReferences.push(value);
+      return value;
+    }
     const key = byteFingerprint(source);
     const candidates = this.#binaryResources.get(key);
     if (candidates !== undefined) {
@@ -2426,6 +2437,7 @@ export function decodeSnapshot(bytes: Uint8Array): SceneDocument {
   if (magic !== MAGIC || version < MIN_VERSION || version > VERSION) {
     throw new OfficeEngineError("CORE_PROTOCOL_INVALID", "Unsupported core snapshot header");
   }
+  if (version >= 77) reader.binaryReferences = [];
   const fatal = reader.u8() !== 0;
   const formatCode = reader.u8();
   const kindCode = reader.u8();

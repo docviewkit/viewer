@@ -102,6 +102,52 @@ test("font alternate metadata rejects unbounded counts and invalid names", () =>
   }
 });
 
+function binaryResourceSnapshot(payloads, version = 77) {
+  const writer = new SnapshotWriter();
+  writer.u32(0x3144564f); writer.u16(version);
+  for (const value of [1, 0, 0, 0, 0, 0]) writer.u8(value);
+  writer.u32(0); writer.u32(0); writer.u32(0);
+  writer.u32(payloads.length);
+  for (const payload of payloads) {
+    writer.u32(0); writer.u32(400); writer.string("Resource test");
+    if (typeof payload === "number") {
+      writer.u32(0xffff_ffff); writer.u32(payload);
+    } else writer.byteArray(payload);
+  }
+  writer.u32(0); writer.u32(0);
+  return Uint8Array.from(writer.bytes);
+}
+
+test("snapshot binary references preserve exact bytes and per-snapshot ownership", () => {
+  const bytes = new Uint8Array(4096).fill(7);
+  const changed = bytes.slice(); changed[2048] = 9;
+  const snapshot = binaryResourceSnapshot([bytes, changed, 0, 1, 0]);
+  const scene = decodeSnapshot(snapshot);
+  const resources = scene.embeddedFonts.map(font => font.bytes);
+  assert.deepEqual(resources[0], bytes);
+  assert.deepEqual(resources[1], changed);
+  assert.equal(resources[0], resources[2]);
+  assert.equal(resources[1], resources[3]);
+  assert.equal(resources[0], resources[4]);
+  assert.notEqual(decodeSnapshot(snapshot).embeddedFonts[0].bytes, resources[0]);
+  assert.ok(snapshot.length < 8500);
+  assert.deepEqual(decodeSnapshot(binaryResourceSnapshot([bytes, changed], 76))
+    .embeddedFonts.map(font => font.bytes), [bytes, changed]);
+});
+
+test("snapshot binary references reject forward, absent, small-field and legacy references", () => {
+  const bytes = new Uint8Array(4096).fill(7);
+  for (const payloads of [[0], [bytes, 1], [bytes, 0xffff_ffff], [bytes.subarray(0, 4095), 0]]) {
+    assert.throws(() => decodeSnapshot(binaryResourceSnapshot(payloads)),
+      error => error?.code === "CORE_PROTOCOL_INVALID");
+  }
+  assert.throws(() => decodeSnapshot(binaryResourceSnapshot([bytes, 0], 76)),
+    error => error?.code === "CORE_PROTOCOL_INVALID");
+  const snapshot = binaryResourceSnapshot([bytes, 0]);
+  assert.throws(() => decodeSnapshot(snapshot.subarray(0, snapshot.length - 10)),
+    error => error?.code === "CORE_PROTOCOL_INVALID");
+});
+
 function repeatedImageSnapshot(bytes, crop = [0, 0, 0, 0]) {
   const writer = new SnapshotWriter();
   writer.u32(0x3144564f);

@@ -29,7 +29,12 @@ try {
         page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
         await page.goto(`${url}examples/viewer.html?fixture=${fixture}`);
         await page.waitForFunction(() => document.documentElement.dataset.ready === "true");
-        const outline = await page.locator("docviewkit-viewer").evaluate(viewer => viewer.state.info.outline);
+        const authoredOutline = await page.locator("docviewkit-viewer").evaluate(viewer => viewer.state.info.outline);
+        const rootLevel = Math.min(...authoredOutline.map(item => item.level));
+        const rootCount = authoredOutline.filter(item => item.level === rootLevel).length;
+        const outline = rootCount === 1 && authoredOutline.length > 1 ? authoredOutline.slice(1) : authoredOutline;
+        assert.deepEqual(await page.locator(".outline-button").evaluateAll(items => items.map(item => item.title)),
+          outline.map(item => item.title), "Navigation indexes address the displayed outline after root simplification");
         const branch = outline.findIndex((item, index) => outline[index + 1]?.level > item.level);
         assert.ok(branch >= 0, `${fixture} must exercise a real nested outline`);
         const item = index => page.locator(`.outline-button[data-outline-index="${index}"]`);
@@ -208,8 +213,12 @@ try {
               const root = viewer.shadowRoot;
               const readyThumbnail = root.querySelector('.unit-button[data-unit-index="0"] canvas')?.dataset.rendered;
               root.querySelector('[data-action="navigation-thumbnails"]').click();
-              await new Promise(requestAnimationFrame);
               const thumbnail = root.querySelector('.unit-button[data-unit-index="0"] canvas');
+              // Outline documents create thumbnails on mode switch. Their
+              // IntersectionObserver callback may run after the next frame.
+              for (let frame = 0; thumbnail.dataset.rendered !== "true" && frame < 120; frame++) {
+                await new Promise(requestAnimationFrame);
+              }
               const surface = mode === "single" ? root.querySelector(".surface")
                 : root.querySelector('.continuous-page[data-unit-index="0"] canvas');
               const reference = document.createElement("canvas");

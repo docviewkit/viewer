@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { rustToolchain } from "./rust-toolchain.mjs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -83,7 +84,7 @@ await writeFile(resolve(licenseRoot, "PDFium-FoxitDingbats-LICENSE.txt"),
   await readFile(resolve(root, "third_party/pdf-standard-fonts/LICENSE_FOXIT"), "utf8"));
 rows.push("| PDFium FoxitDingbats | SHA256 845c752392b6c914fb989c75a08b7792b88f542d2499042ef2889f8c814a16ed | BSD-3-Clause | third-party-licenses/PDFium-FoxitDingbats-LICENSE.txt |");
 
-const cargo = process.env.CARGO ?? "cargo";
+const { cargo, env: cargoEnvironment } = rustToolchain(root);
 const rustBuilds = [
   [],
   ["--no-default-features", "--features", "odf-formats"],
@@ -108,7 +109,7 @@ for (const features of rustBuilds) {
     "-p",
     "office-viewer-core",
     ...features,
-  ], { cwd: root, maxBuffer: 16 * 1024 * 1024 });
+  ], { cwd: root, env: cargoEnvironment, maxBuffer: 16 * 1024 * 1024 });
   for (const line of stdout.split("\n")) {
     const normalized = line.replace(/ \(\*\)$/, "").replace(/ \(proc-macro\)$/, "").trim();
     const match = /^([^ ]+) v([^ ]+)/.exec(normalized);
@@ -124,7 +125,7 @@ const { stdout: cargoMetadataText } = await execute(cargo, [
   "1",
   "--locked",
   "--all-features",
-], { cwd: root, maxBuffer: 64 * 1024 * 1024 });
+], { cwd: root, env: cargoEnvironment, maxBuffer: 64 * 1024 * 1024 });
 const cargoMetadata = JSON.parse(cargoMetadataText);
 const rustMetadata = new Map(
   cargoMetadata.packages.map((manifest) => [`${manifest.name}@${manifest.version}`, manifest]),

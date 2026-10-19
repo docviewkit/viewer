@@ -186,6 +186,35 @@ async function createEngine() {
   });
 }
 
+test("DOCX repeated large header opens all 47 pages without expanding the transfer", async () => {
+  // Same failure pattern as the supplied 47-page document: a 5.7 MB header
+  // image used on every page. Keep customer content out of the fixture.
+  const image = new Uint8Array(5_732_078);
+  image.set(onePixelPng);
+  const pages = Array.from({ length: 47 }, (_, index) =>
+    `<w:p><w:pPr>${index ? '<w:pageBreakBefore/>' : ''}</w:pPr><w:r><w:t>Page ${index + 1}</w:t></w:r></w:p>`).join("");
+  const bytes = createZip({
+    "[Content_Types].xml": '<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+    "_rels/.rels": '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    "word/document.xml": `<w:document xmlns:w="w" xmlns:r="r"><w:body>${pages}<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>`,
+    "word/_rels/document.xml.rels": '<Relationships><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>',
+    "word/header1.xml": '<w:hdr xmlns:w="w" xmlns:r="r" xmlns:wp="wp" xmlns:a="a"><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><a:graphic><a:graphicData><a:blip r:embed="image"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>',
+    "word/_rels/header1.xml.rels": '<Relationships><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/header.png"/></Relationships>',
+    "word/media/header.png": image,
+  }, { compress: false });
+  const engine = await createEngine();
+  try {
+    const document = await engine.open(bytes);
+    try {
+      assert.equal(document.info.units.length, 47);
+      const objects = await document.listObjects();
+      assert.equal(objects.filter(object => object.type === "image").length, 47);
+      assert.equal(objects.filter(object => /^Page \d+$/.test(object.text ?? "")).length, 47);
+      assert.equal(document.diagnostics().some(item => item.severity === "fatal"), false);
+    } finally { document.close(); }
+  } finally { engine.close(); }
+});
+
 test("supplied DOC renders source-mapped headers on both pages through the public engine", async () => {
   const canvas = installCanvas();
   const engine = await createEngine();
@@ -386,4 +415,37 @@ test("real OOXML reversed categories keep bars paired with their labels", async 
     assert.ok(firstBar.bounds.y < lastBar.bounds.y);
     assert.ok(firstBar.bounds.width > lastBar.bounds.width);
   } finally { document.close(); engine.close(); }
+});
+
+test("supplied Word table retains merged cell borders on every page", async () => {
+  const { Core, DEFAULT_LIMITS } = await import("../dist/core.js");
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  // First six rows and original styles from the supplied document; a shorter
+  // page reproduces its page break through the three vertically merged columns.
+  const document = core.open(await readFile(new URL("./fixtures/word-merged-table-page-break.docx", import.meta.url)));
+  try {
+    document.loadAll();
+    const cells = document.scene.objects.filter(o => o.type === "cell");
+    const reference = cells.find(o => o.id.includes(":row:3:column:3:"));
+    assert.ok(reference.unitIndex > 0, "the original merged row crosses a page boundary");
+    for (const scope of cells.filter(o => o.source.column === 3)) {
+      for (let column = 0; column < 3; column++) {
+        const continuation = cells.find(o => o.unitIndex === scope.unitIndex && o.source.column === column
+          && o.bounds.y <= scope.bounds.y + .01
+          && o.bounds.y + o.bounds.height >= scope.bounds.y + scope.bounds.height - .01);
+        assert.ok(continuation, `column ${column} must continue beside ${scope.id}`);
+        for (const edge of ["left", "right"]) {
+          const border = document.scene.objects.find(o => o.id === `${continuation.id}:border:${edge}`);
+          assert.ok(border && Math.abs(border.bounds.height - continuation.bounds.height) < .01,
+            `column ${column} must paint its ${edge} border for the entire continuation`);
+        }
+      }
+    }
+    for (const cell of cells) {
+      const pageBottom = Math.max(...cells.filter(o => o.unitIndex === cell.unitIndex && o.source.column === 3)
+        .map(o => o.bounds.y + o.bounds.height));
+      assert.ok(cell.bounds.y + cell.bounds.height <= pageBottom + .01,
+        "merged borders end at the last laid-out row, not unused page space");
+    }
+  } finally { document.close(); core.close(); }
 });

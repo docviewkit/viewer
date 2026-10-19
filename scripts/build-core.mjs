@@ -1,8 +1,9 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { delimiter, dirname, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import binaryen from "binaryen";
+import { rustToolchain } from "./rust-toolchain.mjs";
 
 function prepareCalculator(input, output) {
   const required = new Set([
@@ -54,16 +55,7 @@ function prepareCalculator(input, output) {
 }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const rustupCargo = spawnSync(
-  "rustup",
-  ["which", "cargo"],
-  { cwd: root, encoding: "utf8" },
-);
-const cargoCommand = process.env.CARGO
-  ?? (rustupCargo.status === 0
-    ? rustupCargo.stdout.trim()
-    : (process.platform === "win32" ? "cargo.exe" : "cargo"));
-const cargoBin = dirname(cargoCommand);
+const { cargo: cargoCommand, env: cargoEnvironment } = rustToolchain(root);
 const wasmOptCommand = resolve(
   root,
   "node_modules/.bin",
@@ -113,10 +105,7 @@ for (const build of builds) {
   const cargo = spawnSync(cargoCommand, args, {
     cwd: root,
     stdio: "inherit",
-    env: {
-      ...process.env,
-      PATH: `${cargoBin}${delimiter}${process.env.PATH ?? ""}`,
-    },
+    env: cargoEnvironment,
   });
   if (cargo.status !== 0) process.exit(cargo.status ?? 1);
   let input = resolve(

@@ -3317,3 +3317,44 @@ pub(super) fn format_general_number(number: f64, width: usize) -> String {
     }
     "#".repeat(width)
 }
+
+#[cfg(any(
+    feature = "native-formats",
+    feature = "pdf-formats",
+    feature = "iwork-formats"
+))]
+// Exact byte search shared by PDF recovery, worksheet XML and iWork plists.
+fn find_bytes(bytes: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    let bytes = bytes.get(start..)?;
+    assert!(!needle.is_empty(), "window size must be non-zero");
+    memchr::memmem::find(bytes, needle).map(|offset| start + offset)
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "native-formats",
+        feature = "pdf-formats",
+        feature = "iwork-formats"
+    )
+))]
+#[test]
+fn byte_search_preserves_window_search_boundaries() {
+    let bytes = b"abc\0abcabc";
+    for start in 0..=bytes.len() + 1 {
+        for needle in [
+            b"a".as_slice(),
+            b"abc",
+            b"\0a",
+            b"abcd",
+            b"bcabc",
+            b"abcabcabcabc",
+        ] {
+            let expected = bytes
+                .get(start..)
+                .and_then(|tail| tail.windows(needle.len()).position(|v| v == needle))
+                .map(|i| start + i);
+            assert_eq!(find_bytes(bytes, needle, start), expected);
+        }
+    }
+}

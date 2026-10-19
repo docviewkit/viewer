@@ -9,7 +9,7 @@ use crate::model::{
 };
 
 const MAGIC: u32 = 0x3144_564f;
-const VERSION: u16 = 76;
+const VERSION: u16 = 77;
 const NONE: u32 = u32::MAX;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_VISUAL_DEPTH: usize = 64;
@@ -37,19 +37,94 @@ impl core::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
-struct Writer {
+// Large byte fields use content-equal backward references across the entire
+// snapshot (images, masks, profiles, media and fonts), regardless of format.
+// v77 writes repeated fields as [NONE, index]. Each large literal registers
+// its zero-based index in wire order; references never cross snapshots.
+const MIN_BINARY_RESOURCE_BYTES: usize = 4_096;
+
+#[derive(Default)]
+struct BinaryResources<'a> {
+    indices: std::collections::HashMap<BinaryResource<'a>, u32>,
+    aliases: std::collections::HashMap<(usize, usize), u32>,
+    written: Vec<u32>,
+    next_wire_index: u32,
+}
+
+// Keep the randomized full-content hash, but avoid Wasm's byte-at-a-time
+// memcmp for large equal resources. Every byte still participates in equality.
+struct BinaryResource<'a>(&'a [u8]);
+
+impl std::hash::Hash for BinaryResource<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(self.0, state);
+    }
+}
+
+impl PartialEq for BinaryResource<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.len() != other.0.len() {
+            return false;
+        }
+        let mut left = self.0.chunks_exact(8);
+        let mut right = other.0.chunks_exact(8);
+        left.by_ref().zip(right.by_ref()).all(|(a, b)| {
+            u64::from_ne_bytes(a.try_into().unwrap()) == u64::from_ne_bytes(b.try_into().unwrap())
+        }) && left.remainder() == right.remainder()
+    }
+}
+
+impl Eq for BinaryResource<'_> {}
+
+impl<'a> BinaryResources<'a> {
+    fn reference(&mut self, bytes: &'a [u8]) -> Option<u32> {
+        if bytes.len() < MIN_BINARY_RESOURCE_BYTES {
+            return None;
+        }
+        // These immutable borrows live for the entire encode. Reuse their
+        // content classification between preflight and writing, within this
+        // snapshot only; pointer identity never substitutes for content equality.
+        let address = (bytes.as_ptr() as usize, bytes.len());
+        let index = *self.aliases.entry(address).or_insert_with(|| {
+            let next = self.indices.len() as u32;
+            *self
+                .indices
+                .entry(BinaryResource(bytes))
+                .or_insert_with(|| {
+                    self.written.push(NONE);
+                    next
+                })
+        });
+        let written = &mut self.written[index as usize];
+        if *written != NONE {
+            return Some(*written);
+        }
+        *written = self.next_wire_index;
+        self.next_wire_index += 1;
+        None
+    }
+
+    fn restart_wire_order(&mut self) {
+        self.written.fill(NONE);
+        self.next_wire_index = 0;
+    }
+}
+
+struct Writer<'a> {
+    resources: BinaryResources<'a>,
     bytes: Vec<u8>,
     expected_length: usize,
     overflowed: bool,
 }
 
-impl Writer {
+impl<'a> Writer<'a> {
     fn new(expected_length: usize) -> Result<Self, ProtocolError> {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(expected_length)
             .map_err(|_| ProtocolError::AllocationFailed)?;
         Ok(Self {
+            resources: BinaryResources::default(),
             bytes,
             expected_length,
             overflowed: false,
@@ -108,7 +183,12 @@ impl Writer {
         }
     }
 
-    fn byte_array(&mut self, value: &[u8]) -> Result<(), ProtocolError> {
+    fn byte_array(&mut self, value: &'a [u8]) -> Result<(), ProtocolError> {
+        if let Some(index) = self.resources.reference(value) {
+            self.u32(NONE);
+            self.u32(index);
+            return Ok(());
+        }
         self.u32(
             value
                 .len()
@@ -610,7 +690,11 @@ fn write_geometry(writer: &mut Writer, geometry: &Geometry) -> Result<(), Protoc
     }
 }
 
-fn write_paint(writer: &mut Writer, paint: &Paint, depth: usize) -> Result<(), ProtocolError> {
+fn write_paint<'a>(
+    writer: &mut Writer<'a>,
+    paint: &'a Paint,
+    depth: usize,
+) -> Result<(), ProtocolError> {
     if depth > MAX_VISUAL_DEPTH {
         return Err(ProtocolError::TooManyFields);
     }
@@ -916,7 +1000,7 @@ fn write_paint(writer: &mut Writer, paint: &Paint, depth: usize) -> Result<(), P
     }
 }
 
-fn write_xps_color(writer: &mut Writer, color: &XpsColor) -> Result<(), ProtocolError> {
+fn write_xps_color<'a>(writer: &mut Writer<'a>, color: &'a XpsColor) -> Result<(), ProtocolError> {
     match color {
         XpsColor::Rgba(color) => {
             writer.u8(0);
@@ -1022,7 +1106,10 @@ fn validate_speaker_note_paragraph(paragraph: &SpeakerNoteParagraph) -> Result<(
     Ok(())
 }
 
-fn speaker_note_paragraph_length(paragraph: &SpeakerNoteParagraph) -> Result<usize, ProtocolError> {
+fn speaker_note_paragraph_length<'a>(
+    paragraph: &'a SpeakerNoteParagraph,
+    resources: &mut BinaryResources<'a>,
+) -> Result<usize, ProtocolError> {
     validate_speaker_note_paragraph(paragraph)?;
     let _: u32 = paragraph
         .runs
@@ -1036,13 +1123,17 @@ fn speaker_note_paragraph_length(paragraph: &SpeakerNoteParagraph) -> Result<usi
         add_length(&mut total, 28)?;
         add_length(
             &mut total,
-            paint_length(run.paint.as_deref().unwrap_or(&Paint::None), 1)?,
+            paint_length(run.paint.as_deref().unwrap_or(&Paint::None), 1, resources)?,
         )?;
     }
     Ok(total)
 }
 
-fn write_text_run(writer: &mut Writer, run: &TextRun, depth: usize) -> Result<(), ProtocolError> {
+fn write_text_run<'a>(
+    writer: &mut Writer<'a>,
+    run: &'a TextRun,
+    depth: usize,
+) -> Result<(), ProtocolError> {
     writer.string(&run.text)?;
     writer.string(&run.font_family)?;
     writer.f32(run.font_size);
@@ -1065,9 +1156,9 @@ fn write_text_run(writer: &mut Writer, run: &TextRun, depth: usize) -> Result<()
     )
 }
 
-fn write_speaker_note_paragraph(
-    writer: &mut Writer,
-    paragraph: &SpeakerNoteParagraph,
+fn write_speaker_note_paragraph<'a>(
+    writer: &mut Writer<'a>,
+    paragraph: &'a SpeakerNoteParagraph,
 ) -> Result<(), ProtocolError> {
     let layout = paragraph.layout;
     writer.u8(layout.align.code());
@@ -1859,14 +1950,14 @@ fn validate_visual(visual: &Visual, depth: usize) -> Result<(), ProtocolError> {
     }
 }
 
-fn write_visual(writer: &mut Writer, visual: &Visual) -> Result<(), ProtocolError> {
+fn write_visual<'a>(writer: &mut Writer<'a>, visual: &'a Visual) -> Result<(), ProtocolError> {
     validate_visual(visual, 0)?;
     write_visual_at_depth(writer, visual, 0)
 }
 
-fn write_visual_at_depth(
-    writer: &mut Writer,
-    visual: &Visual,
+fn write_visual_at_depth<'a>(
+    writer: &mut Writer<'a>,
+    visual: &'a Visual,
     depth: usize,
 ) -> Result<(), ProtocolError> {
     if depth > MAX_VISUAL_DEPTH {
@@ -2471,7 +2562,13 @@ fn optional_string_length(value: Option<&str>) -> Result<usize, ProtocolError> {
     value.map_or(Ok(4), string_length)
 }
 
-fn byte_array_length(value: &[u8]) -> Result<usize, ProtocolError> {
+fn byte_array_length<'a>(
+    value: &'a [u8],
+    resources: &mut BinaryResources<'a>,
+) -> Result<usize, ProtocolError> {
+    if resources.reference(value).is_some() {
+        return Ok(8);
+    }
     let _: u32 = value
         .len()
         .try_into()
@@ -2481,7 +2578,10 @@ fn byte_array_length(value: &[u8]) -> Result<usize, ProtocolError> {
         .ok_or(ProtocolError::SnapshotTooLarge)
 }
 
-fn xps_color_length(color: &XpsColor) -> Result<usize, ProtocolError> {
+fn xps_color_length<'a>(
+    color: &'a XpsColor,
+    resources: &mut BinaryResources<'a>,
+) -> Result<usize, ProtocolError> {
     match color {
         XpsColor::Rgba(_) => Ok(8),
         XpsColor::Context {
@@ -2492,7 +2592,7 @@ fn xps_color_length(color: &XpsColor) -> Result<usize, ProtocolError> {
                 .try_into()
                 .map_err(|_| ProtocolError::TooManyFields)?;
             let mut total = 12;
-            add_length(&mut total, byte_array_length(profile)?)?;
+            add_length(&mut total, byte_array_length(profile, resources)?)?;
             add_length(
                 &mut total,
                 channels
@@ -2836,7 +2936,11 @@ fn geometry_length(geometry: &Geometry) -> Result<usize, ProtocolError> {
     }
 }
 
-fn paint_length(paint: &Paint, depth: usize) -> Result<usize, ProtocolError> {
+fn paint_length<'a>(
+    paint: &'a Paint,
+    depth: usize,
+    resources: &mut BinaryResources<'a>,
+) -> Result<usize, ProtocolError> {
     if depth > MAX_VISUAL_DEPTH {
         return Err(ProtocolError::TooManyFields);
     }
@@ -2891,7 +2995,7 @@ fn paint_length(paint: &Paint, depth: usize) -> Result<usize, ProtocolError> {
                 .filter(|length| *length <= MAX_SNAPSHOT_BYTES)
                 .ok_or(ProtocolError::SnapshotTooLarge)
         }
-        Paint::MappedGradient { paint, .. } => paint_length(paint, depth + 1)?
+        Paint::MappedGradient { paint, .. } => paint_length(paint, depth + 1, resources)?
             .checked_add(24)
             .ok_or(ProtocolError::TooManyFields),
         Paint::ShapeGradient { stops, .. } => stops
@@ -2912,7 +3016,7 @@ fn paint_length(paint: &Paint, depth: usize) -> Result<usize, ProtocolError> {
         } => {
             let mut total = if mapping.is_some() { 80 } else { 32 };
             add_length(&mut total, string_length(media_type)?)?;
-            add_length(&mut total, byte_array_length(bytes)?)?;
+            add_length(&mut total, byte_array_length(bytes, resources)?)?;
             Ok(total)
         }
         Paint::Visual { children, .. } => {
@@ -2925,7 +3029,7 @@ fn paint_length(paint: &Paint, depth: usize) -> Result<usize, ProtocolError> {
                 add_length(&mut total, 20)?;
                 add_length(
                     &mut total,
-                    visual_length_at_depth(&child.visual, depth + 1)?,
+                    visual_length_at_depth(&child.visual, depth + 1, resources)?,
                 )?;
             }
             Ok(total)
@@ -2938,19 +3042,26 @@ fn paint_length(paint: &Paint, depth: usize) -> Result<usize, ProtocolError> {
             let mut total = 84;
             for stop in stops {
                 add_length(&mut total, 4)?;
-                add_length(&mut total, xps_color_length(&stop.color)?)?;
+                add_length(&mut total, xps_color_length(&stop.color, resources)?)?;
             }
             Ok(total)
         }
     }
 }
 
-fn visual_length(visual: &Visual) -> Result<usize, ProtocolError> {
+fn visual_length<'a>(
+    visual: &'a Visual,
+    resources: &mut BinaryResources<'a>,
+) -> Result<usize, ProtocolError> {
     validate_visual(visual, 0)?;
-    visual_length_at_depth(visual, 0)
+    visual_length_at_depth(visual, 0, resources)
 }
 
-fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, ProtocolError> {
+fn visual_length_at_depth<'a>(
+    visual: &'a Visual,
+    depth: usize,
+    resources: &mut BinaryResources<'a>,
+) -> Result<usize, ProtocolError> {
     if depth > MAX_VISUAL_DEPTH {
         return Err(ProtocolError::TooManyFields);
     }
@@ -2974,7 +3085,7 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
             media_type, bytes, ..
         } => {
             let media_type_length = string_length(media_type)?;
-            let bytes_length = byte_array_length(bytes)?;
+            let bytes_length = byte_array_length(bytes, resources)?;
             16_usize
                 .checked_add(media_type_length)
                 .and_then(|length| length.checked_add(bytes_length))
@@ -2988,9 +3099,9 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
             ..
         } => {
             let media_type_length = string_length(media_type)?;
-            let bytes_length = byte_array_length(bytes)?;
+            let bytes_length = byte_array_length(bytes, resources)?;
             let fallback_media_type_length = string_length(fallback_media_type)?;
-            let fallback_bytes_length = byte_array_length(fallback_bytes)?;
+            let fallback_bytes_length = byte_array_length(fallback_bytes, resources)?;
             16_usize
                 .checked_add(media_type_length)
                 .and_then(|length| length.checked_add(bytes_length))
@@ -3006,9 +3117,9 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
             ..
         } => {
             let media_type_length = string_length(media_type)?;
-            let bytes_length = byte_array_length(bytes)?;
+            let bytes_length = byte_array_length(bytes, resources)?;
             let mask_media_type_length = string_length(mask_media_type)?;
-            let mask_length = byte_array_length(alpha_mask)?;
+            let mask_length = byte_array_length(alpha_mask, resources)?;
             32_usize
                 .checked_add(media_type_length)
                 .and_then(|length| length.checked_add(bytes_length))
@@ -3022,15 +3133,18 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                 add_length(&mut total, 20)?;
                 add_length(
                     &mut total,
-                    visual_length_at_depth(&child.visual, depth + 1)?,
+                    visual_length_at_depth(&child.visual, depth + 1, resources)?,
                 )?;
             }
             Ok(total)
         }
         Visual::OpacityMask { mask, visual } => {
-            let mut total = paint_length(mask, depth)?;
+            let mut total = paint_length(mask, depth, resources)?;
             add_length(&mut total, 4)?;
-            add_length(&mut total, visual_length_at_depth(visual, depth + 1)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(visual, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
         Visual::ColorManagedImage {
@@ -3038,12 +3152,15 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
             destination_profile,
             visual,
         } => {
-            let mut total = byte_array_length(source_profile)?;
+            let mut total = byte_array_length(source_profile, resources)?;
             add_length(&mut total, 8)?;
             if let Some(profile) = destination_profile {
-                add_length(&mut total, byte_array_length(profile)?)?;
+                add_length(&mut total, byte_array_length(profile, resources)?)?;
             }
-            add_length(&mut total, visual_length_at_depth(visual, depth + 1)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(visual, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
         Visual::Media {
@@ -3054,11 +3171,14 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
         } => {
             let mut total = 8_usize;
             add_length(&mut total, string_length(media_type)?)?;
-            add_length(&mut total, byte_array_length(bytes)?)?;
-            add_length(&mut total, visual_length_at_depth(poster, depth + 1)?)?;
+            add_length(&mut total, byte_array_length(bytes, resources)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(poster, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
-        Visual::Layer { visual, .. } => visual_length_at_depth(visual, depth + 1)?
+        Visual::Layer { visual, .. } => visual_length_at_depth(visual, depth + 1, resources)?
             .checked_add(32)
             .ok_or(ProtocolError::SnapshotTooLarge),
         Visual::PaintedShape {
@@ -3067,9 +3187,9 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
             stroke,
             ..
         } => {
-            let stroke_length = paint_length(stroke, depth)?;
+            let stroke_length = paint_length(stroke, depth, resources)?;
             geometry_length(geometry)?
-                .checked_add(paint_length(fill, depth)?)
+                .checked_add(paint_length(fill, depth, resources)?)
                 .and_then(|length| length.checked_add(stroke_length))
                 .and_then(|length| length.checked_add(4))
                 .ok_or(ProtocolError::SnapshotTooLarge)
@@ -3086,8 +3206,8 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                 .try_into()
                 .map_err(|_| ProtocolError::TooManyFields)?;
             let mut total = geometry_length(geometry)?;
-            add_length(&mut total, paint_length(fill, depth)?)?;
-            add_length(&mut total, paint_length(stroke, depth)?)?;
+            add_length(&mut total, paint_length(fill, depth, resources)?)?;
+            add_length(&mut total, paint_length(stroke, depth, resources)?)?;
             add_length(&mut total, 16)?;
             for run in runs {
                 add_length(&mut total, string_length(&run.text)?)?;
@@ -3095,7 +3215,11 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                 add_length(&mut total, 28)?;
                 add_length(
                     &mut total,
-                    paint_length(run.paint.as_deref().unwrap_or(&Paint::None), depth + 1)?,
+                    paint_length(
+                        run.paint.as_deref().unwrap_or(&Paint::None),
+                        depth + 1,
+                        resources,
+                    )?,
                 )?;
             }
             Ok(total)
@@ -3112,15 +3236,22 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
             if let Some(clip) = clip {
                 add_length(&mut total, geometry_length(clip)?)?;
             }
-            add_length(&mut total, visual_length_at_depth(visual, depth + 1)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(visual, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
-        Visual::ImageColorChange { visual, .. } => visual_length_at_depth(visual, depth + 1)?
-            .checked_add(12)
-            .ok_or(ProtocolError::SnapshotTooLarge),
-        Visual::ImageAdjustment { visual, .. } => visual_length_at_depth(visual, depth + 1)?
-            .checked_add(24)
-            .ok_or(ProtocolError::SnapshotTooLarge),
+        Visual::ImageColorChange { visual, .. } => {
+            visual_length_at_depth(visual, depth + 1, resources)?
+                .checked_add(12)
+                .ok_or(ProtocolError::SnapshotTooLarge)
+        }
+        Visual::ImageAdjustment { visual, .. } => {
+            visual_length_at_depth(visual, depth + 1, resources)?
+                .checked_add(24)
+                .ok_or(ProtocolError::SnapshotTooLarge)
+        }
         Visual::TextLayout { layout, visual } => {
             let _: u32 = layout
                 .tab_stops
@@ -3141,8 +3272,14 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                     .checked_mul(16)
                     .ok_or(ProtocolError::SnapshotTooLarge)?,
             )?;
-            add_length(&mut total, paint_length(&layout.text_paint, depth)?)?;
-            add_length(&mut total, paint_length(&layout.text_stroke_paint, depth)?)?;
+            add_length(
+                &mut total,
+                paint_length(&layout.text_paint, depth, resources)?,
+            )?;
+            add_length(
+                &mut total,
+                paint_length(&layout.text_stroke_paint, depth, resources)?,
+            )?;
             add_length(
                 &mut total,
                 layout
@@ -3165,7 +3302,10 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                     .checked_mul(104)
                     .ok_or(ProtocolError::SnapshotTooLarge)?,
             )?;
-            add_length(&mut total, visual_length_at_depth(visual, depth + 1)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(visual, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
         Visual::TextEffects { effects, visual } => {
@@ -3190,10 +3330,13 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                 }
                 if let Some(stroke) = &effect.stroke {
                     add_length(&mut total, 4)?;
-                    add_length(&mut total, paint_length(stroke, depth + 1)?)?;
+                    add_length(&mut total, paint_length(stroke, depth + 1, resources)?)?;
                 }
             }
-            add_length(&mut total, visual_length_at_depth(visual, depth + 1)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(visual, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
         Visual::StrokeStyle { style, visual } => {
@@ -3206,7 +3349,10 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                     .checked_mul(4)
                     .ok_or(ProtocolError::SnapshotTooLarge)?,
             )?;
-            add_length(&mut total, visual_length_at_depth(visual, depth + 1)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(visual, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
         Visual::AdvancedEffect {
@@ -3264,13 +3410,19 @@ fn visual_length_at_depth(visual: &Visual, depth: usize) -> Result<usize, Protoc
                     add_length(&mut total, 4)?;
                 }
             }
-            add_length(&mut total, visual_length_at_depth(visual, depth + 1)?)?;
+            add_length(
+                &mut total,
+                visual_length_at_depth(visual, depth + 1, resources)?,
+            )?;
             Ok(total)
         }
     }
 }
 
-fn encoded_length(document: &Document) -> Result<usize, ProtocolError> {
+fn encoded_length<'a>(
+    document: &'a Document,
+    resources: &mut BinaryResources<'a>,
+) -> Result<usize, ProtocolError> {
     let mut total = 12;
     let _: u32 = document
         .diagnostics
@@ -3400,7 +3552,10 @@ fn encoded_length(document: &Document) -> Result<usize, ProtocolError> {
             .map_err(|_| ProtocolError::TooManyFields)?;
         add_length(&mut total, 4)?;
         for paragraph in note_paragraphs {
-            add_length(&mut total, speaker_note_paragraph_length(paragraph)?)?;
+            add_length(
+                &mut total,
+                speaker_note_paragraph_length(paragraph, resources)?,
+            )?;
         }
         add_length(&mut total, 8)?;
         if unit.sheet.is_some() && unit.kind != crate::model::UnitKind::Sheet {
@@ -3495,7 +3650,7 @@ fn encoded_length(document: &Document) -> Result<usize, ProtocolError> {
         }
         add_length(&mut total, 8)?;
         add_length(&mut total, string_length(&font.family)?)?;
-        add_length(&mut total, byte_array_length(&font.bytes)?)?;
+        add_length(&mut total, byte_array_length(&font.bytes, resources)?)?;
     }
 
     add_length(&mut total, 4)?;
@@ -3532,14 +3687,17 @@ fn encoded_length(document: &Document) -> Result<usize, ProtocolError> {
         add_length(&mut total, optional_string_length(object.text.as_deref())?)?;
         add_length(&mut total, string_length(&object.source.part)?)?;
         add_length(&mut total, source_length(&object.source.locator)?)?;
-        add_length(&mut total, visual_length(&object.visual)?)?;
+        add_length(&mut total, visual_length(&object.visual, resources)?)?;
     }
     Ok(total)
 }
 
 pub fn encode(document: &Document) -> Result<Vec<u8>, ProtocolError> {
-    let expected_length = encoded_length(document)?;
+    let mut resources = BinaryResources::default();
+    let expected_length = encoded_length(document, &mut resources)?;
+    resources.restart_wire_order();
     let mut writer = Writer::new(expected_length)?;
+    writer.resources = resources;
     writer.u32(MAGIC);
     writer.u16(VERSION);
     writer.u8(u8::from(document.fatal));
@@ -3761,13 +3919,136 @@ pub fn encode(document: &Document) -> Result<Vec<u8>, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Writer, visual_length, write_visual};
+    use super::{BinaryResources, Writer, visual_length, write_visual};
     use crate::model::{
         AffineTransform, FillRule, Geometry, GradientSpread, GradientStop, ImageCrop, MediaKind,
         Paint, PathCommand, Rect, Shadow, StretchMode, TextAlign, TextAutoFit, TextDirection,
         TextLayout, TextOrientation, TextRun, TextVerticalAlign, TileMode, Visual,
         VisualBrushChild, XpsColor, XpsGradientStop,
     };
+
+    #[test]
+    fn binary_resource_word_comparison_checks_unaligned_bytes_and_tail() {
+        for offset in 0..8 {
+            for length in 0..40 {
+                let bytes = vec![7; offset + length];
+                let mut other = bytes.clone();
+                let key = super::BinaryResource(&bytes[offset..]);
+                assert!(key == super::BinaryResource(&other[offset..]));
+                for position in offset..offset + length {
+                    other[position] = 8;
+                    assert!(key != super::BinaryResource(&other[offset..]));
+                    other[position] = 7;
+                }
+                assert!(key != super::BinaryResource(&vec![7; length + 1]));
+            }
+        }
+    }
+
+    #[test]
+    fn binary_preflight_is_reused_without_rehashing_or_reusing_wire_order() {
+        let bytes = vec![7; 4097];
+        let clone = bytes.clone();
+        let different = vec![8; bytes.len()];
+        let fields = [&bytes[..], &clone[..], &different[..], &bytes[..4096]];
+        let mut resources = BinaryResources::default();
+        let expected: usize = fields
+            .iter()
+            .map(|bytes| super::byte_array_length(bytes, &mut resources).unwrap())
+            .sum();
+        assert_eq!(resources.indices.len(), 3);
+        resources.restart_wire_order();
+        // The immutable slices were classified during preflight. Writing them
+        // needs no content lookup, even with equal bytes in separate allocations.
+        resources.indices.clear();
+        let mut writer = Writer::new(expected).unwrap();
+        writer.resources = resources;
+        let mut fresh = Writer::new(expected).unwrap();
+        for bytes in fields.into_iter().rev() {
+            writer.byte_array(bytes).unwrap();
+            fresh.byte_array(bytes).unwrap();
+        }
+        assert!(writer.resources.indices.is_empty());
+        assert!(!writer.overflowed);
+        assert_eq!(writer.bytes, fresh.bytes);
+    }
+
+    #[test]
+    fn repeated_binary_payload_is_transferred_once() {
+        let bytes = vec![42; 5_732_078];
+        let clone = bytes.clone();
+        let mut writer = Writer::new(bytes.len() + 4 + 8 * 46).unwrap();
+        for index in 0..47 {
+            writer
+                .byte_array(if index % 2 == 0 { &bytes } else { &clone })
+                .unwrap();
+        }
+        assert!(
+            !writer.overflowed,
+            "47 repeated header images must fit in one image plus references"
+        );
+        assert_eq!(writer.bytes.len(), bytes.len() + 4 + 8 * 46);
+    }
+
+    #[test]
+    fn binary_resource_lengths_preserve_small_and_distinct_payloads() {
+        for size in [0, 1, 4095, 4096, 4097] {
+            let bytes = vec![7; size];
+            let clone = bytes.clone();
+            let mut different = bytes.clone();
+            if size > 0 {
+                different[size / 2] = 8;
+            }
+            let fields = [&bytes[..], &clone[..], &different[..], &bytes[..]];
+            let mut resources = BinaryResources::default();
+            let expected: usize = fields
+                .iter()
+                .map(|field| super::byte_array_length(field, &mut resources).unwrap())
+                .sum();
+            let mut writer = Writer::new(expected).unwrap();
+            for field in fields {
+                writer.byte_array(field).unwrap();
+            }
+            assert!(!writer.overflowed);
+            assert_eq!(writer.bytes.len(), expected);
+            assert_eq!(
+                expected,
+                if size < 4096 {
+                    4 * (size + 4)
+                } else {
+                    2 * (size + 4) + 16
+                }
+            );
+        }
+        let mut total = super::MAX_SNAPSHOT_BYTES;
+        assert!(matches!(
+            super::add_length(&mut total, 1),
+            Err(super::ProtocolError::SnapshotTooLarge)
+        ));
+    }
+
+    #[test]
+    fn nested_binary_resources_share_length_accounting_and_wire_references() {
+        let bytes = vec![7; 4096];
+        let visual = Visual::ColorManagedImage {
+            source_profile: bytes.clone(),
+            destination_profile: Some(bytes.clone()),
+            visual: Box::new(Visual::ImageWithFallback {
+                media_type: "image/png".to_owned(),
+                bytes: bytes.clone(),
+                fallback_media_type: "image/png".to_owned(),
+                fallback_bytes: bytes,
+                crop: ImageCrop::default(),
+            }),
+        };
+        let expected = visual_length(&visual, &mut BinaryResources::default()).unwrap();
+        assert!(expected < 4300);
+        let mut writer = Writer::new(expected).unwrap();
+        write_visual(&mut writer, &visual).unwrap();
+        assert!(!writer.overflowed);
+        assert_eq!(writer.bytes.len(), expected);
+        assert_eq!(writer.resources.indices.len(), 1);
+    }
 
     #[test]
     fn masked_image_payload_has_an_exact_validated_length() {
@@ -3782,7 +4063,8 @@ mod tests {
             alpha_mask: vec![64, 192],
             crop: ImageCrop::default(),
         };
-        let expected = visual_length(&visual).expect("masked image length");
+        let expected =
+            visual_length(&visual, &mut BinaryResources::default()).expect("masked image length");
         let mut writer = Writer::new(expected).expect("writer allocation");
         write_visual(&mut writer, &visual).expect("masked image payload");
         assert!(!writer.overflowed);
@@ -3799,7 +4081,7 @@ mod tests {
             alpha_mask: vec![255],
             crop: ImageCrop::default(),
         };
-        assert!(visual_length(&invalid).is_err());
+        assert!(visual_length(&invalid, &mut BinaryResources::default()).is_err());
     }
 
     #[test]
@@ -3838,7 +4120,8 @@ mod tests {
                 }],
             }),
         };
-        let expected = visual_length(&visual).expect("opacity-mask group length");
+        let expected = visual_length(&visual, &mut BinaryResources::default())
+            .expect("opacity-mask group length");
         let mut writer = Writer::new(expected).expect("writer allocation");
         write_visual(&mut writer, &visual).expect("opacity-mask group payload");
         assert!(!writer.overflowed);
@@ -3856,7 +4139,8 @@ mod tests {
                 crop: ImageCrop::default(),
             }),
         };
-        let expected = visual_length(&visual).expect("color-managed image length");
+        let expected = visual_length(&visual, &mut BinaryResources::default())
+            .expect("color-managed image length");
         let mut writer = Writer::new(expected).expect("writer allocation");
         write_visual(&mut writer, &visual).expect("color-managed image payload");
         assert!(!writer.overflowed);
@@ -3899,7 +4183,8 @@ mod tests {
             stroke: Paint::None,
             stroke_width: 0.0,
         };
-        let expected = visual_length(&visual).expect("XPS gradient length");
+        let expected =
+            visual_length(&visual, &mut BinaryResources::default()).expect("XPS gradient length");
         let mut writer = Writer::new(expected).expect("writer allocation");
         write_visual(&mut writer, &visual).expect("XPS gradient payload");
         assert!(!writer.overflowed);
@@ -3950,7 +4235,8 @@ mod tests {
             stroke: Paint::None,
             stroke_width: 0.0,
         };
-        let expected = visual_length(&visual).expect("visual brush length");
+        let expected =
+            visual_length(&visual, &mut BinaryResources::default()).expect("visual brush length");
         let mut writer = Writer::new(expected).expect("writer allocation");
         write_visual(&mut writer, &visual).expect("visual brush payload");
         assert!(!writer.overflowed);
@@ -4037,7 +4323,8 @@ mod tests {
         ];
 
         for visual in visuals {
-            let expected = visual_length(&visual).expect("visual length");
+            let expected =
+                visual_length(&visual, &mut BinaryResources::default()).expect("visual length");
             let mut writer = Writer::new(expected).expect("writer allocation");
             write_visual(&mut writer, &visual).expect("v4 visual payload");
             assert!(!writer.overflowed);
@@ -4053,7 +4340,8 @@ mod tests {
             blend_mode: crate::model::BlendMode::ColorDodge,
             visual: Box::new(Visual::None),
         };
-        let expected = visual_length(&visual).expect("visual length");
+        let expected =
+            visual_length(&visual, &mut BinaryResources::default()).expect("visual length");
         let mut writer = Writer::new(expected).expect("writer allocation");
         write_visual(&mut writer, &visual).expect("layer visual payload");
 
@@ -4138,7 +4426,8 @@ mod tests {
             }),
         };
 
-        let expected = visual_length(&visual).expect("visual length");
+        let expected =
+            visual_length(&visual, &mut BinaryResources::default()).expect("visual length");
         let mut writer = Writer::new(expected).expect("writer allocation");
         write_visual(&mut writer, &visual).expect("v5 visual payload");
         assert!(!writer.overflowed);
@@ -4157,7 +4446,7 @@ mod tests {
             clip: None,
             visual: Box::new(Visual::None),
         };
-        assert!(visual_length(&invalid_shadow).is_err());
+        assert!(visual_length(&invalid_shadow, &mut BinaryResources::default()).is_err());
 
         let invalid_layout = Visual::TextLayout {
             layout: TextLayout {
@@ -4166,7 +4455,7 @@ mod tests {
             },
             visual: Box::new(Visual::None),
         };
-        assert!(visual_length(&invalid_layout).is_err());
+        assert!(visual_length(&invalid_layout, &mut BinaryResources::default()).is_err());
 
         let invalid_gradient = Visual::PaintedShape {
             geometry: Geometry::Rectangle,
@@ -4185,7 +4474,7 @@ mod tests {
             stroke: Paint::None,
             stroke_width: 0.0,
         };
-        assert!(visual_length(&invalid_gradient).is_err());
+        assert!(visual_length(&invalid_gradient, &mut BinaryResources::default()).is_err());
     }
 
     #[test]
@@ -4200,7 +4489,8 @@ mod tests {
                 crop: ImageCrop::default(),
             }),
         };
-        let expected = visual_length(&visual).expect("color-change visual length");
+        let expected = visual_length(&visual, &mut BinaryResources::default())
+            .expect("color-change visual length");
         let mut writer = Writer::new(expected).expect("writer allocation");
 
         write_visual(&mut writer, &visual).expect("color-change visual payload");
@@ -4222,7 +4512,8 @@ mod tests {
             bytes: vec![0x49, 0x44, 0x33],
             poster: Box::new(Visual::None),
         };
-        let expected = visual_length(&visual).expect("media visual length");
+        let expected =
+            visual_length(&visual, &mut BinaryResources::default()).expect("media visual length");
         let mut writer = Writer::new(expected).expect("writer allocation");
 
         write_visual(&mut writer, &visual).expect("media visual payload");

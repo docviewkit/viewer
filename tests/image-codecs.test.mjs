@@ -579,3 +579,52 @@ test("rejects JP2 files whose ihdr dimensions disagree with the codestream SIZ",
     (error) => error?.code === "IMAGE_HEADER_INVALID",
   );
 });
+
+// The poster's 19 MP CMYK image materializes as this exact BMP layout.
+// Its decoded bytes must also agree with the shared DIB/ICO adapter semantics.
+function bgraBitmap(topDown = true, withFileHeader = true) {
+  const offset = withFileHeader ? 14 : 0;
+  const bytes = new Uint8Array(offset + 56 + 16);
+  const view = new DataView(bytes.buffer);
+  if (withFileHeader) { bytes.set([66, 77]); view.setUint32(2, bytes.length, true); view.setUint32(10, 70, true); }
+  view.setUint32(offset, 56, true); view.setInt32(offset + 4, 2, true); view.setInt32(offset + 8, topDown ? -2 : 2, true);
+  view.setUint16(offset + 12, 1, true); view.setUint16(offset + 14, 32, true); view.setUint32(offset + 16, 6, true);
+  [0xff0000, 0xff00, 0xff, 0xff000000].forEach((v, i) => view.setUint32(offset + 40 + i * 4, v, true));
+  bytes.set([3, 2, 1, 0, 30, 20, 10, 127, 90, 80, 70, 255, 255, 128, 0, 1], offset + 56);
+  return bytes;
+}
+
+test("poster BGRA fallback preserves BMP/DIB orientation, alpha and unusual masks", async () => {
+  const rows = [[1, 2, 3, 0, 10, 20, 30, 127], [70, 80, 90, 255, 0, 128, 255, 1]];
+  for (const fileHeader of [true, false]) {
+    for (const topDown of [true, false]) {
+      const bytes = bgraBitmap(topDown, fileHeader);
+      const output = await decodeOfficeImagePayload(codecInput(fileHeader ? "bmp" : "dib", "image/bmp", bytes));
+      assert.deepEqual([...output.data], (topDown ? rows : [...rows].reverse()).flat());
+      const offset = fileHeader ? 14 : 0;
+      const view = new DataView(bytes.buffer);
+      view.setUint32(offset + 40, 0xff, true); view.setUint32(offset + 48, 0xff0000, true);
+      const unusual = await decodeOfficeImagePayload(codecInput(fileHeader ? "bmp" : "dib", "image/bmp", bytes));
+      const expected = [...output.data];
+      for (let i = 0; i < expected.length; i += 4) [expected[i], expected[i + 2]] = [expected[i + 2], expected[i]];
+      assert.deepEqual([...unusual.data], expected);
+    }
+  }
+});
+
+test("standard BGRA ICO keeps its AND mask and all-zero-alpha fallback", async () => {
+  for (const zeroAlpha of [false, true]) {
+    const dib = bgraBitmap(true, false);
+    new DataView(dib.buffer).setInt32(8, -4, true);
+    if (zeroAlpha) for (let i = 59; i < dib.length; i += 4) dib[i] = 0;
+    const icon = new Uint8Array(22 + dib.length + 8);
+    const view = new DataView(icon.buffer);
+    view.setUint16(2, 1, true); view.setUint16(4, 1, true);
+    icon[6] = 2; icon[7] = 2;
+    view.setUint16(10, 1, true); view.setUint16(12, 32, true);
+    view.setUint32(14, dib.length + 8, true); view.setUint32(18, 22, true);
+    icon.set(dib, 22); icon[22 + dib.length + 4] = 0x40;
+    const out = await decodeOfficeImagePayload(codecInput("ico", "image/x-icon", icon));
+    assert.deepEqual([...out.data], [1,2,3,zeroAlpha?255:0,10,20,30,0,70,80,90,255,0,128,255,zeroAlpha?255:1]);
+  }
+});

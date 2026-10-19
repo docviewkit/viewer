@@ -5,6 +5,7 @@ import { identifyImage, inspectImage } from "../dist/image.js";
 import { DEFAULT_LIMITS } from "../dist/core.js";
 import { decodeOfficeImage } from "../dist/image-codec-client.js";
 import { SceneRenderer } from "../dist/render.js";
+import { byteFingerprint, bytesEqual } from "../dist/bytes.js";
 import { secureMetafileForConversion } from "../dist/metafile-safety.js";
 
 function pngHeader(width, height) {
@@ -2149,5 +2150,57 @@ test("renderer retains decoded sources across thumbnails, zoom and scene replace
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);
       else delete globalThis[name];
     }
+  }
+});
+
+test("renderer keeps different images separate when bounded fingerprints collide", async () => {
+  const canvasDescriptor = Object.getOwnPropertyDescriptor(globalThis, "OffscreenCanvas");
+  const decodeDescriptor = Object.getOwnPropertyDescriptor(globalThis, "createImageBitmap");
+  const decodes = controlledBitmapDecodes();
+  const draws = [];
+  const context = {
+    save() {}, restore() {}, scale() {}, translate() {}, fillRect() {},
+    drawImage(bitmap) { draws.push(bitmap.id); },
+  };
+  class FakeCanvas {
+    getContext() { return context; }
+    transferToImageBitmap() { return { close() {} }; }
+  }
+  Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: FakeCanvas });
+  Object.defineProperty(globalThis, "createImageBitmap", {
+    configurable: true,
+    value: () => decodes.decode(),
+  });
+  const shared = new Uint8Array(8192);
+  shared.set(pngHeader(1, 1));
+  const different = shared.slice();
+  different[101] = 42;
+  assert.equal(byteFingerprint(shared, 4096), byteFingerprint(different, 4096));
+  assert.equal(bytesEqual(shared, different), false);
+  const renderer = new SceneRenderer([
+    prefetchImageObject("docx", 1, { bytes: shared.slice() }),
+    prefetchImageObject("docx", 2, { bytes: shared.slice() }),
+    prefetchImageObject("docx", 3, { bytes: different }),
+  ], DEFAULT_LIMITS);
+  const unit = { type: "page", index: 0, id: "unit:0", name: "Page 1", width: 100, height: 100 };
+  let rendering;
+  try {
+    rendering = renderer.render(unit, { unitIndex: 0 });
+    assert.equal(decodes.pending.length, 2, "equal bytes reuse a decode; a bucket collision must decode separately");
+    decodes.pending[1].resolve({ id: "unique", width: 1, height: 1, close() {} });
+    decodes.pending[0].resolve({ id: "shared", width: 1, height: 1, close() {} });
+    const result = await rendering;
+
+    assert.deepEqual(draws, ["shared", "shared", "unique"]);
+    assert.equal(result.renderedObjectCount, 3);
+    result.bitmap.close();
+  } finally {
+    renderer.close();
+    decodes.settleRemaining();
+    await rendering?.catch(() => undefined);
+    if (canvasDescriptor) Object.defineProperty(globalThis, "OffscreenCanvas", canvasDescriptor);
+    else delete globalThis.OffscreenCanvas;
+    if (decodeDescriptor) Object.defineProperty(globalThis, "createImageBitmap", decodeDescriptor);
+    else delete globalThis.createImageBitmap;
   }
 });

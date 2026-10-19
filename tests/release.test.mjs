@@ -12,7 +12,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
+import { rustToolchain } from "../scripts/rust-toolchain.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
@@ -271,11 +272,24 @@ test("release validation rejects untracked entry points from local dependencies"
   await validateLocalDependencies(root);
 });
 
-test("Wasm builds use the project-selected Rust toolchain", async () => {
-  const source = await readFile(new URL("../scripts/build-core.mjs", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /--toolchain[",\s]+stable/u);
-  assert.match(source, /\["which", "cargo"\]/u);
-  assert.match(source, /process\.env\.CARGO/u);
+test("Wasm builds and license metadata share the selected Rust toolchain", async () => {
+  for (const script of ["build-core.mjs", "generate-third-party-notices.mjs"]) {
+    const source = await readFile(new URL(`../scripts/${script}`, import.meta.url), "utf8");
+    assert.match(source, /rustToolchain\(root\)/u);
+    assert.match(source, /env: cargoEnvironment/u);
+  }
+  const original = { CARGO: process.execPath, RUSTC: "custom-rustc", PATH: "original-path" };
+  const selected = rustToolchain(import.meta.dirname, original);
+  assert.equal(selected.cargo, original.CARGO);
+  assert.equal(selected.env.PATH, `${dirname(original.CARGO)}${delimiter}original-path`);
+  assert.equal(selected.env.RUSTC, "custom-rustc");
+  assert.equal(original.PATH, "original-path");
+  const bare = rustToolchain(import.meta.dirname, { CARGO: "custom-cargo", PATH: "original-path" });
+  assert.equal(bare.cargo, "custom-cargo");
+  assert.equal(bare.env.PATH, "original-path");
+  const fallback = rustToolchain(import.meta.dirname, { PATH: "" });
+  assert.equal(fallback.cargo, process.platform === "win32" ? "cargo.exe" : "cargo");
+  assert.equal(fallback.env.PATH, "");
 });
 
 test("local server builds optimized Wasm and rejects unused format code", async () => {
