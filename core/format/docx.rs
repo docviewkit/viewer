@@ -3568,6 +3568,34 @@ fn paragraph_alignment(value: &str) -> TextAlign {
     }
 }
 
+// Table justification has a narrower value domain than paragraph justification;
+// keep its recovery here and reuse it for style and direct table properties.
+fn parse_table_alignment(
+    attributes: &[XmlAttribute<'_>],
+    part: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Option<TextAlign>, Diagnostic> {
+    let value = optional_attribute(attributes, "val", part)?;
+    let alignment = match value.as_deref() {
+        Some("left" | "start") => Some(TextAlign::Start),
+        Some("center") => Some(TextAlign::Center),
+        Some("right" | "end") => Some(TextAlign::End),
+        _ => None,
+    };
+    if alignment.is_none() {
+        diagnostics.push(
+            Diagnostic::warning(
+                DiagnosticCode::FormatInvalid,
+                Phase::Parse,
+                Fidelity::Approximate,
+                "DOCX table alignment is missing or invalid; ignored invalid override",
+            )
+            .in_part(part),
+        );
+    }
+    Ok(alignment)
+}
+
 fn paragraph_text_orientation(value: &str) -> Option<TextOrientation> {
     match value {
         "tbRl" | "tbRlV" => Some(TextOrientation::VerticalRl),
@@ -7804,20 +7832,15 @@ fn parse_document_xml_with_styles(
                         })?;
                         current.paragraph.align = paragraph_alignment(&value);
                     }
-                    "jc"
-                        if table
-                            .last()
-                            .is_some_and(|value| value.row.is_none()) =>
-                    {
-                        let value = required_attribute(&attributes, "val", part)?;
-                        let current = table.last_mut().ok_or_else(|| {
-                            format_error(part, "DOCX table parser state is inconsistent")
-                        })?;
-                        current.table.align = match value.as_str() {
-                            "center" => TextAlign::Center,
-                            "right" | "end" => TextAlign::End,
-                            _ => TextAlign::Start,
-                        };
+                    "jc" if table.last().is_some_and(|value| value.row.is_none()) => {
+                        if let Some(alignment) =
+                            parse_table_alignment(&attributes, part, &mut diagnostics)?
+                        {
+                            let current = table.last_mut().ok_or_else(|| {
+                                format_error(part, "DOCX table parser state is inconsistent")
+                            })?;
+                            current.table.align = alignment;
+                        }
                     }
                     "framePr" if paragraph.is_some() => {
                         let drop_cap = optional_attribute(&attributes, "dropCap", part)?;
@@ -11966,16 +11989,13 @@ fn parse_styles_xml(
                         .as_ref()
                         .is_some_and(|style| style.table_properties_depth.is_some()) =>
                     {
-                        let value = required_attribute(&attributes, "val", part)?;
-                        style
-                            .as_mut()
-                            .ok_or_else(|| format_error(part, "DOCX style state is inconsistent"))?
-                            .table
-                            .align = Some(match value.as_str() {
-                            "center" => TextAlign::Center,
-                            "right" | "end" => TextAlign::End,
-                            _ => TextAlign::Start,
-                        });
+                        if let Some(alignment) =
+                            parse_table_alignment(&attributes, part, diagnostics)?
+                        {
+                            style.as_mut().ok_or_else(|| {
+                                format_error(part, "DOCX style state is inconsistent")
+                            })?.table.align = Some(alignment);
+                        }
                     }
                     "top" | "right" | "bottom" | "left"
                         if style
@@ -27069,6 +27089,100 @@ fn with_part(error: Diagnostic, part: &str) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn table_alignment_recovery_preserves_styles_and_direct_overrides() {
+        let theme = super::DocxTheme::default();
+        for (attribute, expected, warnings) in [
+            ("", TextAlign::Center, 1),
+            (r#"w:val="unknown""#, TextAlign::Center, 1),
+            (r#"w:val="left""#, TextAlign::Start, 0),
+            (r#"w:val="start""#, TextAlign::Start, 0),
+            (r#"w:val="center""#, TextAlign::Center, 0),
+            (r#"w:val="right""#, TextAlign::End, 0),
+            (r#"w:val="end""#, TextAlign::End, 0),
+        ] {
+            let xml = format!(
+                r#"<w:styles xmlns:w="w">
+              <w:style w:type="table" w:styleId="Base"><w:tblPr><w:jc w:val="center"/><w:tblCellMar><w:left w:w="108"/></w:tblCellMar></w:tblPr></w:style>
+              <w:style w:type="table" w:styleId="Child"><w:basedOn w:val="Base"/><w:tblPr><w:jc {attribute}/><w:tblCellMar><w:right w:w="216"/></w:tblCellMar></w:tblPr></w:style>
+            </w:styles>"#
+            );
+            let mut diagnostics = Vec::new();
+            let styles = super::parse_styles_xml(
+                &mut diagnostics,
+                xml.as_bytes(),
+                Limits::default(),
+                "word/styles.xml",
+                &theme,
+            )
+            .unwrap();
+            let resolved = styles.table_style_for(Some("Child"));
+            assert_eq!(resolved.table.align, Some(expected));
+            assert_eq!(
+                resolved.table.cell_margins,
+                [None, Some(14.4), None, Some(7.2)]
+            );
+            assert_eq!(diagnostics.len(), warnings);
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|d| d.location.part.as_deref() == Some("word/styles.xml")
+                        && d.severity == crate::diagnostic::Severity::Warning)
+            );
+            let xml = format!(
+                r#"<w:document xmlns:w="w"><w:body><w:tbl><w:tblPr><w:tblStyle w:val="Base"/><w:jc {attribute}/></w:tblPr><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Kept</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+            );
+            let parsed = super::parse_document_xml_with_styles(
+                xml.as_bytes(),
+                Limits::default(),
+                PART,
+                Vec::new(),
+                &styles,
+                &theme,
+            )
+            .unwrap();
+            let Block::Table(table) = &parsed.blocks[0] else {
+                panic!("table expected");
+            };
+            assert_eq!(table.align, expected);
+            let alignment_diagnostics = parsed
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message.contains("table alignment"))
+                .collect::<Vec<_>>();
+            assert_eq!(alignment_diagnostics.len(), warnings);
+            assert!(alignment_diagnostics.iter().all(|diagnostic| {
+                diagnostic.location.part.as_deref() == Some(PART)
+                    && diagnostic.severity == crate::diagnostic::Severity::Warning
+            }));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the supplied DOCX via DOCX_RECOVERY_FILE"]
+    fn supplied_nxp_docx_recovers_invalid_table_alignment() {
+        let bytes = std::fs::read(std::env::var("DOCX_RECOVERY_FILE").expect("original DOCX path"))
+            .unwrap();
+        let package = Package::open(&bytes, Limits::default()).unwrap();
+        let document = parse(&package, PART, Vec::new()).unwrap();
+        assert!(!document.units.is_empty());
+        let text = document
+            .objects
+            .iter()
+            .filter_map(|object| object.text.as_deref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for expected in ["AN13013", "EdgeLock", "Date of release: 14 September 2022"] {
+            assert!(
+                text.contains(expected),
+                "missing source content: {expected}"
+            );
+        }
+        assert!(document.diagnostics.iter().any(|diagnostic| diagnostic.code
+            == crate::diagnostic::DiagnosticCode::FormatInvalid
+            && diagnostic.location.part.as_deref() == Some("word/styles.xml")));
+    }
+
     #[test]
     fn zero_style_font_size_preserves_inheritance_and_other_properties() {
         let theme = super::DocxTheme::default();
