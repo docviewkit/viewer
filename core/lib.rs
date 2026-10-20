@@ -51,6 +51,8 @@ const ABI_ALIGNMENT: usize = 8;
 
 struct StoredDocument {
     document: Document,
+    #[cfg(feature = "native-formats")]
+    prepared_docx: Option<Arc<format::docx::PreparedDocx>>,
     #[cfg(feature = "pdf-formats")]
     lazy_pdf: Option<LazyPdf>,
     #[cfg(feature = "xps-formats")]
@@ -412,6 +414,32 @@ pub unsafe extern "C" fn ov_document_open_with_font_metrics(
     }
 }
 
+unsafe fn read_font_metrics(
+    source: Option<(*const u8, u32)>,
+    limits: Limits,
+) -> Result<font_metrics::FontMetricTable, Diagnostic> {
+    let Some((pointer, length)) = source.filter(|(_, length)| *length != 0) else {
+        return Ok(font_metrics::FontMetricTable::default());
+    };
+    let length = length as usize;
+    if !valid_allocation(pointer.cast_mut(), length, 1) {
+        return Err(invalid_input(
+            "font metric pointer is not an owned ABI allocation",
+        ));
+    }
+    if length > limits.max_font_bytes {
+        return Err(Diagnostic::fatal(
+            DiagnosticCode::FontBytesLimit,
+            Phase::Layout,
+            None,
+            "font metric table exceeds the configured font byte limit",
+        ));
+    }
+    // SAFETY: the allocation registry proves this caller-owned range is live.
+    let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
+    font_metrics::FontMetricTable::decode(bytes, limits)
+}
+
 unsafe fn open_document(
     input_pointer: *const u8,
     input_length: u32,
@@ -441,31 +469,10 @@ unsafe fn open_document(
         )));
     }
     let bytes: &[u8] = &input;
-    let metrics = match font_metrics {
-        Some((pointer, length)) if length != 0 => {
-            let length = length as usize;
-            if !valid_allocation(pointer.cast_mut(), length, 1) {
-                return store_document(Document::fatal(invalid_input(
-                    "font metric pointer is not an owned ABI allocation",
-                )));
-            }
-            if length > limits.max_font_bytes {
-                return store_document(Document::fatal(Diagnostic::fatal(
-                    DiagnosticCode::FontBytesLimit,
-                    Phase::Layout,
-                    None,
-                    "font metric table exceeds the configured font byte limit",
-                )));
-            }
-            // SAFETY: the adapter allocated at least `length` bytes and keeps
-            // the allocation alive for this synchronous call.
-            let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
-            match font_metrics::FontMetricTable::decode(bytes, limits) {
-                Ok(metrics) => metrics,
-                Err(diagnostic) => return store_document(Document::fatal(diagnostic)),
-            }
-        }
-        _ => font_metrics::FontMetricTable::default(),
+    // SAFETY: ranges are validated by the shared metric decoder before access.
+    let metrics = match unsafe { read_font_metrics(font_metrics, limits) } {
+        Ok(metrics) => metrics,
+        Err(diagnostic) => return store_document(Document::fatal(diagnostic)),
     };
     #[cfg(feature = "pdf-formats")]
     let password = match password {
@@ -491,6 +498,8 @@ unsafe fn open_document(
     {
         return store_document(document);
     }
+    #[cfg(feature = "native-formats")]
+    let mut prepared_docx = None;
     #[cfg(feature = "native-formats")]
     let mut lazy_xlsx = None;
     #[cfg(feature = "native-formats")]
@@ -552,32 +561,40 @@ unsafe fn open_document(
             return parsed;
         }
         #[cfg(feature = "native-formats")]
-        let parsed_native =
-            match format::prepare_native_retained(Arc::clone(&input), limits, &metrics) {
-                Ok(Some(format::PreparedNative::Pptx {
-                    document,
+        let parsed_native = match format::prepare_native_retained(
+            Arc::clone(&input),
+            limits,
+            &metrics,
+            field_date_time,
+        ) {
+            Ok(Some(format::PreparedNative::Pptx {
+                document,
+                loaded_units,
+                materialized_image_bytes,
+                prepared,
+            })) => {
+                lazy_pptx = Some(LazyPptx {
+                    prepared,
                     loaded_units,
                     materialized_image_bytes,
+                });
+                Some(Ok(Some(document)))
+            }
+            Ok(Some(format::PreparedNative::Docx { document, prepared })) => {
+                prepared_docx = prepared.map(Arc::new);
+                Some(Ok(Some(document)))
+            }
+            Ok(Some(format::PreparedNative::Xlsx { document, prepared })) => {
+                lazy_xlsx = Some(LazyXlsx {
                     prepared,
-                })) => {
-                    lazy_pptx = Some(LazyPptx {
-                        prepared,
-                        loaded_units,
-                        materialized_image_bytes,
-                    });
-                    Some(Ok(Some(document)))
-                }
-                Ok(Some(format::PreparedNative::Xlsx { document, prepared })) => {
-                    lazy_xlsx = Some(LazyXlsx {
-                        prepared,
-                        loaded_units: BTreeSet::new(),
-                        partial_units: BTreeMap::new(),
-                    });
-                    Some(Ok(Some(document)))
-                }
-                Ok(None) => None,
-                Err(diagnostic) => Some(Err(diagnostic)),
-            };
+                    loaded_units: BTreeSet::new(),
+                    partial_units: BTreeMap::new(),
+                });
+                Some(Ok(Some(document)))
+            }
+            Ok(None) => None,
+            Err(diagnostic) => Some(Err(diagnostic)),
+        };
         #[cfg(all(feature = "native-formats", feature = "pdf-formats"))]
         let parsed = match parsed_native {
             Some(parsed) => parsed,
@@ -660,6 +677,8 @@ unsafe fn open_document(
     };
     store_stored_document(StoredDocument {
         document,
+        #[cfg(feature = "native-formats")]
+        prepared_docx,
         #[cfg(feature = "pdf-formats")]
         lazy_pdf,
         #[cfg(feature = "xps-formats")]
@@ -687,6 +706,51 @@ fn decode_field_date_time(date: u32, time: u32) -> Option<format::FieldDateTime>
             hour,
             minute,
         })
+}
+
+/// Re-layouts a retained DOCX source without consuming or changing its handle.
+/// Returns zero when this document requires the ordinary full-parse path.
+/// A zero metric length releases the temporary source without changing the scene.
+///
+/// # Safety
+/// The metric range must be a live allocation returned by [`ov_alloc`]. It
+/// remains caller-owned, including when validation or layout fails.
+#[cfg(feature = "native-formats")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ov_document_relayout(
+    handle: u32,
+    metrics_pointer: *const u8,
+    metrics_length: u32,
+) -> u32 {
+    if metrics_length == 0 {
+        if let Ok(mut documents) = DOCUMENTS.lock()
+            && let Some(Some(stored)) = handle
+                .checked_sub(1)
+                .and_then(|index| documents.get_mut(index as usize))
+        {
+            stored.prepared_docx = None;
+        }
+        return 0;
+    }
+    let prepared = {
+        let Ok(documents) = DOCUMENTS.lock() else {
+            return 0;
+        };
+        handle
+            .checked_sub(1)
+            .and_then(|index| documents.get(index as usize))
+            .and_then(Option::as_ref)
+            .and_then(|stored| stored.prepared_docx.clone())
+    };
+    let Some(prepared) = prepared else {
+        return 0;
+    };
+    // SAFETY: ranges are validated by the shared metric decoder before access.
+    let document =
+        unsafe { read_font_metrics(Some((metrics_pointer, metrics_length)), prepared.limits()) }
+            .and_then(|metrics| prepared.materialize(&metrics))
+            .unwrap_or_else(Document::fatal);
+    store_document(document)
 }
 
 /// Serializes a document into the versioned binary snapshot buffer.
@@ -1484,6 +1548,8 @@ fn snapshot_error(error: protocol::ProtocolError) -> Diagnostic {
 fn store_document(document: Document) -> u32 {
     store_stored_document(StoredDocument {
         document,
+        #[cfg(feature = "native-formats")]
+        prepared_docx: None,
         #[cfg(feature = "pdf-formats")]
         lazy_pdf: None,
         #[cfg(feature = "xps-formats")]

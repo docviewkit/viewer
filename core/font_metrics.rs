@@ -227,6 +227,9 @@ impl FontMetricTable {
         character: char,
         font_size: f32,
     ) -> Option<f32> {
+        if self.is_empty() {
+            return None;
+        }
         let family = normalize_family(family)?;
         let mut key = FontFaceKey {
             family,

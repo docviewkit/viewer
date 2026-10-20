@@ -498,6 +498,38 @@ export class Core {
     if (handle === 0) {
       throw new OfficeEngineError("CORE_OPEN_FAILED", "The Wasm core could not allocate a document handle");
     }
+    return this.#documentFromHandle(handle);
+  }
+
+  relayout(handle: number, fontMetrics: Uint8Array): CoreDocument | undefined {
+    this.#assertOpen();
+    if (!isUint8Array(fontMetrics)) {
+      throw new OfficeEngineError("CORE_PROTOCOL_INVALID", "Font metrics must be a Uint8Array");
+    }
+    if (fontMetrics.byteLength > this.#limits.fontBytes) {
+      throw new OfficeEngineError("FONT_BYTES_LIMIT", "Font metrics exceed the document font byte limit");
+    }
+    const exports = this.#getExports();
+    const relayout = exports["ov_document_relayout"];
+    if (typeof relayout !== "function") return undefined;
+    if (fontMetrics.byteLength === 0) {
+      // Zero length finalizes layout and drops the temporary parsed source.
+      relayout(handle, 0, 0);
+      return undefined;
+    }
+    const pointer = this.#allocate(fontMetrics.byteLength);
+    let opened: number;
+    try {
+      new Uint8Array(exports.memory.buffer, pointer, fontMetrics.byteLength).set(fontMetrics);
+      opened = this.#u32(relayout(handle, pointer, fontMetrics.byteLength), "document handle");
+    } finally {
+      exports.ov_free(pointer, fontMetrics.byteLength);
+    }
+    return opened === 0 ? undefined : this.#documentFromHandle(opened);
+  }
+
+  #documentFromHandle(handle: number): CoreDocument {
+    const exports = this.#getExports();
     let scene: SceneDocument;
     try {
       scene = this.snapshot(handle);
@@ -746,6 +778,17 @@ export class CoreDocument {
     const core = this.#core;
     if (core === undefined) throw new OfficeEngineError("DOCUMENT_CLOSED", "The document is closed");
     return core.limits;
+  }
+
+  relayout(fontMetrics: Uint8Array): CoreDocument | undefined {
+    if (this.#closed || this.#core === undefined) {
+      throw new OfficeEngineError("DOCUMENT_CLOSED", "The document is closed");
+    }
+    return this.#core.relayout(this.handle, fontMetrics);
+  }
+
+  releaseLayoutSource(): void {
+    if (!this.#closed) this.#core?.relayout(this.handle, new Uint8Array());
   }
 
   requiresCalculation(): boolean {

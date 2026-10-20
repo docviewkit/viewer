@@ -305,7 +305,7 @@ async function handle(request: WorkerRequest): Promise<void> {
           additionalDiagnostics.push(...metrics.diagnostics);
           if (metrics.metricCount !== 0 && metrics.table.byteLength <= request.limits.fontBytes) {
             try {
-              const measured = core.open(input, metrics.table, password);
+              const measured = opened.relayout(metrics.table) ?? core.open(input, metrics.table, password);
               if (measured.scene.fatal || measured.scene.info === undefined) {
                 const diagnostics = measured.scene.diagnostics;
                 measured.close();
@@ -348,6 +348,7 @@ async function handle(request: WorkerRequest): Promise<void> {
             });
           }
         }
+        opened.releaseLayoutSource();
         const scene = opened.scene;
         if (scene.info === undefined) {
           throw new OfficeEngineError("INVALID_DOCUMENT", "The final document has no document information");

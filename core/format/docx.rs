@@ -729,7 +729,7 @@ impl PageSpec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SectionState {
     depth: usize,
     end_block: usize,
@@ -1898,7 +1898,7 @@ struct NumberingLabel {
     picture_id: Option<u32>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct NumberingDefinitions {
     abstract_by_number: HashMap<u32, u32>,
     levels: HashMap<(u32, u32), NumberingLevel>,
@@ -4593,7 +4593,7 @@ fn block_paragraphs_mut(blocks: &mut [Block]) -> impl Iterator<Item = &mut Parag
     })
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ParsedDocument {
     page: PageSpec,
     background: Option<super::drawingml::ChartFill>,
@@ -4846,10 +4846,20 @@ pub fn parse_with_font_metrics(
 pub(super) fn parse_with_font_metrics_at(
     package: &Package<'_>,
     main_part: &str,
-    mut diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic>,
     font_metrics: &FontMetricTable,
     field_date_time: Option<FieldDateTime>,
 ) -> Result<Document, Diagnostic> {
+    let parsed = parse_source(package, main_part, diagnostics, font_metrics)?;
+    layout_source(parsed, package, main_part, font_metrics, field_date_time)
+}
+
+fn parse_source(
+    package: &Package<'_>,
+    main_part: &str,
+    mut diagnostics: Vec<Diagnostic>,
+    font_metrics: &FontMetricTable,
+) -> Result<ParsedDocument, Diagnostic> {
     let bytes = package.required_part(main_part)?;
     let theme = resolve_docx_theme(package, main_part, &mut diagnostics)?;
     let settings = resolve_docx_settings(package, main_part, &mut diagnostics)?;
@@ -4981,6 +4991,16 @@ pub(super) fn parse_with_font_metrics_at(
         &theme,
         &mut parsed.diagnostics,
     )?;
+    Ok(parsed)
+}
+
+fn layout_source(
+    parsed: ParsedDocument,
+    package: &Package<'_>,
+    main_part: &str,
+    font_metrics: &FontMetricTable,
+    field_date_time: Option<FieldDateTime>,
+) -> Result<Document, Diagnostic> {
     let mut document = if font_metrics.is_empty() {
         layout_document_with_font_metrics_at(
             parsed,
@@ -5001,6 +5021,61 @@ pub(super) fn parse_with_font_metrics_at(
     (document.embedded_fonts, document.font_alternate_names) =
         super::embedded_font::extract_docx(package, main_part, &mut document.diagnostics);
     Ok(document)
+}
+
+// Keep the validated, resource-resolved source document-scoped. It is immutable;
+// every font-aware layout starts from an independent copy with the same field clock.
+pub(crate) struct PreparedDocx {
+    parsed: ParsedDocument,
+    bytes: std::sync::Arc<crate::RetainedInput>,
+    cache: crate::package::PackageCache,
+    limits: Limits,
+    part: String,
+    field_date_time: Option<FieldDateTime>,
+}
+
+impl PreparedDocx {
+    pub(crate) const fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    pub(crate) fn materialize(&self, metrics: &FontMetricTable) -> Result<Document, Diagnostic> {
+        let package = Package::open_with_cache(&self.bytes, self.limits, self.cache.clone())?;
+        layout_source(
+            self.parsed.clone(),
+            &package,
+            &self.part,
+            metrics,
+            self.field_date_time,
+        )
+    }
+}
+
+pub(crate) fn prepare(
+    bytes: std::sync::Arc<crate::RetainedInput>,
+    package: &Package<'_>,
+    part: &str,
+    diagnostics: Vec<Diagnostic>,
+    metrics: &FontMetricTable,
+    field_date_time: Option<FieldDateTime>,
+) -> Result<(Document, Option<PreparedDocx>), Diagnostic> {
+    let parsed = parse_source(package, part, diagnostics, metrics)?;
+    // Locked canvases resolve text geometry during resource parsing. They must
+    // keep the full measured parse until that format-specific work is deferred.
+    if !parsed.locked_canvases.is_empty() {
+        return layout_source(parsed, package, part, metrics, field_date_time)
+            .map(|doc| (doc, None));
+    }
+    let prepared = PreparedDocx {
+        parsed,
+        bytes,
+        cache: package.cache(),
+        limits: package.limits(),
+        part: part.to_owned(),
+        field_date_time,
+    };
+    let document = prepared.materialize(metrics)?;
+    Ok((document, Some(prepared)))
 }
 
 #[derive(Debug)]

@@ -1374,24 +1374,48 @@ fn zip_error(
 
 /// CRC-32/ISO-HDLC used by ZIP (reflected polynomial `0xedb88320`).
 pub fn crc32(bytes: &[u8]) -> u32 {
-    const TABLE: [u32; 256] = {
-        let mut table = [0; 256];
+    // Slicing-by-eight computes the same reflected CRC while removing the
+    // byte-to-byte dependency from the bulk of large XML and media parts.
+    const TABLE: [[u32; 256]; 8] = {
+        let mut table = [[0; 256]; 8];
         let mut index = 0;
-        while index < table.len() {
+        while index < 256 {
             let mut crc = index as u32;
             let mut bit = 0;
             while bit < 8 {
                 crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
                 bit += 1;
             }
-            table[index] = crc;
+            table[0][index] = crc;
             index += 1;
+        }
+        let mut slice = 1;
+        while slice < 8 {
+            index = 0;
+            while index < 256 {
+                let crc = table[slice - 1][index];
+                table[slice][index] = (crc >> 8) ^ table[0][(crc & 0xff) as usize];
+                index += 1;
+            }
+            slice += 1;
         }
         table
     };
     let mut crc = u32::MAX;
-    for &byte in bytes {
-        crc = (crc >> 8) ^ TABLE[((crc ^ u32::from(byte)) & 0xff) as usize];
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let low = crc ^ u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        crc = TABLE[7][(low & 0xff) as usize]
+            ^ TABLE[6][((low >> 8) & 0xff) as usize]
+            ^ TABLE[5][((low >> 16) & 0xff) as usize]
+            ^ TABLE[4][(low >> 24) as usize]
+            ^ TABLE[3][chunk[4] as usize]
+            ^ TABLE[2][chunk[5] as usize]
+            ^ TABLE[1][chunk[6] as usize]
+            ^ TABLE[0][chunk[7] as usize];
+    }
+    for &byte in chunks.remainder() {
+        crc = (crc >> 8) ^ TABLE[0][((crc ^ u32::from(byte)) & 0xff) as usize];
     }
     !crc
 }
@@ -1586,6 +1610,24 @@ mod tests {
             }
             if index < 256 || index.is_multiple_of(1024) || index + 1 == bytes.len() {
                 assert_eq!(crc32(&bytes[..=index]), !reference);
+            }
+        }
+    }
+
+    #[test]
+    fn crc_preserves_unaligned_slices_and_all_block_tails() {
+        let bytes: Vec<u8> = (0..1024)
+            .map(|index| (index * 73 + index / 7) as u8)
+            .collect();
+        for offset in 0..8 {
+            let mut reference = u32::MAX;
+            for (index, &byte) in bytes[offset..offset + 129].iter().enumerate() {
+                reference ^= u32::from(byte);
+                for _ in 0..8 {
+                    reference =
+                        (reference >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(reference & 1));
+                }
+                assert_eq!(crc32(&bytes[offset..=offset + index]), !reference);
             }
         }
     }

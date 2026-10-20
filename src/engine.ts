@@ -540,7 +540,7 @@ class InlineEngine implements OfficeEngine {
           const provisional = coreDocument;
           const relayoutPassword = encodePdfPassword(options.password);
           try {
-            const measured = core.open(input, metrics.table, relayoutPassword);
+            const measured = provisional.relayout(metrics.table) ?? core.open(input, metrics.table, relayoutPassword);
             if (measured.scene.fatal || measured.scene.info === undefined) {
               const diagnostics = measured.scene.diagnostics;
               measured.close();
@@ -588,6 +588,7 @@ class InlineEngine implements OfficeEngine {
       }
       throwIfAborted(options.signal);
       this.#assertOpen();
+      coreDocument.releaseLayoutSource();
     } catch (cause) {
       preflightFonts?.close();
       registeredFonts?.close();
