@@ -546,12 +546,8 @@ impl<'a> Parser<'a> {
                 })?;
             self.cursor += 1;
             let value_start = self.cursor;
-            let relative_end = self
-                .remaining()
-                .as_bytes()
-                .iter()
-                .position(|byte| *byte == quote)
-                .ok_or_else(|| {
+            let relative_end =
+                memchr::memchr(quote, self.remaining().as_bytes()).ok_or_else(|| {
                     self.error(
                         DiagnosticCode::XmlInvalid,
                         "unterminated XML attribute value",
@@ -670,6 +666,22 @@ impl<'a> Parser<'a> {
 
     fn parse_name(&mut self) -> Result<&'a str, Diagnostic> {
         let start = self.cursor;
+        // Most Office XML names are ASCII. Validate that prefix while finding
+        // its end, avoiding a second UTF-8 walk and per-character predicates.
+        if self
+            .text
+            .as_bytes()
+            .get(self.cursor)
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b':' | b'_'))
+        {
+            self.cursor += 1;
+            while self.text.as_bytes().get(self.cursor).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-' | b'.')
+            }) {
+                self.cursor += 1;
+            }
+        }
+        let ascii_end = self.cursor;
         while let Some(&byte) = self.text.as_bytes().get(self.cursor) {
             if byte.is_ascii_whitespace()
                 || matches!(byte, b'/' | b'>' | b'=' | b'?' | b'\'' | b'"' | b'<')
@@ -679,11 +691,16 @@ impl<'a> Parser<'a> {
             self.cursor += 1;
         }
         let name = &self.text[start..self.cursor];
-        validate_name(
-            name,
-            self.limits.max_xml_name_bytes,
-            self.source_offset + start,
-        )?;
+        if ascii_end == start
+            || ascii_end != self.cursor
+            || name.len() > self.limits.max_xml_name_bytes
+        {
+            validate_name(
+                name,
+                self.limits.max_xml_name_bytes,
+                self.source_offset + start,
+            )?;
+        }
         Ok(name)
     }
 
@@ -759,13 +776,12 @@ fn validate_xml_chars(value: &str, base_offset: usize) -> Result<(), Diagnostic>
 }
 
 fn validate_entity_references(value: &str, base_offset: usize) -> Result<(), Diagnostic> {
-    let bytes = value.as_bytes();
     let mut cursor = 0;
-    while cursor < bytes.len() {
-        if bytes[cursor] != b'&' {
-            cursor += 1;
-            continue;
-        }
+    while cursor < value.len() {
+        let Some(relative) = memchr::memchr(b'&', &value.as_bytes()[cursor..]) else {
+            break;
+        };
+        cursor += relative;
         let end = value[cursor + 1..]
             .find(';')
             .map(|relative| cursor + 1 + relative)
@@ -844,7 +860,7 @@ pub fn decode_xml_text(value: &str) -> Result<Cow<'_, str>, Diagnostic> {
         )
     })?;
     let mut cursor = 0;
-    while let Some(relative) = value[cursor..].find('&') {
+    while let Some(relative) = memchr::memchr(b'&', &value.as_bytes()[cursor..]) {
         let start = cursor + relative;
         output.push_str(&value[cursor..start]);
         let end = value[start + 1..]
@@ -998,6 +1014,78 @@ mod tests {
             "<office:document xmlns:office=\"urn:o\"><text:p>中文 Ω</text:p></office:document>";
         validate_xml(odf.as_bytes(), Limits::default()).unwrap();
         assert_eq!(decode_xml_text("A &amp; &#x3a9;").unwrap(), "A & Ω");
+    }
+
+    #[test]
+    fn ascii_name_scan_matches_unicode_validation_and_length_limits() {
+        for code in 0_u8..=127 {
+            if code.is_ascii_whitespace()
+                || matches!(code, b'/' | b'>' | b'=' | b'?' | b'\'' | b'"' | b'<')
+            {
+                continue;
+            }
+            for name in [
+                format!("{}name", char::from(code)),
+                format!("name{}", char::from(code)),
+            ] {
+                let expected = super::validate_name(&name, 1024, 0).is_ok();
+                let xml = format!("<{name}/>");
+                assert_eq!(
+                    validate_xml(xml.as_bytes(), Limits::default()).is_ok(),
+                    expected,
+                    "{name:?}"
+                );
+            }
+        }
+        for name in ["中:文", "asciié", "a·b", "éASCII"] {
+            let xml = format!("<{name} {name}='value'></{name}>");
+            validate_xml(xml.as_bytes(), Limits::default()).unwrap();
+        }
+        let limits = Limits {
+            max_xml_name_bytes: 4,
+            ..Limits::default()
+        };
+        validate_xml(b"<abcd/>", limits).unwrap();
+        assert_eq!(
+            validate_xml(b"<abcde/>", limits).unwrap_err().code,
+            DiagnosticCode::XmlInvalid
+        );
+    }
+
+    #[test]
+    fn long_attributes_preserve_quotes_entities_and_error_offsets() {
+        for quote in ['\'', '"'] {
+            let value = format!("{}中&amp;é&#x1f600;", "M 0 0 L 1 1 ".repeat(4096));
+            let xml = format!("<a path={quote}{value}{quote}/>");
+            parse_xml(xml.as_bytes(), Limits::default(), |event| {
+                if let XmlEvent::StartElement { attributes, .. } = event {
+                    assert_eq!(attributes[0].value, value);
+                    assert!(decode_xml_text(attributes[0].value)?.ends_with("中&é😀"));
+                }
+                Ok(())
+            })
+            .unwrap();
+            for suffix in ["&unknown;", "&unterminated", "&#0;", "&#x110000;"] {
+                let xml = format!("<a path={quote}{value}{suffix}{quote}/>");
+                let error = validate_xml(xml.as_bytes(), Limits::default()).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    if suffix == "&#0;" {
+                        DiagnosticCode::XmlInvalid
+                    } else {
+                        DiagnosticCode::XmlEntityForbidden
+                    }
+                );
+                assert_eq!(error.location.byte_offset, Some(9 + value.len()));
+            }
+            let xml = format!("<a path={quote}{value}");
+            assert_eq!(
+                validate_xml(xml.as_bytes(), Limits::default())
+                    .unwrap_err()
+                    .code,
+                DiagnosticCode::XmlInvalid
+            );
+        }
     }
 
     #[test]
