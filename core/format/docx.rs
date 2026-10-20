@@ -14926,7 +14926,8 @@ struct Layout<'a> {
     page_has_content: bool,
     previous_paragraph_after: f32,
     previous_paragraph_style_id: Option<String>,
-    frame_offsets: HashMap<(u32, u32, u32), f32>,
+    // Natural and adjusted stack heights keep page-edge fallback independent of prior avoidance.
+    frame_offsets: HashMap<(u32, u32, u32), (f32, f32)>,
     floating_wrap_regions: Vec<Rect>,
     pending_drop_cap: Option<Paragraph>,
     layout_clamp_reported: bool,
@@ -17971,13 +17972,71 @@ impl Layout<'_> {
                 .ok_or_else(|| format_error(&self.part, "DOCX paragraph frame is missing"))?;
             let frame_y = frame.y_from(self.cursor_y);
             let frame_key = (frame.x.to_bits(), frame_y.to_bits(), frame.width.to_bits());
-            let frame_offset = if paragraph.suppress_overlap {
-                self.frame_offsets.get(&frame_key).copied().unwrap_or(0.0)
+            let mut frame_offset = if paragraph.suppress_overlap {
+                self.frame_offsets
+                    .get(&frame_key)
+                    .map(|offsets| offsets.1)
+                    .unwrap_or(0.0)
             } else {
                 0.0
             };
-            let y = frame_y + frame_offset + paragraph.before;
             let height = (lines as f32 * line_height).max(line_height);
+            let mut y = frame_y + frame_offset + paragraph.before;
+            let natural_offset = if paragraph.suppress_overlap {
+                self.frame_offsets
+                    .get(&frame_key)
+                    .map(|offsets| offsets.0)
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let unadjusted_y = frame_y + natural_offset + paragraph.before;
+            if paragraph.suppress_overlap {
+                // Frames with different anchors or widths can still collide after
+                // font fallback adds a line. Keep same-frame stacking, and avoid
+                // prior frame groups in their vertical order.
+                let fallback_width = self.column_width();
+                let width = if frame.width > 0.0 {
+                    frame.width
+                } else {
+                    fallback_width
+                };
+                let mut occupied = self
+                    .frame_offsets
+                    .iter()
+                    .map(|(&(x, y, width), &(_, height))| Rect {
+                        x: f32::from_bits(x),
+                        y: f32::from_bits(y),
+                        width: if f32::from_bits(width) > 0.0 {
+                            f32::from_bits(width)
+                        } else {
+                            fallback_width
+                        },
+                        height,
+                    })
+                    .collect::<Vec<_>>();
+                occupied.sort_unstable_by(|left, right| left.y.total_cmp(&right.y));
+                for previous in occupied {
+                    if (Rect {
+                        x: frame.x,
+                        y,
+                        width,
+                        height,
+                    })
+                    .overlaps(previous)
+                    {
+                        y = previous.y + previous.height;
+                    }
+                }
+                if y > unadjusted_y && y + height > self.page.height {
+                    y = unadjusted_y;
+                    self.diagnostics.push(Diagnostic::warning(
+                        DiagnosticCode::ApproximateLayout, Phase::Layout, Fidelity::Approximate,
+                        "DOCX frame overlap cannot be avoided within its page; kept the original position",
+                    ).in_part(self.part.clone()));
+                }
+                frame_offset = y - frame_y - paragraph.before;
+            }
             self.push_paragraph_object(
                 &paragraph,
                 paragraph.text.clone(),
@@ -18027,7 +18086,10 @@ impl Layout<'_> {
             if paragraph.suppress_overlap {
                 self.frame_offsets.insert(
                     frame_key,
-                    frame_offset + paragraph.before + height + paragraph.after,
+                    (
+                        natural_offset + paragraph.before + height + paragraph.after,
+                        frame_offset + paragraph.before + height + paragraph.after,
+                    ),
                 );
             }
             self.push_paragraph_drawings(&paragraph)?;
@@ -27160,6 +27222,43 @@ mod tests {
 
     #[test]
     #[ignore = "requires the supplied DOCX via DOCX_RECOVERY_FILE"]
+    fn supplied_nxp_frames_keep_wrapped_title_clear_of_revision() {
+        let bytes = std::fs::read(std::env::var("DOCX_RECOVERY_FILE").expect("original DOCX path"))
+            .unwrap();
+        let package = Package::open(&bytes, Limits::default()).unwrap();
+        let document = parse(&package, PART, Vec::new()).unwrap();
+        let title = document
+            .objects
+            .iter()
+            .find(|object| {
+                object.unit_index == 0
+                    && object
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.starts_with("Get started with"))
+            })
+            .unwrap();
+        let revision = document
+            .objects
+            .iter()
+            .find(|object| {
+                object.unit_index == 0
+                    && object
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.starts_with("Rev."))
+            })
+            .unwrap();
+        assert!(
+            revision.bounds.y >= title.bounds.y + title.bounds.height,
+            "wrapped title overlaps revision: {:?} vs {:?}",
+            title.bounds,
+            revision.bounds
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the supplied DOCX via DOCX_RECOVERY_FILE"]
     fn supplied_nxp_docx_recovers_invalid_table_alignment() {
         let bytes = std::fs::read(std::env::var("DOCX_RECOVERY_FILE").expect("original DOCX path"))
             .unwrap();
@@ -30845,6 +30944,121 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn fixed_frames_avoid_overlapping_groups_with_different_anchors_and_widths() {
+        let xml = br#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="1500" w:w="3000"/></w:pPr><w:r><w:t>First</w:t><w:br/><w:t>Second line</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="1650" w:w="1500"/></w:pPr><w:r><w:t>Following frame</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="1800" w:w="3000"/></w:pPr><w:r><w:t>Chained frame</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="4500" w:y="1650" w:w="1500"/></w:pPr><w:r><w:t>Side frame</w:t></w:r></w:p>
+          <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0"/></w:sectPr>
+        </w:body></w:document>"#;
+        let document = layout_document(
+            parse_document_xml(xml, Limits::default(), PART, Vec::new()).unwrap(),
+            Limits::default(),
+            PART,
+        )
+        .unwrap();
+        let frames = document
+            .objects
+            .iter()
+            .filter(|object| object.kind == ObjectKind::Paragraph)
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 4);
+        assert!(frames[1].bounds.y >= frames[0].bounds.y + frames[0].bounds.height);
+        assert!(frames[2].bounds.y >= frames[1].bounds.y + frames[1].bounds.height);
+        assert_eq!(frames[3].bounds.y, 110.0);
+    }
+
+    #[test]
+    fn fixed_frame_avoidance_preserves_content_when_page_has_no_room() {
+        let xml = br#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="1050" w:w="3000"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="1200" w:w="1500"/></w:pPr><w:r><w:t>Kept</w:t></w:r></w:p>
+          <w:sectPr><w:pgSz w:w="6000" w:h="1500"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0"/></w:sectPr>
+        </w:body></w:document>"#;
+        let document = layout_document(
+            parse_document_xml(xml, Limits::default(), PART, Vec::new()).unwrap(),
+            Limits::default(),
+            PART,
+        )
+        .unwrap();
+        let kept = document
+            .objects
+            .iter()
+            .find(|object| object.text.as_deref() == Some("Kept"))
+            .unwrap();
+        assert_eq!(kept.bounds.y, 80.0);
+        assert!(kept.bounds.y + kept.bounds.height <= document.units[0].height);
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("frame overlap cannot be avoided"))
+        );
+    }
+
+    #[test]
+    fn fixed_frame_avoidance_retains_a_partially_visible_frame() {
+        let xml = br#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="1050" w:w="3000"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="1200" w:w="1500"/></w:pPr><w:r><w:t>Kept</w:t><w:br/><w:t>Partial</w:t></w:r></w:p>
+          <w:sectPr><w:pgSz w:w="6000" w:h="1500"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0"/></w:sectPr>
+        </w:body></w:document>"#;
+        let document = layout_document(
+            parse_document_xml(xml, Limits::default(), PART, Vec::new()).unwrap(),
+            Limits::default(),
+            PART,
+        )
+        .unwrap();
+        let kept = document
+            .objects
+            .iter()
+            .find(|object| {
+                object
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("Kept"))
+            })
+            .unwrap();
+        assert_eq!(kept.bounds.y, 80.0);
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("frame overlap cannot be avoided"))
+        );
+    }
+
+    #[test]
+    fn fixed_frame_page_fallback_does_not_accumulate_prior_avoidance() {
+        let xml = br#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="600" w:w="3000"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="750" w:w="1500"/></w:pPr><w:r><w:t>Moved</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="750" w:w="1500"/></w:pPr><w:r><w:t>Next</w:t></w:r></w:p>
+          <w:p><w:pPr><w:framePr w:x="0" w:y="750" w:w="1500"/></w:pPr><w:r><w:t>Partial</w:t></w:r></w:p>
+          <w:sectPr><w:pgSz w:w="6000" w:h="1500"/><w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0"/></w:sectPr>
+        </w:body></w:document>"#;
+        let document = layout_document(
+            parse_document_xml(xml, Limits::default(), PART, Vec::new()).unwrap(),
+            Limits::default(),
+            PART,
+        )
+        .unwrap();
+        let partial = document
+            .objects
+            .iter()
+            .find(|object| object.text.as_deref() == Some("Partial"))
+            .unwrap();
+        assert!(partial.bounds.y < document.units[0].height);
+        let moved = document
+            .objects
+            .iter()
+            .find(|object| object.text.as_deref() == Some("Moved"))
+            .unwrap();
+        assert!(moved.bounds.y > 50.0);
     }
 
     #[test]
