@@ -2,7 +2,7 @@
 // including file read, parsing, font loading, layout and the first visible paint.
 // node scripts/test-viewer-open-performance.mjs --output report.json <file>...
 //   [--dist directory] [--baseline report.json] [--samples 3] [--budget-ms 2000]
-//   [--all-pages] [--inline] [--reference-wasm file --max-reference-ratio 0.9]
+//   [--all-pages] [--inline] [--reference-wasm file | --reference-dist directory] [--max-reference-ratio 0.9]
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -11,7 +11,7 @@ import { resolve, dirname, basename, extname, sep } from "node:path";
 import { chromium, webkit } from "playwright-core";
 
 const options = { dist: "dist", samples: 3, budgetMs: 2000, webkitTolerance: 0, maxReferenceRatio: 0.9, inputs: [] };
-const keys = { "--dist": "dist", "--reference-wasm": "referenceWasm", "--max-reference-ratio": "maxReferenceRatio", "--output": "output", "--baseline": "baseline", "--samples": "samples", "--budget-ms": "budgetMs", "--webkit-channel-tolerance": "webkitTolerance" };
+const keys = { "--dist": "dist", "--reference-wasm": "referenceWasm", "--reference-dist": "referenceDist", "--max-reference-ratio": "maxReferenceRatio", "--output": "output", "--baseline": "baseline", "--samples": "samples", "--budget-ms": "budgetMs", "--webkit-channel-tolerance": "webkitTolerance" };
 for (let i = 2; i < process.argv.length; i++) {
   const value = process.argv[i];
   if (value === "--all-pages") options.allPages = true;
@@ -27,14 +27,18 @@ assert.ok(Number.isInteger(options.samples) && options.samples > 0 && options.sa
 assert.ok(Number.isFinite(options.budgetMs) && options.budgetMs > 0);
 const root = resolve("."), dist = resolve(options.dist), output = resolve(options.output);
 await mkdir(dirname(output), { recursive: true });
-const referenceWasmSha256 = options.referenceWasm
-  ? createHash("sha256").update(await readFile(options.referenceWasm)).digest("hex") : undefined;
+assert.ok(!(options.referenceWasm && options.referenceDist), "Choose one reference runtime");
+const referenceCore = options.referenceWasm ?? (options.referenceDist ? resolve(options.referenceDist, "office-viewer-core.wasm") : undefined);
+const referenceWasmSha256 = referenceCore
+  ? createHash("sha256").update(await readFile(referenceCore)).digest("hex") : undefined;
 const baseline = options.baseline ? JSON.parse(await readFile(options.baseline, "utf8")) : undefined;
 const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
-    const base = pathname.startsWith("/dist/") ? dist : root;
-    const path = resolve(base, "." + (base === dist ? pathname.slice(5) : pathname));
+    const selectedDist = options.referenceDist && request.headers["x-office-viewer-reference"] === "true"
+      ? resolve(options.referenceDist) : dist;
+    const base = pathname.startsWith("/dist/") ? selectedDist : root;
+    const path = resolve(base, "." + (base === selectedDist ? pathname.slice(5) : pathname));
     assert.ok(path.startsWith(base + sep));
     response.setHeader("Content-Type", ({ ".js": "text/javascript", ".html": "text/html", ".wasm": "application/wasm" })[extname(path)] ?? "application/octet-stream");
     const data = await readFile(path);
@@ -50,15 +54,16 @@ try {
     const browser = await type.launch({ headless: true });
     try {
       for (const path of options.inputs) {
-        const result = { browser: browserName, file: basename(path), sha256: createHash("sha256").update(await readFile(path)).digest("hex"), samples: [], pages: [], pixelDifferences: [], errors: [], ...(options.referenceWasm ? { referenceSamples: [] } : {}) };
-        const variants = options.referenceWasm ? 2 : 1;
+        const result = { browser: browserName, file: basename(path), sha256: createHash("sha256").update(await readFile(path)).digest("hex"), samples: [], pages: [], pixelDifferences: [], errors: [], ...(referenceCore ? { referenceSamples: [] } : {}) };
+        const variants = referenceCore ? 2 : 1;
         for (let attempt = 0; attempt < options.samples * variants; attempt++) {
           const sample = Math.floor(attempt / variants);
           // Alternate order to compare the same original file under the same load.
           const reference = variants === 2 && sample % 2 === attempt % 2;
           const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
           try {
-            if (reference) await page.route("**/dist/office-viewer-core.wasm", route => route.fulfill({ path: resolve(options.referenceWasm), contentType: "application/wasm" }));
+            if (reference && options.referenceDist) await page.setExtraHTTPHeaders({ "x-office-viewer-reference": "true" });
+            else if (reference) await page.route("**/dist/office-viewer-core.wasm", route => route.fulfill({ path: resolve(referenceCore), contentType: "application/wasm" }));
             page.on("pageerror", error => result.errors.push(error.message));
             page.on("console", message => { if (message.type() === "error") result.errors.push(message.text()); });
             await page.goto(`http://127.0.0.1:${server.address().port}/examples/viewer.html?filePicker=true`);
@@ -121,7 +126,7 @@ try {
             }
           } finally { await page.close(); }
         }
-        if (options.referenceWasm) {
+        if (referenceCore) {
           result.referenceMedianMs = result.referenceSamples.map(value => value.paintMs).sort((a, b) => a - b)[Math.floor(options.samples / 2)];
         }
         result.medianMs = result.samples.map(value => value.paintMs).sort((a, b) => a - b)[Math.floor(options.samples / 2)];
@@ -132,11 +137,11 @@ try {
   }
 } finally {
   server.close();
-  await writeFile(output, JSON.stringify({ measurement: "local file selection to first visible Viewer paint", viewport: [1440, 1000], webkitChannelTolerance: Number(options.webkitTolerance), execution: options.inline ? "inline" : "auto", ...(referenceWasmSha256 ? { referenceWasmSha256, maxReferenceRatio: options.maxReferenceRatio } : {}), results }, null, 2) + "\n");
+  await writeFile(output, JSON.stringify({ measurement: "local file selection to first visible Viewer paint", viewport: [1440, 1000], budgetMs: options.budgetMs, webkitChannelTolerance: Number(options.webkitTolerance), execution: options.inline ? "inline" : "auto", ...(referenceWasmSha256 ? { referenceWasmSha256, ...(options.referenceDist ? { referenceDist: resolve(options.referenceDist) } : {}), maxReferenceRatio: options.maxReferenceRatio } : {}), results }, null, 2) + "\n");
 }
 for (const result of results) {
   assert.deepEqual(result.errors, [], `${result.browser}/${result.file} browser errors`);
-  if (options.referenceWasm) assert.ok(result.medianMs <= result.referenceMedianMs * options.maxReferenceRatio,
+  if (referenceCore) assert.ok(result.medianMs <= result.referenceMedianMs * options.maxReferenceRatio,
     `${result.browser}/${result.file}: ${result.medianMs.toFixed(1)}ms must be <= ${options.maxReferenceRatio} × reference ${result.referenceMedianMs.toFixed(1)}ms`);
 }
 if (options.baseline) {

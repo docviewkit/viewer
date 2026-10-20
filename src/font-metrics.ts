@@ -313,8 +313,12 @@ function addText(
     demands.set(key, demand);
   }
   for (const segment of fontFallbackTextSegments(text)) {
-    const segmentCodePoints = [...new Set([...segment.text].map((scalar) => scalar.codePointAt(0)!))]
-      .filter(isScalarValue);
+    const uniqueCodePoints = new Set<number>();
+    for (const scalar of segment.text) {
+      const codePoint = scalar.codePointAt(0)!;
+      if (isScalarValue(codePoint)) uniqueCodePoints.add(codePoint);
+    }
+    const segmentCodePoints = [...uniqueCodePoints];
     const resolved = resolveFace(authoredFace, resolver, segmentCodePoints);
     const compatibleFamily = resolved.fallback ? compatibleFallbackFamily(format, authoredFace.family) : undefined;
     const measuredFace = compatibleFamily === undefined ? resolved

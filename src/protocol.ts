@@ -108,6 +108,7 @@ class Reader {
   readonly #imageMasks = new Map<number, NonNullable<Extract<SceneVisual, { kind: "image" }>["alphaMask"]>>();
   binaryReferences: Uint8Array[] | undefined;
   #offset = 0;
+  #decoder: TextDecoder | undefined;
 
   constructor(bytes: Uint8Array) {
     this.#bytes = bytes;
@@ -244,7 +245,8 @@ class Reader {
 
   #decodeString(length: number): string {
     try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(
+      this.#decoder ??= new TextDecoder("utf-8", { fatal: true });
+      return this.#decoder.decode(
         this.#bytes.subarray(this.#offset, this.#offset + length),
       );
     } catch (cause) {

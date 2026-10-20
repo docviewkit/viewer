@@ -21,7 +21,6 @@ const UNKNOWN_LINE_GAP_FLAG: u16 = 2;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct FontFaceKey {
-    family: String,
     style: u8,
     weight: u16,
     stretch: u8,
@@ -32,7 +31,9 @@ struct FontFaceKey {
 /// to the format adapter's bounded approximation.
 #[derive(Clone, Debug, Default)]
 pub struct FontMetricTable {
-    faces: HashMap<FontFaceKey, FontFaceMetrics>,
+    families: HashMap<String, usize>,
+    authored_families: HashMap<String, usize>,
+    faces: Vec<HashMap<FontFaceKey, FontFaceMetrics>>,
     metric_count: usize,
 }
 
@@ -85,7 +86,15 @@ impl FontMetricTable {
             return Err(invalid("font metric table length is inconsistent"));
         }
 
-        let mut faces = HashMap::new();
+        let mut families = HashMap::new();
+        let mut authored_families = HashMap::new();
+        let mut faces: Vec<HashMap<FontFaceKey, FontFaceMetrics>> = Vec::new();
+        families
+            .try_reserve(face_count)
+            .map_err(|_| allocation_failed())?;
+        authored_families
+            .try_reserve(face_count)
+            .map_err(|_| allocation_failed())?;
         faces
             .try_reserve(face_count)
             .map_err(|_| allocation_failed())?;
@@ -153,10 +162,10 @@ impl FontMetricTable {
             if family_end > metrics_offset {
                 return Err(invalid("font metric family is truncated"));
             }
-            let family = core::str::from_utf8(&bytes[record_end..family_end])
+            let authored_family = core::str::from_utf8(&bytes[record_end..family_end])
                 .map_err(|_| invalid("font metric family is not valid UTF-8"))?;
-            let family =
-                normalize_family(family).ok_or_else(|| invalid("font metric family is invalid"))?;
+            let family = normalize_family(authored_family)
+                .ok_or_else(|| invalid("font metric family is invalid"))?;
             let metric_end = metric_start
                 .checked_add(face_metric_count)
                 .ok_or_else(|| invalid("font metric range overflow"))?;
@@ -182,8 +191,12 @@ impl FontMetricTable {
                 advances.insert(code_point, advance_em);
                 previous_code_point = Some(code_point);
             }
+            let family_index = *families.entry(family).or_insert_with(|| {
+                faces.push(HashMap::new());
+                faces.len() - 1
+            });
+            authored_families.insert(authored_family.to_owned(), family_index);
             let key = FontFaceKey {
-                family,
                 style,
                 weight,
                 stretch,
@@ -193,7 +206,7 @@ impl FontMetricTable {
                     font_size.to_bits()
                 },
             };
-            if faces
+            if faces[family_index]
                 .insert(
                     key,
                     FontFaceMetrics {
@@ -214,6 +227,8 @@ impl FontMetricTable {
             return Err(invalid("font metric table contains unreferenced data"));
         }
         Ok(Self {
+            families,
+            authored_families,
             faces,
             metric_count,
         })
@@ -230,9 +245,8 @@ impl FontMetricTable {
         if self.is_empty() {
             return None;
         }
-        let family = normalize_family(family)?;
+        let faces = self.family_faces(family)?;
         let mut key = FontFaceKey {
-            family,
             style: u8::from(italic),
             weight: if bold { 700 } else { 400 },
             stretch: NORMAL_STRETCH,
@@ -242,14 +256,13 @@ impl FontMetricTable {
                 0
             },
         };
-        let sized = self
-            .faces
+        let sized = faces
             .get(&key)
             .and_then(|metrics| metrics.advances.get(&(character as u32)))
             .copied();
         sized.or_else(|| {
             key.size_bits = 0;
-            self.faces
+            faces
                 .get(&key)
                 .and_then(|metrics| metrics.advances.get(&(character as u32)))
                 .copied()
@@ -265,20 +278,22 @@ impl FontMetricTable {
     ) -> Option<f32> {
         let family = normalize_family(family)?;
         let key = FontFaceKey {
-            family,
             style: u8::from(italic),
             weight: if bold { 700 } else { 400 },
             stretch: NORMAL_STRETCH,
             size_bits: 0,
         };
-        let metrics = self.faces.get(&key);
+        let metrics = self
+            .families
+            .get(&family)
+            .and_then(|index| self.faces[*index].get(&key));
         // STZhongsong's hhea ascent/descent (1007/318) plus OS/2 line gap
         // (144), in 1000 units/em. Substitute fonts lose this extra leading.
         // Preserve authored line geometry without shipping the font itself;
         // an exact measured face still takes precedence.
         if !italic
             && !bold
-            && matches!(key.family.as_str(), "华文中宋" | "stzhongsong")
+            && matches!(family.as_str(), "华文中宋" | "stzhongsong")
             && metrics.is_none_or(|metrics| {
                 metrics.fallback || metrics.line_gap_unknown || metrics.vertical_metrics.is_none()
             })
@@ -295,31 +310,27 @@ impl FontMetricTable {
                     // box across their four regular/bold/italic faces. The generic
                     // 1.31em estimate inflates their single spacing. Never apply
                     // this to substitutes or replace complete font metrics / taller ink.
-                    let minimum = if matches!(key.family.as_str(), "arial" | "times new roman")
+                    let minimum = if matches!(family.as_str(), "arial" | "times new roman")
                         && !metrics.fallback
                     {
                         2355.0 / 2048.0
                     } else if !metrics.fallback
-                        && (key.family == "superclarendon"
-                            || key.family.starts_with("superclarendon-"))
+                        && (family == "superclarendon" || family.starts_with("superclarendon-"))
                     {
                         // All Superclarendon faces: hhea 980 + 225 + 56 / 1000.
                         // Canvas exposes ascent/descent, but omits the 56-unit leading.
                         1261.0 / 1000.0
                     } else if !metrics.fallback
                         && !italic
-                        && (key.family == "helveticaneue"
-                            || key.family.starts_with("helveticaneue-")
-                            || key.family == "helvetica neue"
-                            || key.family.starts_with("helvetica neue "))
+                        && (family == "helveticaneue"
+                            || family.starts_with("helveticaneue-")
+                            || family == "helvetica neue"
+                            || family.starts_with("helvetica neue "))
                     {
                         // Helvetica Neue hhea leading is 0.028em (regular) or
                         // 0.029em (medium/bold); Canvas supplies the other two terms.
                         height
-                            + if bold
-                                || key.family.contains("medium")
-                                || key.family.ends_with("-bold")
-                            {
+                            + if bold || family.contains("medium") || family.ends_with("-bold") {
                                 0.029
                             } else {
                                 0.028
@@ -342,14 +353,14 @@ impl FontMetricTable {
         bold: bool,
         size: f32,
     ) -> Option<f32> {
+        let faces = self.family_faces(family)?;
         let key = FontFaceKey {
-            family: normalize_family(family)?,
             style: u8::from(italic),
             weight: if bold { 700 } else { 400 },
             stretch: NORMAL_STRETCH,
             size_bits: 0,
         };
-        let metrics = self.faces.get(&key)?;
+        let metrics = faces.get(&key)?;
         let [ascent, descent, _] = metrics.vertical_metrics?;
         let height = self.line_height_em(family, italic, bold, 1.0)?;
         let leading = (height - ascent - descent).max(0.0);
@@ -365,13 +376,27 @@ impl FontMetricTable {
             return false;
         };
         let key = FontFaceKey {
-            family,
             style: u8::from(italic),
             weight: if bold { 700 } else { 400 },
             stretch: NORMAL_STRETCH,
             size_bits: 0,
         };
-        self.faces.get(&key).is_some_and(|metrics| metrics.fallback)
+        self.families
+            .get(&family)
+            .and_then(|index| self.faces[*index].get(&key))
+            .is_some_and(|metrics| metrics.fallback)
+    }
+
+    fn family_faces(&self, family: &str) -> Option<&HashMap<FontFaceKey, FontFaceMetrics>> {
+        // Layout normally uses the exact authored name supplied in OVFM. Resolve
+        // it without allocating/lowercasing for every glyph. Keep this alias map
+        // separate: removing one quote pair is deliberately not idempotent.
+        let index = self
+            .authored_families
+            .get(family)
+            .copied()
+            .or_else(|| self.families.get(&normalize_family(family)?).copied())?;
+        self.faces.get(index)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -500,6 +525,52 @@ mod tests {
             metrics.advance_em_at_size("P0 Sans", false, true, 'W', 12.0),
             None
         );
+    }
+
+    #[test]
+    fn authored_family_aliases_preserve_normalization_and_do_not_shadow_canonical_names() {
+        let records = [
+            table("\"'Arial'\"", 'W' as u32, 0.1),
+            table("'arial'", 'W' as u32, 0.2),
+            table("  École  ", 'W' as u32, 0.3),
+        ];
+        let mut bytes = records[0][..20].to_vec();
+        bytes[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&3_u32.to_le_bytes());
+        let offset = 20
+            + records
+                .iter()
+                .map(|record| record.len() - 28)
+                .sum::<usize>();
+        bytes[16..20].copy_from_slice(&(offset as u32).to_le_bytes());
+        for (index, record) in records.iter().enumerate() {
+            let mut face = record[20..record.len() - 8].to_vec();
+            face[8..12].copy_from_slice(&(index as u32).to_le_bytes());
+            bytes.extend_from_slice(&face);
+        }
+        for record in &records {
+            bytes.extend_from_slice(&record[record.len() - 8..]);
+        }
+        let metrics = FontMetricTable::decode(&bytes, Limits::default()).unwrap();
+        for (family, expected) in [
+            ("\"'Arial'\"", 0.1),
+            ("\"'ARIAL'\"", 0.1),
+            ("'arial'", 0.2),
+            ("ARIAL", 0.2),
+            ("  École  ", 0.3),
+            ("éCOLE", 0.3),
+        ] {
+            assert_eq!(
+                metrics.advance_em_at_size(family, false, false, 'W', 12.0),
+                Some(expected)
+            );
+        }
+        for family in ["", "\"\"", "Arial\nBad", "Unknown"] {
+            assert_eq!(
+                metrics.advance_em_at_size(family, false, false, 'W', 12.0),
+                None
+            );
+        }
     }
 
     #[test]
