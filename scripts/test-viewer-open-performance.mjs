@@ -2,7 +2,7 @@
 // including file read, parsing, font loading, layout and the first visible paint.
 // node scripts/test-viewer-open-performance.mjs --output report.json <file>...
 //   [--dist directory] [--baseline report.json] [--samples 3] [--budget-ms 2000]
-//   [--all-pages] [--inline]
+//   [--all-pages] [--inline] [--reference-wasm file --max-reference-ratio 0.9]
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -10,8 +10,8 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve, dirname, basename, extname, sep } from "node:path";
 import { chromium, webkit } from "playwright-core";
 
-const options = { dist: "dist", samples: 3, budgetMs: 2000, webkitTolerance: 0, inputs: [] };
-const keys = { "--dist": "dist", "--output": "output", "--baseline": "baseline", "--samples": "samples", "--budget-ms": "budgetMs", "--webkit-channel-tolerance": "webkitTolerance" };
+const options = { dist: "dist", samples: 3, budgetMs: 2000, webkitTolerance: 0, maxReferenceRatio: 0.9, inputs: [] };
+const keys = { "--dist": "dist", "--reference-wasm": "referenceWasm", "--max-reference-ratio": "maxReferenceRatio", "--output": "output", "--baseline": "baseline", "--samples": "samples", "--budget-ms": "budgetMs", "--webkit-channel-tolerance": "webkitTolerance" };
 for (let i = 2; i < process.argv.length; i++) {
   const value = process.argv[i];
   if (value === "--all-pages") options.allPages = true;
@@ -21,10 +21,15 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 assert.ok(options.output && options.inputs.length, "Supply --output report.json and local document paths");
 options.samples = Number(options.samples); options.budgetMs = Number(options.budgetMs);
+options.maxReferenceRatio = Number(options.maxReferenceRatio);
+assert.ok(Number.isFinite(options.maxReferenceRatio) && options.maxReferenceRatio > 0 && options.maxReferenceRatio < 1);
 assert.ok(Number.isInteger(options.samples) && options.samples > 0 && options.samples <= 20);
 assert.ok(Number.isFinite(options.budgetMs) && options.budgetMs > 0);
 const root = resolve("."), dist = resolve(options.dist), output = resolve(options.output);
 await mkdir(dirname(output), { recursive: true });
+const referenceWasmSha256 = options.referenceWasm
+  ? createHash("sha256").update(await readFile(options.referenceWasm)).digest("hex") : undefined;
+const baseline = options.baseline ? JSON.parse(await readFile(options.baseline, "utf8")) : undefined;
 const server = createServer(async (request, response) => {
   try {
     const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
@@ -39,17 +44,21 @@ const server = createServer(async (request, response) => {
 });
 await new Promise(resolveServer => server.listen(0, "127.0.0.1", resolveServer));
 const results = [];
-const baseline = options.baseline ? JSON.parse(await readFile(options.baseline, "utf8")) : undefined;
 assert.ok([0, 1].includes(Number(options.webkitTolerance)), "WebKit channel tolerance must be zero or one");
 try {
   for (const [browserName, type] of Object.entries({ chromium, webkit })) {
     const browser = await type.launch({ headless: true });
     try {
       for (const path of options.inputs) {
-        const result = { browser: browserName, file: basename(path), sha256: createHash("sha256").update(await readFile(path)).digest("hex"), samples: [], pages: [], pixelDifferences: [], errors: [] };
-        for (let sample = 0; sample < options.samples; sample++) {
+        const result = { browser: browserName, file: basename(path), sha256: createHash("sha256").update(await readFile(path)).digest("hex"), samples: [], pages: [], pixelDifferences: [], errors: [], ...(options.referenceWasm ? { referenceSamples: [] } : {}) };
+        const variants = options.referenceWasm ? 2 : 1;
+        for (let attempt = 0; attempt < options.samples * variants; attempt++) {
+          const sample = Math.floor(attempt / variants);
+          // Alternate order to compare the same original file under the same load.
+          const reference = variants === 2 && sample % 2 === attempt % 2;
           const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
           try {
+            if (reference) await page.route("**/dist/office-viewer-core.wasm", route => route.fulfill({ path: resolve(options.referenceWasm), contentType: "application/wasm" }));
             page.on("pageerror", error => result.errors.push(error.message));
             page.on("console", message => { if (message.type() === "error") result.errors.push(message.text()); });
             await page.goto(`http://127.0.0.1:${server.address().port}/examples/viewer.html?filePicker=true`);
@@ -67,8 +76,8 @@ try {
             await page.waitForFunction(() => globalThis.openTiming || document.documentElement.dataset.error, undefined, { timeout: 180000 });
             const timing = await page.evaluate(() => ({ ...globalThis.openTiming, error: document.documentElement.dataset.error, state: document.querySelector("#viewer").state.status }));
             assert.equal(timing.error, undefined); assert.equal(timing.state, "ready");
-            result.samples.push(timing);
-            if (sample === 0 && options.allPages) {
+            (reference ? result.referenceSamples : result.samples).push(timing);
+            if (!reference && sample === 0 && options.allPages) {
               const count = await page.evaluate(() => document.querySelector("#viewer").state.info.units.length);
               for (let index = 0; index < count; index++) {
                 await page.evaluate(index => document.querySelector("#viewer").reveal({ kind: "unit", unitIndex: index }), index);
@@ -112,6 +121,9 @@ try {
             }
           } finally { await page.close(); }
         }
+        if (options.referenceWasm) {
+          result.referenceMedianMs = result.referenceSamples.map(value => value.paintMs).sort((a, b) => a - b)[Math.floor(options.samples / 2)];
+        }
         result.medianMs = result.samples.map(value => value.paintMs).sort((a, b) => a - b)[Math.floor(options.samples / 2)];
         results.push(result);
         console.log(JSON.stringify({ ...result, pages: result.pages.length }));
@@ -120,9 +132,13 @@ try {
   }
 } finally {
   server.close();
-  await writeFile(output, JSON.stringify({ measurement: "local file selection to first visible Viewer paint", viewport: [1440, 1000], webkitChannelTolerance: Number(options.webkitTolerance), execution: options.inline ? "inline" : "auto", results }, null, 2) + "\n");
+  await writeFile(output, JSON.stringify({ measurement: "local file selection to first visible Viewer paint", viewport: [1440, 1000], webkitChannelTolerance: Number(options.webkitTolerance), execution: options.inline ? "inline" : "auto", ...(referenceWasmSha256 ? { referenceWasmSha256, maxReferenceRatio: options.maxReferenceRatio } : {}), results }, null, 2) + "\n");
 }
-for (const result of results) assert.deepEqual(result.errors, [], `${result.browser}/${result.file} browser errors`);
+for (const result of results) {
+  assert.deepEqual(result.errors, [], `${result.browser}/${result.file} browser errors`);
+  if (options.referenceWasm) assert.ok(result.medianMs <= result.referenceMedianMs * options.maxReferenceRatio,
+    `${result.browser}/${result.file}: ${result.medianMs.toFixed(1)}ms must be <= ${options.maxReferenceRatio} × reference ${result.referenceMedianMs.toFixed(1)}ms`);
+}
 if (options.baseline) {
   for (const result of results) {
     const before = baseline.results.find(value => value.browser === result.browser && value.sha256 === result.sha256);
