@@ -34,7 +34,7 @@ import { OfficeEngineError } from "./types.js";
 
 const MAGIC = 0x3144564f;
 const MIN_VERSION = 3;
-const VERSION = 77;
+const VERSION = 78;
 const NONE = 0xffff_ffff;
 const MAX_VISUAL_DEPTH = 64;
 const MAX_PATH_COMMANDS = 65_536;
@@ -1384,11 +1384,29 @@ function readVisual(reader: Reader, kind: number, version: number, depth = 0): S
       || fillCodePoint >= 0xd800 && fillCodePoint <= 0xdfff)) {
       throw new OfficeEngineError("CORE_PROTOCOL_INVALID", "Invalid text fill character");
     }
+    let lineBreaks: number[] | undefined;
+    if (version >= 78) {
+      const count = reader.u32();
+      if (count !== NONE) {
+        if (count > MAX_TEXT_PARAGRAPHS || count > Math.floor(reader.remaining / 4)) {
+          throw new OfficeEngineError("CORE_PROTOCOL_INVALID", "Invalid text line-break count");
+        }
+        lineBreaks = [];
+        for (let index = 0; index < count; index++) {
+          const offset = reader.u32();
+          if (offset === 0 || offset === NONE || offset <= (lineBreaks.at(-1) ?? 0)) {
+            throw new OfficeEngineError("CORE_PROTOCOL_INVALID", "Invalid text line-break offset");
+          }
+          lineBreaks.push(offset);
+        }
+      }
+    }
     const nestedKind = reader.u8();
     reader.skip(3);
     return {
       kind: "text-layout",
       layout: {
+        ...(lineBreaks === undefined ? {} : { lineBreaks }),
         ...(fillOffset === 0xffff_ffff ? {} : { fillCharacter: {
           offset: fillOffset, character: String.fromCodePoint(fillCodePoint),
         } }),
@@ -2063,6 +2081,9 @@ function validateVisual(
       || (layout.wrapRegions?.length ?? 0) > 1024
       || layout.wrapRegions?.some(rect => !Number.isFinite(rect.x) || !Number.isFinite(rect.y)
         || !Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0)
+      || (layout.lineBreaks?.length ?? 0) > MAX_TEXT_PARAGRAPHS
+      || layout.lineBreaks?.some((offset, index) => !Number.isInteger(offset) || offset <= 0
+        || offset >= NONE || index > 0 && offset <= (layout.lineBreaks?.[index - 1] ?? 0))
       || (layout.paragraphs?.length ?? 0) > MAX_TEXT_PARAGRAPHS
       || layout.tabStops.some((stop, index) => (
         !Number.isFinite(stop.position)

@@ -223,6 +223,8 @@ export interface SceneStrokeStyle {
 }
 
 export interface SceneTextLayout {
+  /** Authoritative soft-line starts at UTF-16 offsets; absent permits host wrapping. */
+  readonly lineBreaks?: readonly number[];
   readonly fillCharacter?: { readonly offset: number; readonly character: string };
   /** Rectangular exclusions relative to the inset text origin. */
   readonly wrapRegions?: readonly Rect[];
