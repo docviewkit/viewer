@@ -6,6 +6,7 @@ import type {
 } from "./types.js";
 import { OfficeEngineError } from "./types.js";
 import { copyByteSource, isArrayBuffer, isUint8Array } from "./bytes.js";
+import { DEFAULT_LIMITS } from "./core.js";
 
 /** Closed optional format families which are intentionally kept out of the base runtime. */
 export type FormatPackCandidate = "odf" | "iwork" | "legacy-office" | "wps" | "pdf" | "xps" | "ofd";
@@ -34,7 +35,6 @@ const ZIP_END_BYTES = 22;
 const ZIP_MAX_COMMENT_BYTES = 0xffff;
 const ZIP_MAX_ENTRIES = 50_000;
 const DEFAULT_OPEN_TIMEOUT_MS = 60_000;
-const DEFAULT_INPUT_BYTES = 128 * 1024 * 1024;
 const OLE_MAGIC = Uint8Array.of(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1);
 const PDF_HEADER_SCAN_BYTES = 1_024;
 const PDF_RECOVERY_SCAN_BYTES = 16 * 1024 * 1024;
@@ -379,7 +379,7 @@ export class FormatPackRuntime implements OfficeEngine {
     nativeEngine: OfficeEngine,
     formatPack: false | FormatPackFactory | undefined,
     createPackEngine: CreateFormatPackEngine,
-    maxInputBytes = DEFAULT_INPUT_BYTES,
+    maxInputBytes = DEFAULT_LIMITS.inputBytes,
     execution: "worker" | "inline" = "worker",
   ) {
     this.#nativeEngine = nativeEngine;
