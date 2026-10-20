@@ -3165,7 +3165,7 @@ impl Paragraph {
     }
 
     fn layout_origin(&self) -> f32 {
-        self.first_line_start().min(self.indent_left).min(0.0)
+        crate::text_layout::word_paragraph_origin(self.first_line_start(), self.indent_left)
     }
 
     fn first_line_offset(&self) -> f32 {

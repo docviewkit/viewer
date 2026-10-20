@@ -40,6 +40,7 @@ try {
         try {
           let yellowPixels = 0;
           const numbered = [];
+          const manual = [];
           for (let unitIndex = 0; unitIndex < doc.info.units.length; unitIndex++) {
             const objects = await doc.listObjects({ unitIndex });
             const frame = await doc.render({ unitIndex, scale: 1, includeTextFragments: true });
@@ -49,6 +50,11 @@ try {
               const ctx = canvas.getContext("2d"); ctx.drawImage(frame.bitmap, 0, 0);
               const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
               for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 240 && pixels[i + 1] > 240 && pixels[i + 2] < 30 && pixels[i + 3] > 240) yellowPixels++;
+              for (const object of objects.filter(o => /^(?:\d[\d.]*|[a-f]\.|[-•])(?:\t|\s|[\u2e80-\uffff])/u.test(o.text ?? ""))) {
+                if (/^\d[\d.]*\t/u.test(object.text)) continue;
+                const fragments = frame.textFragments.filter(f => f.objectId === object.id && f.text.trim());
+                manual.push({ unitIndex, id: object.id, label: object.text.match(/^[\d.a-f•-]+/u)[0], markerX: fragments[0]?.transform.e, bodyX: fragments[1]?.transform.e, tabbed: /^(?:[a-f]\.|[-•])\t/u.test(object.text) });
+              }
               for (const object of objects.filter(o => /^\d[\d.]*\t/u.test(o.text ?? ""))) {
                 const fragments = frame.textFragments.filter(f => f.objectId === object.id);
                 const marker = fragments.find(f => /^\d/u.test(f.text));
@@ -57,11 +63,16 @@ try {
               }
             } finally { frame.bitmap.close(); }
           }
-          return { yellowPixels, numbered, units: doc.info.units.length };
+          return { yellowPixels, numbered, manual, units: doc.info.units.length };
         } finally { doc.close(); engine.close(); }
       });
       await page.waitForFunction(() => document.querySelector("#viewer").shadowRoot.querySelector('canvas'));
-      await page.screenshot({ path: `${output}/${name}-${baseline ? "before" : "after"}.png` });
+      for (let unitIndex = 0; unitIndex < checks.units; unitIndex++) {
+        await page.evaluate(unitIndex => document.querySelector("#viewer").reveal({ kind: "unit", unitIndex }), unitIndex);
+        await page.waitForFunction(unitIndex => document.querySelector("#viewer").shadowRoot.querySelector(`.continuous-page[data-unit-index="${unitIndex}"]`)?.dataset.rendered === "true", unitIndex);
+        const png = await page.evaluate(unitIndex => document.querySelector("#viewer").shadowRoot.querySelector(`.continuous-page[data-unit-index="${unitIndex}"] canvas`).toDataURL().split(",")[1], unitIndex);
+        await writeFile(`${output}/${name}-round2-${baseline ? "before" : "after"}-page${unitIndex + 1}.png`, Buffer.from(png, "base64"));
+      }
       await writeFile(`${output}/${name}-${baseline ? "before" : "after"}.json`, JSON.stringify({ checks, errors }, null, 2));
       console.log(name, JSON.stringify({ ...checks, errors }));
       results.push({ name, checks, errors });
@@ -78,6 +89,12 @@ for (const { name, checks, errors } of results) {
     if (Math.abs(numbered.markerX - 96.13333) >= 0.1 || Math.abs(numbered.bodyX - numbered.markerX - expectedGap) >= 0.1) {
       failures.push(`${name}: incorrect numbering indentation ${JSON.stringify(numbered)}`);
     }
+  }
+  if (checks.manual.length !== 45) failures.push(`${name}: missing manual, alphabetic or dash list coverage`);
+  for (const manual of checks.manual) {
+    if (!manual.tabbed && manual.label === "1.2." && manual.bodyX - manual.markerX > 32) failures.push(`${name}: manual Chinese numbering gap is stretched by justification ${JSON.stringify(manual)}`);
+    if (manual.tabbed && Math.abs(manual.bodyX - manual.markerX - 24) > 0.1) failures.push(`${name}: alphabetic/dash tab disagrees with native Word ${JSON.stringify(manual)}`);
+    if (Math.abs(manual.markerX - 96.16) > 0.1) failures.push(`${name}: manual/alphabetic/dash left edge disagrees with native Word ${JSON.stringify(manual)}`);
   }
   assert.deepEqual(errors, []);
 }

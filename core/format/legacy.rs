@@ -6389,12 +6389,10 @@ fn apply_doc_paragraph_sprm(
         0x2406 => style.keep_with_next = operand[0] != 0,
         0x2407 => style.page_break_before = operand[0] != 0,
         0x840e | 0x845d => {
-            style.margin_right =
-                (i16::from_le_bytes([operand[0], operand[1]]) as f32 / 15.0).max(0.0);
+            style.margin_right = i16::from_le_bytes([operand[0], operand[1]]) as f32 / 15.0;
         }
         0x840f | 0x845e => {
-            style.margin_left =
-                (i16::from_le_bytes([operand[0], operand[1]]) as f32 / 15.0).max(0.0);
+            style.margin_left = i16::from_le_bytes([operand[0], operand[1]]) as f32 / 15.0;
         }
         0x8411 | 0x8460 => {
             style.first_line_indent = i16::from_le_bytes([operand[0], operand[1]]) as f32 / 15.0;
@@ -6657,13 +6655,14 @@ fn apply_doc_tab_changes(operand: &[u8], style: &mut DocParagraphStyle) -> Resul
     Ok(())
 }
 
-fn doc_tab_stops(style: DocParagraphStyle) -> Vec<TextTabStop> {
+fn doc_tab_stops(style: DocParagraphStyle, origin: f32) -> Vec<TextTabStop> {
     style.tab_positions[..usize::from(style.tab_count)]
         .iter()
         .zip(&style.tab_descriptors)
         .filter_map(|(&position, &descriptor)| {
-            (position > 0).then_some(TextTabStop {
-                position: f32::from(position) / 15.0,
+            let position = f32::from(position) / 15.0 - origin;
+            (position > 0.0).then_some(TextTabStop {
+                position,
                 align: match descriptor & 0x07 {
                     1 => TextAlign::Center,
                     2 | 3 => TextAlign::End,
@@ -10138,7 +10137,18 @@ fn push_doc_paragraph_object(
     vertical_align: u8,
     continues_after: bool,
 ) -> Result<usize, Diagnostic> {
-    let style = paragraph.style;
+    let mut style = paragraph.style;
+    let origin = crate::text_layout::word_paragraph_origin(
+        style.margin_left + style.first_line_indent,
+        style.margin_left,
+    );
+    let bounds = Rect {
+        x: bounds.x + origin,
+        width: bounds.width - origin - style.margin_right.min(0.0),
+        ..bounds
+    };
+    style.margin_left -= origin;
+    style.margin_right = style.margin_right.max(0.0);
     let empty_run = paragraph.empty_run.unwrap_or_else(doc_default_text_run);
     let mut runs = if paragraph.runs.is_empty() {
         vec![empty_run]
@@ -10205,7 +10215,7 @@ fn push_doc_paragraph_object(
                     2 => TextVerticalAlign::Bottom,
                     _ => TextVerticalAlign::Top,
                 },
-                tab_stops: doc_tab_stops(style),
+                tab_stops: doc_tab_stops(paragraph.style, origin),
                 default_tab_stop: style.default_tab_stop,
                 ..TextLayout::default()
             },
@@ -20005,7 +20015,22 @@ mod tests {
         let document = detect_and_parse(&bytes, Limits::default())
             .unwrap()
             .unwrap();
-        for (cp, left, first) in [(1028, 12.0, -24.0), (1048, 16.0, -28.0)] {
+        for cp in [1040, 1074, 1812] {
+            let object = document
+                .objects
+                .iter()
+                .find(|object| {
+                    matches!(object.source.locator,
+                SourceLocator::Legacy { text_range: Some((start, _)), .. } if start == cp)
+                })
+                .unwrap();
+            assert!(
+                (object.bounds.x - 96.13333).abs() < 0.01,
+                "manual list paragraph at CP {cp} must share the native Word left edge: {}",
+                object.bounds.x
+            );
+        }
+        for (cp, left, first) in [(1028, 24.0, -24.0), (1048, 28.0, -28.0)] {
             let object = document
                 .objects
                 .iter()
@@ -20030,6 +20055,31 @@ mod tests {
                     .any(|tab| (tab.position - left).abs() < 0.01)
             );
         }
+    }
+
+    #[test]
+    fn native_doc_signed_indents_keep_tab_coordinates() {
+        let mut style = DocParagraphStyle::default();
+        apply_doc_paragraph_grpprl(
+            &[
+                0x5e, 0x84, 0x4c, 0xff, // logical left -180 twips
+                0x0d, 0xc6, 8, 0, 2, 0, 0, 180, 0, 0, 0, // authored tabs at 0 and 180 twips
+            ],
+            &mut style,
+        )
+        .unwrap();
+        assert_eq!(style.margin_left, -12.0);
+        let origin = crate::text_layout::word_paragraph_origin(
+            style.margin_left + style.first_line_indent,
+            style.margin_left,
+        );
+        let tabs = doc_tab_stops(style, origin);
+        assert_eq!(
+            tabs.iter().map(|tab| tab.position).collect::<Vec<_>>(),
+            [12.0, 24.0]
+        );
+        assert_eq!(origin + tabs[0].position, 0.0);
+        assert_eq!(origin + tabs[1].position, 12.0);
     }
 
     #[test]
@@ -22284,7 +22334,7 @@ mod tests {
 
         assert_eq!(paragraphs[0].style.margin_left, 12.0);
         assert_eq!(paragraphs[0].style.first_line_indent, -24.0);
-        assert_eq!(doc_tab_stops(paragraphs[0].style)[0].position, 12.0);
+        assert_eq!(doc_tab_stops(paragraphs[0].style, 0.0)[0].position, 12.0);
         assert!(!result.missing_definition);
         assert!(!result.approximated_number_format);
         assert_eq!(

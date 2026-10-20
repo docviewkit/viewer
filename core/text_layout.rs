@@ -1,5 +1,12 @@
 //! Format-independent horizontal text fitting. Adapters supply measured advances.
 
+/// Move a Word paragraph frame left far enough to retain signed first-line
+/// and continuation positions while exposing nonnegative protocol offsets.
+#[cfg(any(test, feature = "native-formats", feature = "legacy-office-formats"))]
+pub(crate) fn word_paragraph_origin(first_line_start: f32, continuation_start: f32) -> f32 {
+    first_line_start.min(continuation_start).min(0.0)
+}
+
 #[cfg(any(
     test,
     feature = "native-formats",
@@ -169,6 +176,20 @@ pub(crate) fn horizontal_line_breaks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_paragraph_origin_preserves_signed_line_starts() {
+        for (first, continuation, origin) in [
+            (-12.0, -12.0, -12.0),
+            (-12.0, 12.0, -12.0),
+            (12.0, -12.0, -12.0),
+            (12.0, 24.0, 0.0),
+            (0.0, 0.0, 0.0),
+        ] {
+            assert_eq!(word_paragraph_origin(first, continuation), origin);
+            assert!(first - origin >= 0.0 && continuation - origin >= 0.0);
+        }
+    }
 
     #[test]
     fn closing_punctuation_never_starts_a_soft_wrapped_line() {
