@@ -2348,7 +2348,12 @@ fn write_visual_at_depth<'a>(
                     .fill_character
                     .map_or(0, |(_, character)| character as u32),
             );
-            writer.u32(layout.line_breaks.as_ref().map_or(NONE, |breaks| breaks.len() as u32));
+            writer.u32(
+                layout
+                    .line_breaks
+                    .as_ref()
+                    .map_or(NONE, |breaks| breaks.len() as u32),
+            );
             if let Some(breaks) = &layout.line_breaks {
                 for offset in breaks {
                     writer.u32(*offset);
@@ -3281,7 +3286,13 @@ fn visual_length_at_depth<'a>(
                 .map_err(|_| ProtocolError::TooManyFields)?;
             let mut total = 116;
             if let Some(breaks) = &layout.line_breaks {
-                add_length(&mut total, breaks.len().checked_mul(4).ok_or(ProtocolError::SnapshotTooLarge)?)?;
+                add_length(
+                    &mut total,
+                    breaks
+                        .len()
+                        .checked_mul(4)
+                        .ok_or(ProtocolError::SnapshotTooLarge)?,
+                )?;
             }
             add_length(
                 &mut total,

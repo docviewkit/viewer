@@ -488,6 +488,7 @@ fn parse_with_mode(
         reported_unsupported_backgrounds: HashSet::new(),
         placeholders: HashMap::new(),
         placeholder_text_styles: HashMap::new(),
+        placeholder_text_insets: HashMap::new(),
         placeholder_presets: HashMap::new(),
         pending_placeholder_objects: HashSet::new(),
         default_theme,
@@ -3471,6 +3472,8 @@ struct PptxParseState {
     reported_unsupported_backgrounds: HashSet<String>,
     placeholders: HashMap<(u32, String), u32>,
     placeholder_text_styles: HashMap<u32, Vec<ParagraphStyle>>,
+    // PPTX placeholder cascade only: raw bodyPr insets, before preset geometry.
+    placeholder_text_insets: HashMap<u32, [f32; 4]>,
     placeholder_presets: HashMap<u32, (String, HashMap<String, f32>)>,
     pending_placeholder_objects: HashSet<u32>,
     default_theme: PptxTheme,
@@ -6500,13 +6503,13 @@ fn parse_presentation_part(
                                 .as_deref()
                                 != Some("none");
                             current.text_inset_left = signed_numeric_attribute(&attributes, "lIns", part)?
-                                .map_or(9.6, |value| value as f32 / EMU_PER_CSS_PIXEL);
+                                .map_or(current.text_inset_left, |value| value as f32 / EMU_PER_CSS_PIXEL);
                             current.text_inset_right = signed_numeric_attribute(&attributes, "rIns", part)?
-                                .map_or(9.6, |value| value as f32 / EMU_PER_CSS_PIXEL);
+                                .map_or(current.text_inset_right, |value| value as f32 / EMU_PER_CSS_PIXEL);
                             current.text_inset_top = signed_numeric_attribute(&attributes, "tIns", part)?
-                                .map_or(4.8, |value| value as f32 / EMU_PER_CSS_PIXEL);
+                                .map_or(current.text_inset_top, |value| value as f32 / EMU_PER_CSS_PIXEL);
                             current.text_inset_bottom = signed_numeric_attribute(&attributes, "bIns", part)?
-                                .map_or(4.8, |value| value as f32 / EMU_PER_CSS_PIXEL);
+                                .map_or(current.text_inset_bottom, |value| value as f32 / EMU_PER_CSS_PIXEL);
                             if let Some(anchor) = string_attribute(&attributes, "anchor", part)? {
                                 current.vertical_align = Some(match anchor.as_str() {
                                     "ctr" => TextVerticalAlign::Center,
@@ -9192,6 +9195,7 @@ pub(super) fn parse_ooxml_diagram_data(
         reported_unsupported_backgrounds: HashSet::new(),
         placeholders: HashMap::new(),
         placeholder_text_styles: HashMap::new(),
+        placeholder_text_insets: HashMap::new(),
         placeholder_presets: HashMap::new(),
         pending_placeholder_objects: HashSet::new(),
         default_theme: PptxTheme::default(),
@@ -9246,6 +9250,7 @@ pub(super) fn parse_ooxml_locked_canvases(
         reported_unsupported_backgrounds: HashSet::new(),
         placeholders: HashMap::new(),
         placeholder_text_styles: HashMap::new(),
+        placeholder_text_insets: HashMap::new(),
         placeholder_presets: HashMap::new(),
         pending_placeholder_objects: HashSet::new(),
         default_theme: theme.clone(),
@@ -16578,8 +16583,13 @@ fn push_shape(
     } else {
         shape.style_stroke_width.unwrap_or(shape.stroke_width)
     };
-    let fill = if shape.is_connector {
-        Paint::None
+    let fill = if shape.is_connector
+        || shape
+            .preset
+            .as_deref()
+            .is_some_and(|preset| preset == "line" || preset.contains("Connector"))
+    {
+        drawingml_line_end_fill(&mut shape.geometry, &stroke)
     } else {
         fill
     };
@@ -17103,6 +17113,17 @@ fn push_shape(
             .preset
             .map(|preset| (preset, shape.preset_adjustments)),
     );
+    if shape.placeholder_index.is_some() || shape.placeholder_type.is_some() {
+        state.placeholder_text_insets.insert(
+            numeric_id,
+            [
+                shape.text_inset_left,
+                shape.text_inset_right,
+                shape.text_inset_top,
+                shape.text_inset_bottom,
+            ],
+        );
+    }
     if placeholder_prompt {
         state.pending_placeholder_objects.insert(numeric_id);
     } else {
@@ -17172,6 +17193,14 @@ fn inherit_placeholder_style(shape: &mut ShapeState, unit_index: u32, state: &Pp
     else {
         return;
     };
+    if let Some(insets) = state.placeholder_text_insets.get(&numeric_id) {
+        [
+            shape.text_inset_left,
+            shape.text_inset_right,
+            shape.text_inset_top,
+            shape.text_inset_bottom,
+        ] = *insets;
+    }
     inherit_visual_style(shape, visual);
 }
 
@@ -18154,6 +18183,57 @@ fn curved_connector_geometry(
     })
 }
 
+// Connector shafts and open ends are unfilled; closed ends use the line paint.
+// Keep this in the shared DrawingML boundary so PPTX and DOCX agree.
+pub(super) fn drawingml_line_end_fill(geometry: &mut Geometry, stroke: &Paint) -> Paint {
+    let Geometry::Path {
+        fill_rule,
+        commands,
+    } = geometry
+    else {
+        return Paint::None;
+    };
+    if !commands
+        .iter()
+        .any(|command| matches!(command, PathCommand::ClosePath))
+    {
+        return Paint::None;
+    }
+    let fill_rule = *fill_rule;
+    let mut layers = Vec::new();
+    let mut path = Vec::new();
+    for command in std::mem::take(commands) {
+        if matches!(command, PathCommand::MoveTo { .. }) && !path.is_empty() {
+            layers.push(PathLayer {
+                fill_rule,
+                fill: PathFillMode::None,
+                stroke: true,
+                commands: std::mem::take(&mut path),
+            });
+        }
+        let closed = matches!(command, PathCommand::ClosePath);
+        path.push(command);
+        if closed {
+            layers.push(PathLayer {
+                fill_rule,
+                fill: PathFillMode::Normal,
+                stroke: false,
+                commands: std::mem::take(&mut path),
+            });
+        }
+    }
+    if !path.is_empty() {
+        layers.push(PathLayer {
+            fill_rule,
+            fill: PathFillMode::None,
+            stroke: true,
+            commands: path,
+        });
+    }
+    *geometry = Geometry::LayeredPath { layers };
+    stroke.clone()
+}
+
 fn append_line_end(
     commands: &mut Vec<PathCommand>,
     tip: (f32, f32),
@@ -18571,6 +18651,119 @@ mod tests {
     };
     use crate::package::Package;
 
+    #[test]
+    fn supplied_sdk_development_titles_keep_master_text_insets() {
+        let document = crate::format::detect_and_parse(
+            include_bytes!("../../tests/fixtures/sdk-development-arrows.pptx"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        for title in [
+            "2. system configuration",
+            "3. Development and operation system",
+        ] {
+            let object = document
+                .objects
+                .iter()
+                .find(|object| object.text.as_deref() == Some(title))
+                .unwrap();
+            let Visual::TextLayout { layout, .. } = &object.visual else {
+                panic!("title has a text layout");
+            };
+            assert!(
+                (layout.inset_left - 396_000.0 / 9_525.0).abs() < 0.001,
+                "{title}: master left inset must survive empty slide bodyPr: {}",
+                layout.inset_left
+            );
+            assert!(
+                object.bounds.x + layout.inset_left > 0.0,
+                "title starts inside the slide"
+            );
+        }
+    }
+
+    #[test]
+    fn supplied_sdk_title_explicit_insets_override_master_per_attribute() {
+        let package = Package::open(
+            include_bytes!("../../tests/fixtures/sdk-development-arrows.pptx"),
+            Limits::default(),
+        )
+        .unwrap();
+        let entries: Vec<_> = package
+            .entry_names()
+            .map(|name| {
+                let mut bytes = package.part(name).unwrap().unwrap().into_vec();
+                if name == "ppt/slides/slide4.xml" {
+                    let mut xml = String::from_utf8(bytes).unwrap();
+                    let title = xml.find("2. system configuration").unwrap();
+                    let body = xml[..title].rfind("<a:bodyPr/>").unwrap();
+                    xml.replace_range(
+                        body..body + "<a:bodyPr/>".len(),
+                        "<a:bodyPr lIns=\"0\" rIns=\"19050\" tIns=\"-9525\"/>",
+                    );
+                    bytes = xml.into_bytes();
+                }
+                (name.to_owned(), bytes)
+            })
+            .collect();
+        let parts: Vec<_> = entries
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect();
+        let bytes = stored_zip(&parts);
+        let document = crate::format::detect_and_parse(&bytes, Limits::default())
+            .unwrap()
+            .unwrap();
+        let object = document
+            .objects
+            .iter()
+            .find(|object| object.text.as_deref() == Some("2. system configuration"))
+            .unwrap();
+        let Visual::TextLayout { layout, .. } = &object.visual else {
+            panic!("title layout");
+        };
+        assert_eq!(layout.inset_left, 0.0);
+        assert_eq!(layout.inset_right, 2.0);
+        assert_eq!(layout.inset_top, -1.0);
+        assert!((layout.inset_bottom - 4.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn supplied_sdk_development_triangle_line_ends_are_filled() {
+        let document = crate::format::detect_and_parse(
+            include_bytes!("../../tests/fixtures/sdk-development-arrows.pptx"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let mut filled = 0;
+        for object in &document.objects {
+            let mut visual = &object.visual;
+            while let Visual::Layer { visual: inner, .. } = visual {
+                visual = inner;
+            }
+            if let Visual::PaintedShape {
+                geometry: Geometry::LayeredPath { layers },
+                fill,
+                ..
+            } = visual
+            {
+                filled += layers
+                    .iter()
+                    .filter(|layer| {
+                        layer.fill == PathFillMode::Normal
+                            && matches!(layer.commands.last(), Some(PathCommand::ClosePath))
+                            && *fill != Paint::None
+                    })
+                    .count();
+            }
+        }
+        assert_eq!(
+            filled, 32,
+            "all 32 authored closed triangle ends must be filled"
+        );
+    }
     #[test]
     fn real_vml_linked_object_retains_its_drawingml_metafile() {
         let document = crate::format::detect_and_parse(
@@ -20042,6 +20235,57 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn drawingml_line_end_paint_keeps_shafts_and_open_arrows_unfilled() {
+        for kind in [
+            DrawingMlLineEndKind::Arrow,
+            DrawingMlLineEndKind::Triangle,
+            DrawingMlLineEndKind::Stealth,
+            DrawingMlLineEndKind::Diamond,
+            DrawingMlLineEndKind::Oval,
+        ] {
+            for preset in ["straightConnector1", "bentConnector3", "curvedConnector3"] {
+                let (mut geometry, _) = connector_geometry(
+                    preset,
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 80.0,
+                    },
+                    &HashMap::new(),
+                    1.0,
+                    None,
+                    Some(DrawingMlLineEnd {
+                        kind,
+                        width: DrawingMlLineEndSize::Medium,
+                        length: DrawingMlLineEndSize::Medium,
+                    }),
+                )
+                .unwrap();
+                let paint = Paint::Solid(0x129abc80);
+                let fill = super::drawingml_line_end_fill(&mut geometry, &paint);
+                if matches!(kind, DrawingMlLineEndKind::Arrow) {
+                    assert_eq!(fill, Paint::None);
+                    assert!(matches!(geometry, Geometry::Path { .. }));
+                } else {
+                    assert_eq!(fill, paint);
+                    let Geometry::LayeredPath { layers } = geometry else {
+                        panic!("layered ends");
+                    };
+                    assert_eq!(layers.len(), 2);
+                    assert_eq!(layers[0].fill, PathFillMode::None);
+                    assert!(layers[0].stroke);
+                    assert_eq!(layers[1].fill, PathFillMode::Normal);
+                    assert!(!layers[1].stroke);
+                    assert!(matches!(
+                        layers[1].commands.last(),
+                        Some(PathCommand::ClosePath)
+                    ));
+                }
+            }
+        }
+    }
     #[test]
     fn drawingml_line_end_length_does_not_collapse_on_short_group_child_lines() {
         let mut commands = Vec::new();
@@ -23193,6 +23437,7 @@ mod tests {
             reported_unsupported_backgrounds: std::collections::HashSet::new(),
             placeholders: std::collections::HashMap::new(),
             placeholder_text_styles: std::collections::HashMap::new(),
+            placeholder_text_insets: std::collections::HashMap::new(),
             placeholder_presets: std::collections::HashMap::new(),
             pending_placeholder_objects: std::collections::HashSet::new(),
             default_theme: super::PptxTheme::default(),

@@ -31,6 +31,15 @@ import { readZipEntries } from "../scripts/accuracy-metamorphic.mjs";
 const wasm = await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url));
 const odfWasm = await readFile(new URL("../dist/office-viewer-odf.wasm", import.meta.url));
 
+test("SDK development Latin labels avoid the wide CJK Yu Gothic UI fallback", () => {
+  for (const family of ["Yu Gothic UI", "Yu Gothic UI Semibold"]) {
+    assert.equal(approximateFontFamily(family, [..."Server Software"].map(c => c.codePointAt(0))), "Segoe UI");
+    assert.equal(approximateFontFamily(family, [0x65e5, 0x672c]), "Hiragino Sans");
+    assert.equal(approximateFontFamily(family, [0x41, 0x65e5]), "Hiragino Sans");
+  }
+  assert.equal(approximateFontFamily("Yu Gothic", [0x41]), "Hiragino Sans");
+});
+
 test("dominant text size aggregates character coverage and ignores invalid runs", () => {
   assert.equal(dominantDocumentFontSize([]), undefined);
   assert.equal(dominantDocumentFontSize([
@@ -388,6 +397,22 @@ class LoadedFontFace {
     return this;
   }
 }
+
+test("local CJK compatibility faces do not capture mixed Yu Gothic UI Latin runs", async () => {
+  class CjkOnly extends LoadedFontFace {
+    async load() {
+      if (this.source === 'local("Hiragino Sans")') return this;
+      throw new Error("requested local face unavailable");
+    }
+  }
+  const face = { family: "Yu Gothic UI", style: "normal", weight: 400, stretch: "normal", codePoints: [0x41, 0x65e5] };
+  const fonts = await registerFonts([], 50, { FontFace: CjkOnly, fontSet: new FakeFontSet() },
+    undefined, [], [], { policy: "local-first", requestedFaces: [face] });
+  try {
+    assert.equal(fonts.resolveFace({ ...face, codePoints: [0x41] }).family, "Segoe UI");
+    assert.equal(fonts.resolveFace({ ...face, codePoints: [0x65e5] }).family, "Hiragino Sans");
+  } finally { fonts.close(); }
+});
 
 function installFontRuntime(fontSet, FontFace = LoadedFontFace) {
   const fontFaceDescriptor = Object.getOwnPropertyDescriptor(globalThis, "FontFace");

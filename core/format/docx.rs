@@ -36,8 +36,9 @@ use super::drawingml::{
 use super::omml::{OmmlCapture, OmmlNode, math_alphabet};
 use super::optional_xml_attribute as optional_attribute;
 use super::pptx::{
-    DrawingMlLineEnd, drawingml_connector_geometry, drawingml_line_end, drawingml_preset_geometry,
-    parse_ooxml_diagram_data, parse_ooxml_locked_canvases, scale_embedded_text_visual,
+    DrawingMlLineEnd, drawingml_connector_geometry, drawingml_line_end, drawingml_line_end_fill,
+    drawingml_preset_geometry, parse_ooxml_diagram_data, parse_ooxml_locked_canvases,
+    scale_embedded_text_visual,
 };
 use super::presentation_image::{
     OfficeImageError, clone_image_bytes, office_image_media_type,
@@ -9607,6 +9608,10 @@ fn parse_document_xml_with_styles(
                                     drawing.shape_flip_vertical,
                                     drawing.shape_rotation_degrees,
                                 );
+                                if let Some(geometry) = &mut drawing.drawing.shape_geometry {
+                                    drawing.drawing.shape_fill = drawingml_line_end_fill(
+                                        geometry, &drawing.drawing.shape_stroke);
+                                }
                             }
                             if let Some(parent) = drawing.group_shape_parent.take() {
                                 let child = std::mem::replace(&mut drawing.drawing, parent);
@@ -11730,7 +11735,13 @@ fn resolve_styles(
         return Ok(Styles::default());
     }
     let bytes = package.required_part(&relationship.target)?;
-    parse_styles_xml(diagnostics, &bytes, package.limits(), &relationship.target, theme)
+    parse_styles_xml(
+        diagnostics,
+        &bytes,
+        package.limits(),
+        &relationship.target,
+        theme,
+    )
 }
 
 fn parse_styles_xml(
@@ -30857,7 +30868,11 @@ mod tests {
 
         assert!(painted_hyphens(0) > 0);
         assert_eq!(painted_hyphens(1), 0);
-        for object in document.objects.iter().filter(|object| object.stable_id.contains(":auto-hyphen:")) {
+        for object in document
+            .objects
+            .iter()
+            .filter(|object| object.stable_id.contains(":auto-hyphen:"))
+        {
             assert_eq!(object.source.mapping, MappingQuality::Derived);
             assert!(matches!(object.source.locator, SourceLocator::Docx {
                 kind: "paragraph", text_range: Some((start, end)), ..
@@ -35114,8 +35129,14 @@ mod tests {
           <w:style w:type="paragraph" w:styleId="Text"><w:pPr><w:ind w:left="-2340"/><w:jc w:val="both"/></w:pPr></w:style>
         </w:styles>"#;
         let theme = super::DocxTheme::default();
-        let styles =
-            super::parse_styles_xml(&mut Vec::new(), styles, Limits::default(), "word/styles.xml", &theme).unwrap();
+        let styles = super::parse_styles_xml(
+            &mut Vec::new(),
+            styles,
+            Limits::default(),
+            "word/styles.xml",
+            &theme,
+        )
+        .unwrap();
         let parsed = super::parse_document_xml_with_styles(
             document_xml,
             Limits::default(),
@@ -37231,15 +37252,19 @@ mod tests {
             .collect::<Vec<_>>();
 
         let Visual::PaintedShape {
-            geometry: Geometry::Path { commands: bent, .. },
+            geometry: Geometry::LayeredPath { layers },
+            fill: Paint::Solid(0x5b9b_d5ff),
             ..
         } = &drawings[0].visual
         else {
             panic!("bent connector path expected");
         };
         assert!(
-            bent.iter()
-                .any(|command| matches!(command, PathCommand::ClosePath))
+            layers
+                .iter()
+                .any(|layer| layer.fill == crate::model::PathFillMode::Normal
+                    && !layer.stroke
+                    && matches!(layer.commands.last(), Some(PathCommand::ClosePath)))
         );
 
         let Visual::PaintedShape {

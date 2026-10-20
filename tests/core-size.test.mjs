@@ -19,7 +19,11 @@ test("optimized core stays within the size budget", () => {
   // all 51 pages remain pixel-identical in both engines.
   // Shared exact byte search adds 7,194 bytes; real PDF performance/pixel proof
   // is recorded in docs/research/CONNECTED-CAR-PDF-PERFORMANCE.md.
-  assert.ok(coreWasm.byteLength <= 3_839_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3839000`);
+  // v0.2.80: 3,838,626 -> 3,844,601 bytes (+5,975; 0.16%) for real-case
+  // DOCX invalid-style recovery, authoritative hyphenation breaks, ODF list
+  // anchors and PPTX placeholder/connector fidelity. Their supplied-file and
+  // browser regressions cover each added behavior; retain a bounded margin.
+  assert.ok(coreWasm.byteLength <= 3_847_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3847000`);
 });
 
 test("calculator contains only its runtime ABI and stays within its size budget", async () => {
@@ -79,8 +83,11 @@ const scenes = {
     "smartart-dir.pptx": "6ac256dce458e769b5f9bb0f236b807afda5df046fb5b26821c569113444df0f",
     "table-style-cascade.pptx": "c365b5b56d6d1824a41f5d2633417a6217bd74c300064c2af31a3421f353cee6",
     "customshape-bitmapfill-srcrect.pptx": "de55fdb1f0f400580a36541402750ca55ec480d0a2b37604a24663e310be9ccc",
-    "background-effects.pptx": "e0d90358880538b8568c57a238eb38d11738ee6ca7296e0e0b583c35955f41d4",
-    "background-theme-gradient.pptx": "5e423eb5a23aaf406d4fd55c2176e6c1be8fbd63c7a63456904f45dc2f6a2b18",
+    // v0.2.80: only placeholder insets change. The original master bodyPr
+    // explicitly sets lIns/rIns/bIns=0 and title tIns=0, body tIns=21168 EMU;
+    // empty slide bodyPr must inherit these values instead of resetting them.
+    "background-effects.pptx": "ad4d4f9ed28e08bc4c92e2622b300c0338a479c4001a9e307d2fd6d1896d1678",
+    "background-theme-gradient.pptx": "514dde7ac59785e5aa5afd18511e9869526b89fe717011558d0dbb089c4b8582",
     "background-linear.docx": "2fff91a03563856c8f3f052b07437bafce3ee08b19b2d50f355a5ec10eec995f",
     "background-radial.docx": "838ab0d1938124b4bc39b4e646799605d8b6e6cdf8f35ba8c2f9b89329da585f",
     "background-worksheet.xlsx": "a7240cd9ba9cb42d0e0660997621237fe956a374466e17bae7e595fb53b7148b"

@@ -2147,7 +2147,8 @@ const LOCAL_FONT_COMPATIBILITY_CANDIDATES: ReadonlyMap<string, readonly string[]
   ["ｍｓ ゴシック", ["Yu Gothic", "Hiragino Sans", "Meiryo"]],
   ["ｍｓ ｐゴシック", ["Yu Gothic", "Hiragino Sans", "Meiryo"]],
   ["yu gothic", ["Hiragino Sans", "Meiryo"]],
-  ["yu gothic ui", ["Hiragino Sans", "Meiryo UI", "Meiryo"]],
+  // Yu Gothic UI needs per-run Latin/CJK fallback; a family-wide CJK alias
+  // would bypass that choice for every Latin run in a mixed document.
   ["meiryo", ["Hiragino Sans"]],
   ["meiryo ui", ["Hiragino Sans", "Meiryo"]],
   ["ms mincho", ["Yu Mincho", "Hiragino Mincho ProN", "Hiragino Mincho Pro"]],
@@ -2261,13 +2262,9 @@ export function approximateFontFamily(
   family: string,
   codePoints?: readonly number[],
 ): string {
-  const demand = codePoints === undefined ? undefined : classifyFontScriptDemand(codePoints);
-  if (demand === "cjk" && OFFICE_CJK_SONG_FALLBACK_HINT.test(normalizeFamily(family))) {
-    return "SimSun";
-  }
-  const approximateFamily = approximateFontFamilyBase(family);
-  if (demand === undefined) return approximateFamily;
-  return adjustApproximateFontFamily(approximateFamily, demand);
+  return codePoints === undefined
+    ? approximateFontFamilyBase(family)
+    : approximateFontFamilyForDemand(normalizeFamily(family), classifyFontScriptDemand(codePoints));
 }
 
 function adjustApproximateFontFamily(
@@ -2284,6 +2281,9 @@ function approximateFontFamilyForDemand(
   family: string,
   demand: FontScriptDemand,
 ): string {
+  // The Japanese face is much wider for Latin UI labels. Keep CJK/mixed runs
+  // on the CJK fallback, but use the UI sans stack for Latin-only content.
+  if (demand === "latin" && /^yu gothic ui\b/iu.test(family)) return "Segoe UI";
   if (demand === "cjk" && OFFICE_CJK_SONG_FALLBACK_HINT.test(family)) return "SimSun";
   return adjustApproximateFontFamily(approximateFontFamilyBase(family), demand);
 }
