@@ -11730,10 +11730,11 @@ fn resolve_styles(
         return Ok(Styles::default());
     }
     let bytes = package.required_part(&relationship.target)?;
-    parse_styles_xml(&bytes, package.limits(), &relationship.target, theme)
+    parse_styles_xml(diagnostics, &bytes, package.limits(), &relationship.target, theme)
 }
 
 fn parse_styles_xml(
+    diagnostics: &mut Vec<Diagnostic>,
     bytes: &[u8],
     limits: Limits,
     part: &str,
@@ -12371,13 +12372,21 @@ fn parse_styles_xml(
                         ) {
                             let half_points = required_half_points(&attributes, "val", part)?;
                             if half_points == 0 {
-                                return Err(format_error(
-                                    part,
-                                    "DOCX style font size must be positive",
-                                ));
+                                // A bad local override must not discard the style cascade
+                                // or prevent unrelated document content from opening.
+                                diagnostics.push(
+                                    Diagnostic::warning(
+                                        DiagnosticCode::FormatInvalid,
+                                        Phase::Parse,
+                                        Fidelity::Approximate,
+                                        "DOCX style font size must be positive; ignored invalid override",
+                                    )
+                                    .in_part(part),
+                                );
+                            } else {
+                                properties.font_size =
+                                    Some(half_points as f32 / 2.0 * POINTS_TO_CSS_PIXELS);
                             }
-                            properties.font_size =
-                                Some(half_points as f32 / 2.0 * POINTS_TO_CSS_PIXELS);
                         }
                     }
                     "w" => {
@@ -12388,12 +12397,18 @@ fn parse_styles_xml(
                         ) {
                             let value = required_u32(&attributes, "val", part)?;
                             if !(1..=600).contains(&value) {
-                                return Err(format_error(
-                                    part,
-                                    "DOCX character scale is out of range",
-                                ));
+                                diagnostics.push(
+                                    Diagnostic::warning(
+                                        DiagnosticCode::FormatInvalid,
+                                        Phase::Parse,
+                                        Fidelity::Approximate,
+                                        "DOCX style character scale is out of range; ignored invalid override",
+                                    )
+                                    .in_part(part),
+                                );
+                            } else {
+                                properties.horizontal_scale = Some(value as f32 / 100.0);
                             }
-                            properties.horizontal_scale = Some(value as f32 / 100.0);
                         }
                     }
                     "fitText" => {
@@ -23222,7 +23237,7 @@ impl Layout<'_> {
                     part: source_part.to_owned(),
                     mapping: MappingQuality::Derived,
                     locator: SourceLocator::Docx {
-                        kind: "automatic-hyphen",
+                        kind: "paragraph",
                         paragraph_id: paragraph.paragraph_id.clone(),
                         paragraph_index: Some(paragraph.index),
                         drawing_id: None,
@@ -27004,6 +27019,101 @@ fn with_part(error: Diagnostic, part: &str) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn zero_style_font_size_preserves_inheritance_and_other_properties() {
+        let theme = super::DocxTheme::default();
+        for kind in ["paragraph", "character"] {
+            let xml = format!(
+                r#"<w:styles xmlns:w="w">
+                  <w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="24"/><w:sz w:val="0"/></w:rPr></w:rPrDefault></w:docDefaults>
+                  <w:style w:type="{kind}" w:styleId="Base"><w:rPr><w:sz w:val="30"/><w:w w:val="80"/></w:rPr></w:style>
+                  <w:style w:type="{kind}" w:styleId="Child"><w:basedOn w:val="Base"/><w:rPr><w:sz w:val="0"/><w:w w:val="0"/><w:b/></w:rPr></w:style>
+                  <w:style w:type="{kind}" w:styleId="Valid"><w:basedOn w:val="Child"/><w:rPr><w:sz w:val="36"/></w:rPr></w:style>
+                </w:styles>"#
+            );
+            let mut diagnostics = Vec::new();
+            let styles = super::parse_styles_xml(
+                &mut diagnostics,
+                xml.as_bytes(),
+                Limits::default(),
+                "word/styles.xml",
+                &theme,
+            )
+            .unwrap();
+            assert_eq!(diagnostics.len(), 3);
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|d| d.severity == crate::diagnostic::Severity::Warning)
+            );
+            assert_eq!(styles.defaults.font_size, Some(16.0));
+            let tag = if kind == "paragraph" {
+                "pStyle"
+            } else {
+                "rStyle"
+            };
+            for (id, expected) in [("Child", 20.0), ("Valid", 24.0)] {
+                let xml = if kind == "paragraph" {
+                    format!(
+                        r#"<w:document xmlns:w="w"><w:body><w:p><w:pPr><w:{tag} w:val="{id}"/></w:pPr><w:r><w:t>Kept</w:t></w:r></w:p></w:body></w:document>"#
+                    )
+                } else {
+                    format!(
+                        r#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:rPr><w:{tag} w:val="{id}"/></w:rPr><w:t>Kept</w:t></w:r></w:p></w:body></w:document>"#
+                    )
+                };
+                let parsed = super::parse_document_xml_with_styles(
+                    xml.as_bytes(),
+                    Limits::default(),
+                    PART,
+                    Vec::new(),
+                    &styles,
+                    &theme,
+                )
+                .unwrap();
+                let Block::Paragraph(paragraph) = &parsed.blocks[0] else {
+                    panic!("paragraph expected")
+                };
+                assert_eq!(paragraph.runs[0].style.font_size, expected);
+                assert_eq!(paragraph.runs[0].style.horizontal_scale, 0.8);
+                assert!(paragraph.runs[0].style.bold);
+            }
+        }
+    }
+
+    #[test]
+    fn supplied_planning_survey_keeps_content_with_zero_style_font_size() {
+        let package = Package::open(
+            include_bytes!("../../tests/fixtures/ccc-planning-survey.docx"),
+            Limits::default(),
+        )
+        .unwrap();
+        let document = parse(&package, PART, Vec::new()).unwrap();
+        assert!(!document.units.is_empty());
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("style character scale"))
+        );
+        let text = document
+            .objects
+            .iter()
+            .filter_map(|o| o.text.as_deref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("SURVEY: CCC DIGITAL KEY"));
+        assert!(text.contains("Question 1:"));
+        assert!(text.contains("Question 13:"));
+        assert!(
+            document
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("style font size")
+                    && d.location.part.as_deref() == Some("word/styles.xml"))
+        );
+    }
+
+    #[test]
     fn supplied_cbam_paragraph_keeps_closing_punctuation_on_previous_line() {
         let bytes = include_bytes!("../../tests/fixtures/cbam-investor-plan.docx");
         let package = Package::open(bytes, Limits::default()).unwrap();
@@ -27108,6 +27218,7 @@ mod tests {
     fn inherits_wordprocessing_line_break_and_direction_properties_from_paragraph_styles() {
         let theme = super::DocxTheme::default();
         let styles = super::parse_styles_xml(
+            &mut Vec::new(),
             br#"<w:styles xmlns:w="w"><w:style w:type="paragraph" w:styleId="Advanced"><w:pPr><w:bidi/><w:textDirection w:val="btLr"/><w:wordWrap w:val="0"/><w:overflowPunct w:val="0"/><w:topLinePunct/><w:kinsoku w:val="0"/></w:pPr></w:style></w:styles>"#,
             Limits::default(),
             "word/styles.xml",
@@ -27139,6 +27250,7 @@ mod tests {
     fn mirrors_paragraph_indents_and_preserves_line_text_alignment() {
         let theme = super::DocxTheme::default();
         let styles = super::parse_styles_xml(
+            &mut Vec::new(),
             br#"<w:styles xmlns:w="w"><w:style w:type="paragraph" w:styleId="Facing"><w:pPr><w:ind w:left="720" w:right="1440"/><w:mirrorIndents/><w:textAlignment w:val="center"/></w:pPr></w:style></w:styles>"#,
             Limits::default(),
             "word/styles.xml",
@@ -28023,7 +28135,7 @@ mod tests {
     #[test]
     fn combined_text_groups_ids_and_preserves_style_and_explicit_disable() {
         let theme = super::DocxTheme::default();
-        let styles = super::parse_styles_xml(br#"<w:styles xmlns:w="w"><w:style w:type="character" w:styleId="combined"><w:rPr><w:sz w:val="30"/><w:eastAsianLayout w:id="7" w:combine="1"/></w:rPr></w:style></w:styles>"#, Limits::default(), "word/styles.xml", &theme).unwrap();
+        let styles = super::parse_styles_xml(&mut Vec::new(), br#"<w:styles xmlns:w="w"><w:style w:type="character" w:styleId="combined"><w:rPr><w:sz w:val="30"/><w:eastAsianLayout w:id="7" w:combine="1"/></w:rPr></w:style></w:styles>"#, Limits::default(), "word/styles.xml", &theme).unwrap();
         let xml = r#"<w:document xmlns:w="w"><w:body><w:p>
           <w:r><w:rPr><w:rStyle w:val="combined"/></w:rPr><w:t>甲乙</w:t><w:t>丙丁</w:t></w:r>
           <w:r><w:rPr><w:rStyle w:val="combined"/><w:b/></w:rPr><w:t>戊己庚辛</w:t></w:r>
@@ -30685,6 +30797,12 @@ mod tests {
 
         assert!(painted_hyphens(0) > 0);
         assert_eq!(painted_hyphens(1), 0);
+        for object in document.objects.iter().filter(|object| object.stable_id.contains(":auto-hyphen:")) {
+            assert_eq!(object.source.mapping, MappingQuality::Derived);
+            assert!(matches!(object.source.locator, SourceLocator::Docx {
+                kind: "paragraph", text_range: Some((start, end)), ..
+            } if start == end));
+        }
     }
 
     #[test]
@@ -32610,6 +32728,7 @@ mod tests {
     fn contextual_spacing_suppresses_space_only_between_same_style_paragraphs() {
         let theme = super::DocxTheme::default();
         let styles = super::parse_styles_xml(
+            &mut Vec::new(),
             br#"<w:styles xmlns:w="w"><w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="160"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="ListParagraph"><w:pPr><w:contextualSpacing/></w:pPr></w:style></w:styles>"#,
             Limits::default(),
             "word/styles.xml",
@@ -33120,7 +33239,7 @@ mod tests {
     #[test]
     fn conditional_table_styles_merge_without_leaking_into_body() {
         let theme = super::DocxTheme::default();
-        let styles = super::parse_styles_xml(br#"<w:styles xmlns:w="w">
+        let styles = super::parse_styles_xml(&mut Vec::new(), br#"<w:styles xmlns:w="w">
           <w:style w:type="table" w:styleId="Base">
             <w:tblStylePr w:type="firstRow"><w:rPr><w:rFonts w:ascii="Cambria"/><w:color w:val="4F81BD"/><w:caps/></w:rPr><w:tcPr><w:shd w:fill="FFFF00"/><w:tcBorders><w:right w:val="nil"/></w:tcBorders></w:tcPr></w:tblStylePr>
           </w:style>
@@ -33214,6 +33333,7 @@ mod tests {
     fn applies_hyperlink_character_style_underline() {
         let theme = super::DocxTheme::default();
         let styles = super::parse_styles_xml(
+            &mut Vec::new(),
             br#"<w:styles xmlns:w="w"><w:style w:type="character" w:styleId="Hyperlink"><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style></w:styles>"#,
             Limits::default(),
             "word/styles.xml",
@@ -34342,6 +34462,7 @@ mod tests {
                     r#"<w:styles xmlns:w="w"><w:style w:type="paragraph" w:styleId="Base"><w:pPr>{ind}</w:pPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style></w:styles>"#
                 );
                 let styles = super::parse_styles_xml(
+                    &mut Vec::new(),
                     xml.as_bytes(),
                     Limits::default(),
                     "word/styles.xml",
@@ -34934,7 +35055,7 @@ mod tests {
         </w:styles>"#;
         let theme = super::DocxTheme::default();
         let styles =
-            super::parse_styles_xml(styles, Limits::default(), "word/styles.xml", &theme).unwrap();
+            super::parse_styles_xml(&mut Vec::new(), styles, Limits::default(), "word/styles.xml", &theme).unwrap();
         let parsed = super::parse_document_xml_with_styles(
             document_xml,
             Limits::default(),
