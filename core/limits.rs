@@ -93,7 +93,7 @@ impl Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_input_bytes: 128 * Self::MIB,
+            max_input_bytes: 256 * Self::MIB,
             max_zip_entries: 20_000,
             max_zip_path_bytes: 4 * 1024,
             max_entry_uncompressed_bytes: 128 * Self::MIB,

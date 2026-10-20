@@ -28,7 +28,7 @@ const HARD_LIMITS: ResourceLimits = Object.freeze({
 });
 
 export const DEFAULT_LIMITS: ResourceLimits = Object.freeze({
-  inputBytes: 128 * 1024 * 1024,
+  inputBytes: 256 * 1024 * 1024,
   zipEntries: 20_000,
   inflatedBytes: 512 * 1024 * 1024,
   entryBytes: 128 * 1024 * 1024,

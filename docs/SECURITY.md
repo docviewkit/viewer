@@ -73,7 +73,7 @@ Defaults are lower than immutable hard ceilings. A host may lower them but canno
 
 | Budget | Default |
 | --- | ---: |
-| Input bytes | 128 MiB |
+| Input bytes | 256 MiB |
 | ZIP entries | 20,000 |
 | One expanded entry | 128 MiB |
 | Total declared expansion | 512 MiB |
