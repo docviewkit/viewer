@@ -1586,6 +1586,10 @@ impl PreparedXlsx {
 
 #[cfg(feature = "native-formats")]
 pub(crate) enum PreparedNative {
+    Docx {
+        document: Document,
+        prepared: Option<docx::PreparedDocx>,
+    },
     Pptx {
         document: Document,
         loaded_units: std::collections::BTreeSet<u32>,
@@ -1603,6 +1607,7 @@ pub(crate) fn prepare_native_retained(
     bytes: std::sync::Arc<RetainedInput>,
     limits: Limits,
     font_metrics: &FontMetricTable,
+    field_date_time: Option<FieldDateTime>,
 ) -> Result<Option<PreparedNative>, Diagnostic> {
     let Some(package) = prepare_ooxml_package(&bytes, limits)? else {
         return Ok(None);
@@ -1631,6 +1636,17 @@ pub(crate) fn prepare_native_retained(
                 font_metrics: font_metrics.clone(),
             },
         }));
+    }
+    if is_text_content_type(&package.content_type) && font_metrics.is_empty() {
+        let (document, prepared) = docx::prepare(
+            std::sync::Arc::clone(&bytes),
+            &package.package,
+            &package.main_part,
+            package.diagnostics,
+            font_metrics,
+            field_date_time,
+        )?;
+        return Ok(Some(PreparedNative::Docx { document, prepared }));
     }
     if is_spreadsheet_content_type(&package.content_type) {
         let document = with_diagnostics(

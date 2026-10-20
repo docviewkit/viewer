@@ -2716,3 +2716,47 @@ test("does not reject empty legacy VML image data without a relationship ID", as
     engine.close();
   }
 });
+
+test("retained DOCX relayout matches a fresh measured parse and isolates source lifetime", async () => {
+  const { Core, DEFAULT_LIMITS } = await import("../dist/core.js");
+  const { measureSceneFontMetrics } = await import("../dist/font-metrics.js");
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  const clock = [20261020, 830];
+  try {
+    for (const bytes of [docx, docxWithDrawingTextBox, docxWithSectionFooterOverrides, docxWithNestedTable, docxWithCachedBarChart, docxWithLockedCanvas]) {
+      const initial = core.open(bytes, undefined, undefined, clock);
+      const original = structuredClone(initial.scene);
+      const metrics = measureSceneFontMetrics(initial.scene.objects, {
+        resolve: family => ({ family, source: "browser" }),
+      }, { createContext: () => ({ font: "", measureText(text) {
+        const size = Number(this.font.match(/([\d.]+)px/u)?.[1] ?? 12);
+        return { width: [...text].length * size * .65,
+          fontBoundingBoxAscent: size * .9, fontBoundingBoxDescent: size * .3 };
+      } }) });
+      assert.ok(metrics.metricCount > 0);
+      const fresh = core.open(bytes, metrics.table, undefined, clock);
+      const unrelated = core.open(bytes === docx ? docxWithNestedTable : docx);
+      const measured = initial.relayout(metrics.table);
+      unrelated.close();
+      try {
+        if (bytes === docxWithLockedCanvas) {
+          assert.equal(measured, undefined, "locked canvas geometry requires a fresh measured resource parse");
+        } else {
+          assert.ok(measured, "the validated DOCX source must be reused");
+          assert.deepEqual(measured.scene, fresh.scene);
+          const invalid = initial.relayout(Uint8Array.of(1));
+          try { assert.equal(invalid.scene.fatal, true); } finally { invalid.close(); }
+          assert.deepEqual(initial.scene, original, "failed relayout cannot change the provisional document");
+          initial.releaseLayoutSource();
+          assert.equal(initial.relayout(metrics.table), undefined, "finalizing layout releases the temporary source");
+        }
+        initial.close();
+        if (measured) assert.deepEqual(measured.scene, fresh.scene, "measured content outlives its source handle");
+        assert.throws(() => initial.relayout(metrics.table), { code: "DOCUMENT_CLOSED" });
+      } finally { initial.close(); measured?.close(); fresh.close(); }
+    }
+    const other = core.open(pptx);
+    try { assert.equal(other.relayout(Uint8Array.of(1)), undefined, "other adapters retain their existing measured-open path"); }
+    finally { other.close(); }
+  } finally { core.close(); }
+});

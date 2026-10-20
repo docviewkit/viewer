@@ -23,7 +23,11 @@ test("optimized core stays within the size budget", () => {
   // DOCX invalid-style recovery, authoritative hyphenation breaks, ODF list
   // anchors and PPTX placeholder/connector fidelity. Their supplied-file and
   // browser regressions cover each added behavior; retain a bounded margin.
-  assert.ok(coreWasm.byteLength <= 3_847_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3847000`);
+  // Reusing parsed DOCX sources and slicing-by-eight CRC: 3,850,992 ->
+  // 3,868,634 bytes (+17,642). AN12413 first paint: Chromium 1608 -> 1140 ms,
+  // WebKit 1617 -> 1167 ms; all 138 pages stay pixel-identical in both engines.
+  // Temporary sources are released after font layout, including unmeasured opens.
+  assert.ok(coreWasm.byteLength <= 3_870_000, `core Wasm is ${coreWasm.byteLength} bytes; budget is 3870000`);
 });
 
 test("calculator contains only its runtime ABI and stays within its size budget", async () => {
