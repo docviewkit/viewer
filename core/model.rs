@@ -85,6 +85,14 @@ impl Rect {
             && self.height >= 0.0
     }
 
+    /// Compare horizontal and vertical intervals; touching outer edges do not overlap.
+    pub fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
+    }
+
     pub fn contains(self, x: f32, y: f32) -> bool {
         self.is_valid()
             && x >= self.x
@@ -2173,6 +2181,57 @@ fn depth(document: &Document, object: &Object, dense_numeric_ids: bool) -> usize
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rectangle_overlap_keeps_edge_contacts_and_negative_origins_distinct() {
+        let first = super::Rect {
+            x: -10.0,
+            y: -20.0,
+            width: 30.0,
+            height: 40.0,
+        };
+        for (other, expected) in [
+            (
+                super::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 5.0,
+                    height: 5.0,
+                },
+                true,
+            ),
+            (
+                super::Rect {
+                    x: 20.0,
+                    y: 0.0,
+                    width: 5.0,
+                    height: 5.0,
+                },
+                false,
+            ),
+            (
+                super::Rect {
+                    x: 0.0,
+                    y: 20.0,
+                    width: 5.0,
+                    height: 5.0,
+                },
+                false,
+            ),
+            (
+                super::Rect {
+                    x: 19.0,
+                    y: 19.0,
+                    width: 5.0,
+                    height: 5.0,
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(first.overlaps(other), expected);
+            assert_eq!(other.overlaps(first), expected);
+        }
+    }
+
     #[test]
     fn sheet_extents_cover_hidden_and_nonuniform_axes_without_extra_boundary_cells() {
         let axis = super::SheetAxis::from_sizes(&[10.0, 0.0, 0.0, 20.0, 10.0], 10.0);

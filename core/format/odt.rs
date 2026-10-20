@@ -3043,12 +3043,11 @@ fn layout_master_shapes(shapes: &mut [ShapeState], layout: PageLayout) -> f32 {
         if !shapes[index].graphic.allow_overlap {
             let mut y = shapes[index].bounds.y;
             for previous in &shapes[..index] {
-                let horizontal_overlap = shapes[index].bounds.x
-                    < previous.bounds.x + previous.bounds.width
-                    && shapes[index].bounds.x + shapes[index].bounds.width > previous.bounds.x;
-                let vertical_overlap = y < previous.bounds.y + previous.bounds.height
-                    && y + shapes[index].bounds.height > previous.bounds.y;
-                if horizontal_overlap && vertical_overlap {
+                let current = Rect {
+                    y,
+                    ..shapes[index].bounds
+                };
+                if current.overlaps(previous.bounds) {
                     y = y.max(previous.bounds.y + previous.bounds.height);
                 }
             }

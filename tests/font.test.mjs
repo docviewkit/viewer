@@ -1325,6 +1325,9 @@ test("uses the native macOS Japanese Gothic fallback with a portable sans-serif 
   assert.equal(approximateFontFamily("SegoeUISymbol", [0xf123]), "Segoe UI Symbol");
   assert.equal(approximateFontFamily("JRJDDM+ArialUnicodeMS"), "Arial");
   assert.equal(approximateFontFamily("ArialMT"), "Arial");
+  for (const family of ["CIJBKI+Arial Bold", "Arial Bold", "Arial Italic", "Arial Bold Italic", "Arial-Regular"]) {
+    assert.equal(approximateFontFamily(family), "Arial", family);
+  }
   assert.equal(approximateFontFamily("Liberation Sans"), "Arial", "tdf96206.odp and its Office ArialMT reference");
   assert.equal(approximateFontFamily("Arial-BoldMT"), "Arial");
   assert.equal(approximateFontFamily("Arial-ItalicMT"), "Arial");
