@@ -3520,6 +3520,39 @@ fn is_latin_text(character: char) -> bool {
         )
 }
 
+// WordprocessingML num is a legacy, inactive tab, not a left-aligned stop.
+// Keep this adapter-specific: DrawingML and ODF have different tab semantics.
+fn parse_word_tab_stop(
+    attributes: &[crate::xml::XmlAttribute<'_>],
+    part: &str,
+) -> Result<Option<(f32, Option<TextTabStop>)>, Diagnostic> {
+    let position = required_signed_twips(attributes, "pos", part)? / TWIPS_PER_CSS_PIXEL;
+    let value = optional_attribute(attributes, "val", part)?;
+    if value.as_deref() == Some("num") {
+        return Ok(None);
+    }
+    let stop = if position > 0.0 && value.as_deref() != Some("clear") {
+        Some(TextTabStop {
+            position,
+            align: match value.as_deref() {
+                Some("center") => TextAlign::Center,
+                Some("right" | "end") => TextAlign::End,
+                _ => TextAlign::Start,
+            },
+            leader: match optional_attribute(attributes, "leader", part)?.as_deref() {
+                Some("dot") => TextTabLeader::Dot,
+                Some("hyphen") => TextTabLeader::Hyphen,
+                Some("underscore") => TextTabLeader::Underscore,
+                Some("middleDot") => TextTabLeader::MiddleDot,
+                _ => TextTabLeader::None,
+            },
+        })
+    } else {
+        None
+    };
+    Ok(Some((position, stop)))
+}
+
 fn paragraph_alignment(value: &str) -> TextAlign {
     match value {
         "center" => TextAlign::Center,
@@ -7449,40 +7482,15 @@ fn parse_document_xml_with_styles(
                                 .iter()
                                 .any(|attribute| local_name(attribute.name) == "pos") =>
                     {
-                        let position = required_signed_twips(&attributes, "pos", part)?
-                            / TWIPS_PER_CSS_PIXEL;
-                        let value = optional_attribute(&attributes, "val", part)?;
-                        let current = paragraph.as_mut().ok_or_else(|| {
-                            format_error(part, "DOCX paragraph parser state is inconsistent")
-                        })?;
-                        current
-                            .paragraph
-                            .tab_stops
-                            .retain(|existing| existing.position != position);
-                        if position > 0.0 && value.as_deref() != Some("clear") {
-                            let align = match value.as_deref() {
-                                Some("center") => TextAlign::Center,
-                                Some("right" | "end") => TextAlign::End,
-                                _ => TextAlign::Start,
-                            };
-                            let leader = match optional_attribute(&attributes, "leader", part)?
-                                .as_deref()
-                            {
-                                Some("dot") => TextTabLeader::Dot,
-                                Some("hyphen") => TextTabLeader::Hyphen,
-                                Some("underscore") => TextTabLeader::Underscore,
-                                Some("middleDot") => TextTabLeader::MiddleDot,
-                                _ => TextTabLeader::None,
-                            };
-                            current.paragraph.tab_stops.push(TextTabStop {
-                                position,
-                                align,
-                                leader,
-                            });
-                            current
-                                .paragraph
-                                .tab_stops
-                                .sort_by(|left, right| left.position.total_cmp(&right.position));
+                        if let Some((position, stop)) = parse_word_tab_stop(&attributes, part)? {
+                            let current = paragraph.as_mut().ok_or_else(|| {
+                                format_error(part, "DOCX paragraph parser state is inconsistent")
+                            })?;
+                            current.paragraph.tab_stops.retain(|existing| existing.position != position);
+                            if let Some(stop) = stop {
+                                current.paragraph.tab_stops.push(stop);
+                                current.paragraph.tab_stops.sort_by(|left, right| left.position.total_cmp(&right.position));
+                            }
                         }
                     }
                     "tab" | "ptab" if paragraph.is_some() => {
@@ -12258,38 +12266,9 @@ fn parse_styles_xml(
                             &mut styles.defaults,
                             default_paragraph_properties_depth.is_some(),
                         ) {
-                            let position = required_signed_twips(&attributes, "pos", part)?
-                                / TWIPS_PER_CSS_PIXEL;
-                            let value = optional_attribute(&attributes, "val", part)?;
-                            let tab_stops = &mut properties.tab_stops;
-                            tab_stops.retain(|&(existing, _)| existing != position);
-                            if position > 0.0 && value.as_deref() != Some("clear") {
-                                tab_stops.push((
-                                    position,
-                                    Some(TextTabStop {
-                                        position,
-                                        align: match value.as_deref() {
-                                            Some("center") => TextAlign::Center,
-                                            Some("right" | "end") => TextAlign::End,
-                                            _ => TextAlign::Start,
-                                        },
-                                        leader: match optional_attribute(
-                                            &attributes,
-                                            "leader",
-                                            part,
-                                        )?
-                                        .as_deref()
-                                        {
-                                            Some("dot") => TextTabLeader::Dot,
-                                            Some("hyphen") => TextTabLeader::Hyphen,
-                                            Some("underscore") => TextTabLeader::Underscore,
-                                            Some("middleDot") => TextTabLeader::MiddleDot,
-                                            _ => TextTabLeader::None,
-                                        },
-                                    }),
-                                ));
-                            } else {
-                                tab_stops.push((position, None));
+                            if let Some((position, stop)) = parse_word_tab_stop(&attributes, part)? {
+                                properties.tab_stops.retain(|&(existing, _)| existing != position);
+                                properties.tab_stops.push((position, stop));
                             }
                         }
                     }
@@ -13118,41 +13097,16 @@ fn parse_numbering_xml(
                         };
                     }
                     "tab" if current_level.is_some() => {
-                        let position = required_signed_twips(&attributes, "pos", part)?
-                            / TWIPS_PER_CSS_PIXEL;
-                        let value = optional_attribute(&attributes, "val", part)?;
-                        let definition = &mut current_level
-                            .as_mut()
-                            .ok_or_else(|| format_error(part, "DOCX numbering level is missing"))?
-                            .3;
-                        definition
-                            .tab_stops
-                            .retain(|existing| existing.position != position);
-                        if position > 0.0 && value.as_deref() != Some("clear") {
-                            definition.tab_stops.push(TextTabStop {
-                                position,
-                                align: match value.as_deref() {
-                                    Some("center") => TextAlign::Center,
-                                    Some("right" | "end") => TextAlign::End,
-                                    _ => TextAlign::Start,
-                                },
-                                leader: match optional_attribute(
-                                    &attributes,
-                                    "leader",
-                                    part,
-                                )?
-                                .as_deref()
-                                {
-                                    Some("dot") => TextTabLeader::Dot,
-                                    Some("hyphen") => TextTabLeader::Hyphen,
-                                    Some("underscore") => TextTabLeader::Underscore,
-                                    Some("middleDot") => TextTabLeader::MiddleDot,
-                                    _ => TextTabLeader::None,
-                                },
-                            });
-                            definition.tab_stops.sort_by(|left, right| {
-                                left.position.total_cmp(&right.position)
-                            });
+                        if let Some((position, stop)) = parse_word_tab_stop(&attributes, part)? {
+                            let definition = &mut current_level
+                                .as_mut()
+                                .ok_or_else(|| format_error(part, "DOCX numbering level is missing"))?
+                                .3;
+                            definition.tab_stops.retain(|existing| existing.position != position);
+                            if let Some(stop) = stop {
+                                definition.tab_stops.push(stop);
+                                definition.tab_stops.sort_by(|left, right| left.position.total_cmp(&right.position));
+                            }
                         }
                     }
                     "ind" if current_level.is_some() => {
@@ -35130,6 +35084,122 @@ mod tests {
             Visual::Image { media_type, bytes, .. }
                 if media_type == "image/gif" && bytes.as_slice() == b"GIF89arest"
         ));
+    }
+
+    #[test]
+    fn legacy_numbering_tabs_are_inactive_in_all_word_property_sources() {
+        for source in ["paragraph", "style", "numbering"] {
+            for (kind, expected) in [("num", 132.0), ("left", 156.0)] {
+                let tab = format!(r#"<w:tabs><w:tab w:val="{kind}" w:pos="900"/></w:tabs>"#);
+                let xml = format!(
+                    r#"<w:document xmlns:w="w"><w:body><w:p><w:pPr>
+                    <w:pStyle w:val="List"/><w:numPr><w:numId w:val="1"/></w:numPr>{}
+                    </w:pPr><w:r><w:t>Body</w:t></w:r></w:p></w:body></w:document>"#,
+                    if source == "paragraph" {
+                        tab.as_str()
+                    } else {
+                        ""
+                    }
+                );
+                let styles = format!(
+                    r#"<w:styles xmlns:w="w"><w:style w:type="paragraph" w:styleId="List"><w:pPr>{}</w:pPr></w:style></w:styles>"#,
+                    if source == "style" { tab.as_str() } else { "" }
+                );
+                let numbering = format!(
+                    r#"<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">
+                    <w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:pPr><w:ind w:left="540" w:hanging="360"/>{}</w:pPr>
+                    </w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+                    if source == "numbering" {
+                        tab.as_str()
+                    } else {
+                        ""
+                    }
+                );
+                let relationships = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                    <Relationship Id="n" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
+                    <Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+                    </Relationships>"#;
+                let bytes = stored_zip(&[
+                    (PART, xml.as_bytes()),
+                    ("word/_rels/document.xml.rels", relationships),
+                    ("word/styles.xml", styles.as_bytes()),
+                    ("word/numbering.xml", numbering.as_bytes()),
+                ]);
+                let package = Package::open(&bytes, Limits::default()).unwrap();
+                let document = parse(&package, PART, Vec::new()).unwrap();
+                let body = document
+                    .objects
+                    .iter()
+                    .find(|o| o.text.as_deref() == Some("Body"))
+                    .unwrap();
+                let Visual::TextLayout { layout, .. } = &body.visual else {
+                    panic!("body layout")
+                };
+                if kind == "num" {
+                    assert!(
+                        layout
+                            .tab_stops
+                            .iter()
+                            .all(|stop| (body.bounds.x + stop.position - 156.0).abs() > 0.01),
+                        "{source}: inactive tab must not enter the text layout"
+                    );
+                }
+                // Paragraph/style stops after the hanging indent do not move its implicit stop.
+                let expected = if source != "numbering" {
+                    132.0
+                } else {
+                    expected
+                };
+                assert!(
+                    (body.bounds.x + layout.first_line_indent - expected).abs() < 0.01,
+                    "{source} {kind}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_legacy_numbering_tabs_keep_word_hanging_indent() {
+        let bytes = include_bytes!("../../tests/fixtures/word-legacy-numbering-tabs.docx");
+        let package = Package::open(bytes, Limits::default()).unwrap();
+        let document = parse(&package, PART, Vec::new()).unwrap();
+        let labels: Vec<_> = document
+            .objects
+            .iter()
+            .filter(|object| object.stable_id.starts_with("docx:numbering:"))
+            .collect();
+        assert!(
+            labels.len() > 40,
+            "the original report's lists must be preserved"
+        );
+        let bullets: Vec<_> = labels
+            .into_iter()
+            .filter(|object| object.text.as_deref() == Some("•"))
+            .collect();
+        assert!(bullets.len() > 20);
+        for label in bullets {
+            // Word's native PDF: marker at margin + 9pt, body at margin + 27pt.
+            // The legacy num tab at 45pt is not an active left tab stop.
+            let body = document
+                .objects
+                .iter()
+                .find(|object| {
+                    object.unit_index == label.unit_index
+                        && object.stable_id.starts_with("docx:paragraph:")
+                        && (object.bounds.y - label.bounds.y).abs() < 0.01
+                })
+                .expect("bullet body");
+            let Visual::TextLayout { layout, .. } = &body.visual else {
+                panic!("bullet body layout");
+            };
+            assert!(
+                (body.bounds.x + layout.first_line_indent - label.bounds.x - 24.0).abs() < 0.01,
+                "{}: marker x={}, body x={}",
+                label.stable_id,
+                label.bounds.x,
+                body.bounds.x + layout.first_line_indent
+            );
+        }
     }
 
     #[test]
