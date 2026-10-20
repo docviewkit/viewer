@@ -4405,11 +4405,16 @@ fn parse_slide_ink(
         })();
         if let Err(error) = result {
             let error: Diagnostic = error;
+            // Legacy Office conditionals (<![if ...]>) are rejected by the XML
+            // tokenizer just like DTDs. It never evaluates either declaration,
+            // so this optional drawing can be omitted safely. Resource limits
+            // remain fatal; the slide's DrawingML content is independent.
             if !matches!(
                 error.code,
                 DiagnosticCode::FormatInvalid
                     | DiagnosticCode::XmlInvalid
                     | DiagnosticCode::XmlEncodingUnsupported
+                    | DiagnosticCode::XmlDtdForbidden
             ) {
                 return Err(error);
             }
@@ -18779,6 +18784,86 @@ mod tests {
                 .any(|object| { format!("{:?}", object.visual).contains("image/x-emf") }),
             "the supported DrawingML fallback must retain the linked object image"
         );
+    }
+
+    #[test]
+    fn real_activex_buttons_open_despite_optional_vml_declarations() {
+        for bytes in [
+            include_bytes!("../../tests/fixtures/activex_commandbutton.pptx").as_slice(),
+            include_bytes!("../../tests/fixtures/activex_togglebutton.pptx").as_slice(),
+        ] {
+            let document = crate::format::detect_and_parse(bytes, Limits::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(document.units.len(), 1);
+            assert_eq!(
+                document
+                    .objects
+                    .iter()
+                    .filter(|object| matches!(object.visual, Visual::Image { .. }))
+                    .count(),
+                3
+            );
+            assert!(
+                document
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == DiagnosticCode::ActiveContentBlocked)
+            );
+            assert!(
+                document
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == DiagnosticCode::UnsupportedFeature
+                        && d.location.part.as_deref() == Some("ppt/drawings/vmlDrawing1.vml"))
+            );
+        }
+    }
+
+    #[test]
+    fn real_activex_declarations_are_not_evaluated_or_allowed_in_required_xml() {
+        let package = Package::open(
+            include_bytes!("../../tests/fixtures/activex_commandbutton.pptx"),
+            Limits::default(),
+        )
+        .unwrap();
+        for part in ["ppt/drawings/vmlDrawing1.vml", "ppt/slides/slide1.xml"] {
+            let entries: Vec<_> = package.entry_names().map(|name| {
+                let data = if name == part {
+                    br#"<!DOCTYPE xml [<!ENTITY external SYSTEM "file:///must-not-be-read">]><xml>&external;</xml>"#.to_vec()
+                } else {
+                    package.required_part(name).unwrap().to_vec()
+                };
+                (name.to_owned(), data)
+            }).collect();
+            let bytes = stored_zip(
+                &entries
+                    .iter()
+                    .map(|(name, data)| (name.as_str(), data.as_slice()))
+                    .collect::<Vec<_>>(),
+            );
+            let result = crate::format::detect_and_parse(&bytes, Limits::default());
+            if part.ends_with(".vml") {
+                let document = result.unwrap().unwrap();
+                assert_eq!(
+                    document
+                        .objects
+                        .iter()
+                        .filter(|o| matches!(o.visual, Visual::Image { .. }))
+                        .count(),
+                    3
+                );
+                assert!(
+                    document
+                        .diagnostics
+                        .iter()
+                        .any(|d| d.code == DiagnosticCode::UnsupportedFeature
+                            && d.location.part.as_deref() == Some(part))
+                );
+            } else {
+                assert_eq!(result.unwrap_err().code, DiagnosticCode::XmlDtdForbidden);
+            }
+        }
     }
 
     #[test]
