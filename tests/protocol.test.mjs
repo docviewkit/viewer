@@ -695,6 +695,18 @@ test("core snapshots preserve objects positioned outside the unit origin", () =>
   assert.deepEqual(scene.objects[0].bounds, { x: -12, y: -8, width: 3, height: 4 });
 });
 
+test("snapshot strings decode independently across UTF-8 BOMs, absent fields and Unicode", () => {
+  const snapshot = pptxSceneSnapshot({
+    units: [{ type: 1, index: 0, id: "\ufeff页面🧭", width: 960, height: 720 }],
+    objects: [{ numericId: 1, id: "\ufeff对象é", unitIndex: 0 }],
+  });
+  const scene = decodeSnapshot(snapshot);
+  assert.equal(scene.info.units[0].id, "页面🧭");
+  assert.equal(scene.objects[0].id, "对象é");
+  assert.equal(scene.objects[0].parentId, undefined);
+  assert.deepEqual(decodeSnapshot(snapshot), scene);
+});
+
 test("invalid UTF-8 in a core snapshot is a structured protocol error", () => {
   const snapshot = pptxSceneSnapshot();
   const marker = encoder.encode("unit:0");

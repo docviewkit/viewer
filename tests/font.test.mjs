@@ -17,6 +17,7 @@ import {
   FontProviderCache,
   EmbeddedFontLoader,
   fontShorthand,
+  fontFallbackTextSegments,
   prepareEmbeddedFontAssets,
   prepareFontAssets,
   probeBrowserFontFace,
@@ -38,6 +39,18 @@ test("SDK development Latin labels avoid the wide CJK Yu Gothic UI fallback", ()
     assert.equal(approximateFontFamily(family, [0x41, 0x65e5]), "Hiragino Sans");
   }
   assert.equal(approximateFontFamily("Yu Gothic", [0x41]), "Hiragino Sans");
+});
+
+test("ASCII fallback boundaries preserve Unicode letter, number, symbol and neutral semantics", () => {
+  for (let codePoint = 0; codePoint < 128; codePoint += 1) {
+    const character = String.fromCodePoint(codePoint);
+    const strong = /[\p{Letter}\p{Number}\p{Symbol}]/u.test(character);
+    const text = `中${character}文`;
+    const expected = strong ? ["中", character, "文"] : [text];
+    assert.deepEqual(fontFallbackTextSegments(text).map(segment => segment.text), expected, `U+${codePoint.toString(16)}`);
+  }
+  assert.deepEqual(fontFallbackTextSegments("ＡaéЖΩ中あ한عאकก🧭\ue000\u0301 !").map(segment => segment.text),
+    ["ＡaéЖΩ", "中あ한", "عאकก", "🧭\ue000", "\u0301 !"]);
 });
 
 test("dominant text size aggregates character coverage and ignores invalid runs", () => {

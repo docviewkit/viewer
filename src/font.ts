@@ -1723,18 +1723,23 @@ function classifyFontScriptDemand(codePoints: readonly number[]): FontScriptDema
       || codePoint < 0
       || codePoint > 0x10ffff
       || codePoint >= 0xd800 && codePoint <= 0xdfff) continue;
-    const character = String.fromCodePoint(codePoint);
-    if (CJK_SCRIPT_DEMAND.test(character)) demands.add("cjk");
-    else if (EUROPEAN_SCRIPT_DEMAND.test(character) || NUMBER_DEMAND.test(character)) demands.add("latin");
-    else if (COMPLEX_SCRIPT_DEMAND.test(character) || LETTER_DEMAND.test(character)) demands.add("complex");
-    else if (SYMBOL_DEMAND.test(character)) demands.add("symbol");
-    else hasVisibleNeutral ||= VISIBLE_NEUTRAL_DEMAND.test(character);
+    const demand = characterScriptDemand(codePoint);
+    if (demand !== undefined) demands.add(demand);
+    else hasVisibleNeutral ||= VISIBLE_NEUTRAL_DEMAND.test(String.fromCodePoint(codePoint));
     if (demands.size > 1) return "mixed";
   }
   return demands.values().next().value ?? (hasVisibleNeutral ? "symbol" : "latin");
 }
 
-function characterScriptDemand(character: string): Exclude<FontScriptDemand, "mixed"> | undefined {
+function characterScriptDemand(code: number): Exclude<FontScriptDemand, "mixed"> | undefined {
+  // These are exactly the ASCII letters/numbers and Unicode Symbol categories
+  // handled below, without constructing a one-character string for each scalar.
+  if (code <= 0x7f) {
+    if (code >= 0x41 && code <= 0x5a || code >= 0x61 && code <= 0x7a || code >= 0x30 && code <= 0x39) return "latin";
+    return code === 0x24 || code === 0x2b || code >= 0x3c && code <= 0x3e
+      || code === 0x5e || code === 0x60 || code === 0x7c || code === 0x7e ? "symbol" : undefined;
+  }
+  const character = String.fromCodePoint(code);
   if (CJK_SCRIPT_DEMAND.test(character)) return "cjk";
   if (EUROPEAN_SCRIPT_DEMAND.test(character) || NUMBER_DEMAND.test(character)) return "latin";
   if (COMPLEX_SCRIPT_DEMAND.test(character) || LETTER_DEMAND.test(character)) return "complex";
@@ -1754,8 +1759,7 @@ export function fontFallbackTextSegments(text: string): readonly FontFallbackTex
   let demand: Exclude<FontScriptDemand, "mixed"> | undefined;
   for (let index = 0; index < text.length;) {
     const codePoint = text.codePointAt(index)!;
-    const character = String.fromCodePoint(codePoint);
-    const nextDemand = characterScriptDemand(character);
+    const nextDemand = characterScriptDemand(codePoint);
     if (nextDemand !== undefined) {
       if (demand !== undefined && nextDemand !== demand) {
         segments.push(Object.freeze({ text: text.slice(start, index), start, end: index }));
@@ -1763,7 +1767,7 @@ export function fontFallbackTextSegments(text: string): readonly FontFallbackTex
       }
       demand = nextDemand;
     }
-    index += character.length;
+    index += codePoint > 0xffff ? 2 : 1;
   }
   segments.push(Object.freeze({ text: text.slice(start), start, end: text.length }));
   return Object.freeze(segments);
