@@ -2621,6 +2621,7 @@ struct DocCharStyle {
     font_size_bi: Option<f32>,
     color: u32,
     color_bi: u32,
+    highlight: u32,
     bold: bool,
     bold_bi: bool,
     italic: bool,
@@ -2645,6 +2646,7 @@ impl Default for DocCharStyle {
             font_size_bi: None,
             color: 0x0000_00ff,
             color_bi: 0x0000_00ff,
+            highlight: 0,
             bold: false,
             bold_bi: false,
             italic: false,
@@ -2708,6 +2710,7 @@ struct DocCharPatch {
     font_size_bi: Option<f32>,
     color: Option<u32>,
     color_bi: Option<u32>,
+    highlight: Option<u32>,
     bold: Option<u8>,
     bold_bi: Option<u8>,
     italic: Option<u8>,
@@ -2734,6 +2737,7 @@ impl DocCharPatch {
             && self.font_size_bi.is_none()
             && self.color.is_none()
             && self.color_bi.is_none()
+            && self.highlight.is_none()
             && self.bold.is_none()
             && self.bold_bi.is_none()
             && self.italic.is_none()
@@ -2781,6 +2785,9 @@ impl DocCharPatch {
         }
         if source.color_bi.is_some() {
             self.color_bi = Some(resolved.color_bi);
+        }
+        if source.highlight.is_some() {
+            self.highlight = Some(resolved.highlight);
         }
         if source.bold.is_some() {
             self.bold = Some(u8::from(resolved.bold));
@@ -2853,6 +2860,9 @@ impl DocCharPatch {
         }
         if let Some(color) = self.color_bi {
             style.color_bi = color;
+        }
+        if let Some(highlight) = self.highlight {
+            style.highlight = highlight;
         }
         if let Some(operand) = self.bold {
             style.bold = doc_toggle_value(operand, style_baseline.bold, style.bold);
@@ -3087,6 +3097,7 @@ struct DocListLevel {
     placeholder_offsets: Vec<u8>,
     template: Vec<u16>,
     follow: u8,
+    paragraph_properties: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -3844,7 +3855,7 @@ fn parse_doc(
         })
         .filter(|footnote| !footnote.paragraphs.is_empty())
         .collect::<Vec<_>>();
-    let list_materialization = materialize_doc_list_prefixes(&mut paragraphs, &list_tables);
+    let list_materialization = materialize_doc_list_prefixes(&mut paragraphs, &list_tables)?;
     let mut inline_images = HashMap::new();
     let mut image_bytes = 0usize;
     for paragraph in paragraphs
@@ -5305,6 +5316,15 @@ fn parse_doc_list_level(
         .checked_add(paragraph_properties)
         .and_then(|value| value.checked_add(character_properties))
         .ok_or_else(|| format_error("DOC LVL", "list level property data overflows"))?;
+    let properties = table
+        .get(fixed_end..fixed_end + paragraph_properties)
+        .ok_or_else(|| format_error("DOC LVL", "list paragraph properties are truncated"))?;
+    let mut paragraph_properties = Vec::new();
+    paragraph_properties
+        .try_reserve(properties.len())
+        .map_err(|_| allocation_error("DOC list paragraph properties"))?;
+    paragraph_properties.extend_from_slice(properties);
+    apply_doc_paragraph_grpprl(&paragraph_properties, &mut DocParagraphStyle::default())?;
     let character_count = usize::from(read_u16(table, string_offset, "DOC LVL")?);
     if character_count > max_characters {
         return Err(
@@ -5359,6 +5379,7 @@ fn parse_doc_list_level(
         placeholder_offsets,
         template,
         follow,
+        paragraph_properties,
     })
 }
 
@@ -6422,11 +6443,9 @@ fn apply_doc_paragraph_sprm(
         0x260a => {
             style.list_level = operand[0].min(8);
             style.list_level_present = true;
-            apply_doc_list_indent(style);
         }
         0x460b => {
             style.list_id = i16::from_le_bytes([operand[0], operand[1]]);
-            apply_doc_list_indent(style);
         }
         0x2447 => style.use_page_grid = operand[0] != 0,
         0x5400 => {
@@ -6766,6 +6785,13 @@ fn parse_doc_character_patch_state(grpprl: &[u8]) -> Result<(DocCharPatch, bool)
             }
             0x4a60 => patch.color_bi = Some(doc_palette_color(operand[0])),
             0x286f => patch.hint = Some(operand[0]),
+            0x2a0c => {
+                patch.highlight = Some(if operand[0] == 0 {
+                    0
+                } else {
+                    doc_palette_color(operand[0])
+                })
+            }
             0x2a42 => patch.color = Some(doc_palette_color(operand[0])),
             0x6870 => {
                 patch.color = Some(if operand[3] == 0xff {
@@ -8081,7 +8107,7 @@ fn doc_text_run(
         italic,
         underline: style.underline,
         strikethrough: style.strikethrough,
-        highlight: 0,
+        highlight: style.highlight,
         baseline_shift: style.baseline_shift,
         letter_spacing: 0.0,
         horizontal_scale: 1.0,
@@ -8635,7 +8661,7 @@ struct DocListMaterialization {
 fn materialize_doc_list_prefixes(
     paragraphs: &mut [NativeParagraph],
     lists: &DocListTables,
-) -> DocListMaterialization {
+) -> Result<DocListMaterialization, Diagnostic> {
     let mut result = DocListMaterialization::default();
     let mut counters: HashMap<i32, [Option<u32>; 9]> = HashMap::new();
     for paragraph in paragraphs {
@@ -8646,6 +8672,9 @@ fn materialize_doc_list_prefixes(
         let prefix = if let Some((lsid, definition, level)) =
             lists.level(style.list_id, style.list_level)
         {
+            // MS-DOC 2.4.6.3, part 3: LVL paragraph properties include the
+            // marker and its body. Reuse the paragraph SPRM adapter, including tabs.
+            apply_doc_paragraph_grpprl(&level.paragraph_properties, &mut paragraph.style)?;
             let level_index = usize::from(style.list_level);
             let state = counters.entry(lsid).or_insert([None; 9]);
             for value in &mut state[level_index + 1..] {
@@ -8659,11 +8688,12 @@ fn materialize_doc_list_prefixes(
             prefix
         } else {
             result.missing_definition = true;
+            apply_doc_list_indent(&mut paragraph.style);
             "•\t".to_owned()
         };
         paragraph.list_prefix = Some(prefix);
     }
-    result
+    Ok(result)
 }
 
 fn render_doc_list_prefix(
@@ -19942,6 +19972,88 @@ mod tests {
 
     #[cfg(feature = "legacy-office-formats")]
     #[test]
+    #[ignore = "requires the confidential original via DOC_REGRESSION_FILE"]
+    fn native_doc_private_highlight() {
+        let bytes = std::fs::read(std::env::var("DOC_REGRESSION_FILE").expect("original DOC path"))
+            .unwrap();
+        let document = detect_and_parse(&bytes, Limits::default())
+            .unwrap()
+            .unwrap();
+        let mut yellow_runs = 0;
+        for object in &document.objects {
+            if let Visual::TextLayout { visual, .. } = &object.visual {
+                if let Visual::RichText { runs, .. } = visual.as_ref() {
+                    yellow_runs += runs
+                        .iter()
+                        .filter(|run| run.highlight == 0xffff_00ff)
+                        .count();
+                }
+            }
+        }
+        assert!(
+            yellow_runs >= 5,
+            "missing source yellow highlighting: {yellow_runs}"
+        );
+    }
+
+    #[cfg(feature = "legacy-office-formats")]
+    #[test]
+    #[ignore = "requires the confidential original via DOC_REGRESSION_FILE"]
+    fn native_doc_private_numbering() {
+        let bytes = std::fs::read(std::env::var("DOC_REGRESSION_FILE").expect("original DOC path"))
+            .unwrap();
+        let document = detect_and_parse(&bytes, Limits::default())
+            .unwrap()
+            .unwrap();
+        for (cp, left, first) in [(1028, 12.0, -24.0), (1048, 16.0, -28.0)] {
+            let object = document
+                .objects
+                .iter()
+                .find(|object| {
+                    matches!(object.source.locator,
+                SourceLocator::Legacy { text_range: Some((start, _)), .. } if start == cp)
+                })
+                .unwrap();
+            let Visual::TextLayout { layout, .. } = &object.visual else {
+                panic!("missing layout");
+            };
+            let paragraph = &layout.paragraphs[0];
+            assert_eq!(
+                paragraph.margin_left, left,
+                "source list indentation at CP {cp}"
+            );
+            assert_eq!(paragraph.first_line_indent, first);
+            assert!(
+                layout
+                    .tab_stops
+                    .iter()
+                    .any(|tab| (tab.position - left).abs() < 0.01)
+            );
+        }
+    }
+
+    #[test]
+    fn native_doc_highlight_inherits_and_can_be_cleared() {
+        let yellow = parse_doc_character_patch(&[0x0c, 0x2a, 7]).unwrap();
+        assert!(!yellow.is_empty());
+        let style = yellow.apply(&DocCharStyle::default());
+        assert_eq!(
+            doc_text_run('中', &style, &[], false).highlight,
+            0xffff_00ff
+        );
+        let mut resolved = DocCharPatch::default();
+        resolved.record_resolved_values(&yellow, &style);
+        assert_eq!(
+            resolved.apply(&DocCharStyle::default()).highlight,
+            0xffff_00ff
+        );
+        let clear = parse_doc_character_patch(&[0x0c, 0x2a, 0]).unwrap();
+        assert_eq!(clear.apply(&style).highlight, 0);
+        assert_eq!(DocCharPatch::default().apply(&style).highlight, 0xffff_00ff);
+    }
+
+    #[cfg(feature = "legacy-office-formats")]
+    #[test]
     fn supplied_doc_sample_chart() {
         let document = detect_and_parse(
             include_bytes!("../../tests/fixtures/file-sample_1MB.doc"),
@@ -22090,10 +22202,17 @@ mod tests {
         table[cursor + 4] = 0;
         table[cursor + 6] = 1;
         table[cursor + 15] = 0;
-        write_u16(&mut table, cursor + 28, 2);
-        write_u16(&mut table, cursor + 30, 0);
-        write_u16(&mut table, cursor + 32, 0x3001);
-        cursor += 34;
+        // Original DOC LVL PAPX, containing only formatting metadata.
+        let properties = [
+            13, 198, 5, 0, 1, 180, 0, 6, 15, 132, 180, 0, 94, 132, 180, 0, 17, 132, 152, 254, 96,
+            132, 152, 254,
+        ];
+        table[cursor + 25] = properties.len() as u8;
+        table[cursor + 28..cursor + 52].copy_from_slice(&properties);
+        write_u16(&mut table, cursor + 52, 2);
+        write_u16(&mut table, cursor + 54, 0);
+        write_u16(&mut table, cursor + 56, 0x3001);
+        cursor += 58;
 
         write_u32(&mut table, cursor, 1);
         table[cursor + 4] = 0x17;
@@ -22161,8 +22280,11 @@ mod tests {
             paragraph("Bullet", 2),
         ];
 
-        let result = materialize_doc_list_prefixes(&mut paragraphs, &lists);
+        let result = materialize_doc_list_prefixes(&mut paragraphs, &lists).unwrap();
 
+        assert_eq!(paragraphs[0].style.margin_left, 12.0);
+        assert_eq!(paragraphs[0].style.first_line_indent, -24.0);
+        assert_eq!(doc_tab_stops(paragraphs[0].style)[0].position, 12.0);
         assert!(!result.missing_definition);
         assert!(!result.approximated_number_format);
         assert_eq!(

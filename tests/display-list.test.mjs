@@ -228,6 +228,26 @@ test("authoritative line breaks preserve UTF-16 offsets across styled runs", () 
   assert.ok(single.runs.every(r => r.line === 0));
 });
 
+test("source list outdents can extend left of the paragraph frame", () => {
+  const context = recordingContext();
+  const run = { text: "1.\tBody\n2.\tBody", fontFamily: "Arial", fontSize: 12,
+    color: 0xff, bold: false, italic: false, letterSpacing: 0 };
+  const paragraph = { align: "start", marginLeft: 12, marginRight: 0,
+    firstLineIndent: -24, defaultTabStop: 48 };
+  const layout = layoutTextRuns(context, [run], { maxWidth: 300, minX: -108,
+    paragraphs: [paragraph, paragraph], tabStops: [{ position: 12, align: "start", leader: "none" }] });
+  for (const line of [0, 1]) {
+    const ink = layout.runs.filter(item => item.line === line && item.text.trim());
+    assert.equal(ink[0].x, -12, "preserve the authored marker outdent");
+    assert.equal(ink.find(item => item.text.includes("Body")).x, 12, "body uses the authored tab");
+  }
+  const bounded = layoutTextRuns(context, [{ ...run, text: "Visible" }], {
+    maxWidth: 300, minX: -108,
+    paragraphs: [{ ...paragraph, firstLineIndent: -5376 }],
+  });
+  assert.equal(bounded.runs[0].x, -108, "extreme outdents stop at the drawable page edge");
+});
+
 test("fill characters use measured spare width and preserve source offsets", () => {
   const context = recordingContext();
   context.measureText = function(text) {
