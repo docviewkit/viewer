@@ -9953,7 +9953,14 @@ fn odf_text_layout(
                 TextParagraphLayout {
                     align: paragraph_style.align,
                     margin_left: if paragraph_style.margin_left != 0.0 {
-                        paragraph_style.margin_left.max(0.0)
+                        // Legacy ODF space-before is relative to the paragraph's margin.
+                        // Its label width supplies the body margin only when no paragraph
+                        // margin is authored; it must not replace the relative list offset.
+                        (paragraph_style.margin_left
+                            + list_layout.map_or(0.0, |layout| {
+                                layout.margin_left + layout.first_line_indent
+                            }))
+                        .max(0.0)
                     } else {
                         list_layout.map_or(0.0, |layout| layout.margin_left.max(0.0))
                     },
@@ -13712,6 +13719,31 @@ mod tests {
             })
             .unwrap();
         assert_eq!(object.text.as_deref(), Some("\n–\t1st\n–\t2nd\n–\t3rd"));
+    }
+
+    #[test]
+    fn supplied_odp_nested_list_adds_space_before_to_paragraph_indent() {
+        for bytes in [
+            include_bytes!("../../tests/fixtures/odp-paragraph-list-indent.odp").as_slice(),
+            include_bytes!("../../tests/fixtures/odg-paragraph-list-indent.odg").as_slice(),
+        ] {
+            let package = Package::open(bytes, Limits::default()).unwrap();
+            let doc = parse(&package).unwrap();
+            let object = doc
+                .objects
+                .iter()
+                .find(|o| o.text.as_deref().is_some_and(|s| s.contains("副标题")))
+                .unwrap();
+            let Visual::TextLayout { layout, .. } = &object.visual else {
+                panic!("list layout")
+            };
+            assert_eq!(layout.paragraphs[0].margin_left, 24.0);
+            assert_eq!(layout.paragraphs[0].first_line_indent, -24.0);
+            // Native Impress/Draw: nested marker/body are 72/90pt from frame start.
+            assert_eq!(layout.paragraphs[1].margin_left, 120.0);
+            assert_eq!(layout.paragraphs[1].first_line_indent, -24.0);
+            assert_eq!(layout.paragraphs[3].margin_left, 24.0);
+        }
     }
 
     #[test]

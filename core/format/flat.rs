@@ -104,6 +104,7 @@ struct RichTextBlock {
     style: RtfParagraphStyle,
     picture: Option<RtfPicture>,
     table_row: Option<RtfTableRow>,
+    has_list_label: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +129,7 @@ struct RtfState {
     color_index: usize,
     unicode_skip: usize,
     pending_ignorable: bool,
+    list_label: bool,
     paragraph: RtfParagraphStyle,
 }
 
@@ -145,6 +147,7 @@ impl Default for RtfState {
             color_index: 0,
             unicode_skip: 1,
             pending_ignorable: false,
+            list_label: false,
             paragraph: RtfParagraphStyle::default(),
         }
     }
@@ -257,6 +260,7 @@ struct RtfParser<'a> {
     current: RichTextBlock,
     footnotes: Vec<RichTextBlock>,
     current_footnote: Option<RichTextBlock>,
+    current_list_label: Option<RichTextBlock>,
     footnote_number: u32,
     fonts: HashMap<i32, String>,
     colors: Vec<u32>,
@@ -297,6 +301,7 @@ pub(super) fn parse_rtf(
         current: RichTextBlock::default(),
         footnotes: Vec::new(),
         current_footnote: None,
+        current_list_label: None,
         footnote_number: 0,
         fonts: HashMap::new(),
         colors: Vec::new(),
@@ -374,6 +379,23 @@ impl RtfParser<'_> {
             && previous.destination != RtfDestination::Footnote
         {
             self.finish_footnote()?;
+        }
+        if self.state.list_label && !previous.list_label {
+            self.flush_pending_surrogate()?;
+            if let Some(label) = self.current_list_label.take()
+                && !label.text.trim().is_empty()
+            {
+                let current = if previous.destination == RtfDestination::Footnote {
+                    self.current_footnote
+                        .as_mut()
+                        .ok_or_else(|| rtf_error("RTF list label has no footnote"))?
+                } else {
+                    &mut self.current
+                };
+                current.text.push_str(&label.text);
+                current.runs.extend(label.runs);
+                current.has_list_label = true;
+            }
         }
         self.group_offsets.pop();
         self.state = previous;
@@ -499,9 +521,19 @@ impl RtfParser<'_> {
                 self.state.destination = RtfDestination::ColorTable;
                 return Ok(());
             }
+            "listtext" | "pntext"
+                if matches!(
+                    self.state.destination,
+                    RtfDestination::Visible | RtfDestination::Footnote
+                ) && !self.state.list_label =>
+            {
+                self.state.list_label = true;
+                self.current_list_label = Some(RichTextBlock::default());
+                return Ok(());
+            }
             "stylesheet" | "info" | "filetbl" | "listtable" | "listoverridetable" | "generator"
             | "xmlnstbl" | "datastore" | "themedata" | "colorschememapping" | "latentstyles"
-            | "fldinst" | "listtext" => {
+            | "fldinst" => {
                 self.state.destination = RtfDestination::Skip;
                 return Ok(());
             }
@@ -626,10 +658,12 @@ impl RtfParser<'_> {
                 let destination = self.state.destination;
                 let paragraph = self.state.paragraph;
                 let unicode_skip = self.state.unicode_skip;
+                let list_label = self.state.list_label;
                 self.state = RtfState {
                     destination,
                     font_index: self.default_font,
                     unicode_skip,
+                    list_label,
                     paragraph,
                     ..RtfState::default()
                 };
@@ -716,7 +750,7 @@ impl RtfParser<'_> {
                 self.append_visible(&number)?;
             }
             "par" => {
-                if self.state.destination == RtfDestination::Footnote {
+                if self.state.list_label || self.state.destination == RtfDestination::Footnote {
                     self.append_visible("\n")?;
                 } else if self.table_row.is_some() {
                     if !self.current.text.is_empty() {
@@ -853,7 +887,11 @@ impl RtfParser<'_> {
             .unwrap_or("Arial");
         let text = super::normalize_symbol_font_character(text, Some(font_family));
         let run = self.rtf_run(text.clone());
-        let current = if self.state.destination == RtfDestination::Footnote {
+        let current = if self.state.list_label {
+            self.current_list_label
+                .as_mut()
+                .ok_or_else(|| rtf_error("RTF list label has no content state"))?
+        } else if self.state.destination == RtfDestination::Footnote {
             self.current_footnote
                 .as_mut()
                 .ok_or_else(|| rtf_error("RTF footnote text has no active destination"))?
@@ -1393,6 +1431,32 @@ fn rtf_error(message: impl Into<String>) -> Diagnostic {
         .in_part("input.rtf")
 }
 
+// Use the shared authored-paragraph layout for an RTF marker and its suffix tab.
+// origin is the host's authored left indent: body, table cell, or footnote.
+fn rtf_list_paragraphs(
+    block: &RichTextBlock,
+    origin: f32,
+) -> Vec<crate::model::TextParagraphLayout> {
+    if !block.has_list_label {
+        return Vec::new();
+    }
+    vec![crate::model::TextParagraphLayout {
+        align: block.style.align,
+        margin_left: (block.style.left_indent - origin).max(0.0),
+        margin_right: 0.0,
+        first_line_indent: block.style.first_line_indent,
+        default_tab_stop: TextLayout::default().default_tab_stop,
+        line_height: 0.0,
+        space_before: 0.0,
+        space_after: 0.0,
+        latin_line_break: true,
+        hanging_punctuation: false,
+        rule_above: None,
+        rule_below: None,
+        drop_cap: None,
+    }]
+}
+
 fn rtf_line_height(block: &RichTextBlock, font_metrics: &FontMetricTable) -> f32 {
     let maximum_font_size = block
         .runs
@@ -1488,6 +1552,11 @@ fn layout_rtf(
         let line_height = rtf_line_height(&paragraph, font_metrics);
         let paragraph_width =
             (content_width - paragraph.style.left_indent - paragraph.style.right_indent).max(1.0);
+        let hanging = if paragraph.has_list_label {
+            paragraph.style.first_line_indent.min(0.0)
+        } else {
+            0.0
+        };
         let line_count = if paragraph.table_row.is_none() && paragraph.picture.is_none() {
             rich_text_line_count(
                 &paragraph.text,
@@ -1583,6 +1652,7 @@ fn layout_rtf(
                             inset_top: twips(51),
                             inset_bottom: twips(55),
                             first_line_indent: cell.style.first_line_indent,
+                            paragraphs: rtf_list_paragraphs(&cell, 0.0),
                             ..TextLayout::default()
                         },
                         visual: Box::new(Visual::RichText {
@@ -1663,6 +1733,7 @@ fn layout_rtf(
         let numeric_id = u32::try_from(document.objects.len()).map_err(|_| object_limit())?;
         let text_length =
             u32::try_from(paragraph.text.chars().count()).map_err(|_| object_limit())?;
+        let list_layouts = rtf_list_paragraphs(&paragraph, paragraph.style.left_indent + hanging);
         let text = paragraph.text;
         document.objects.push(Object {
             numeric_id,
@@ -1672,9 +1743,9 @@ fn layout_rtf(
             kind: ObjectKind::Paragraph,
             unit_index,
             bounds: Rect {
-                x: page.margin_left + paragraph.style.left_indent,
+                x: page.margin_left + paragraph.style.left_indent + hanging,
                 y,
-                width: paragraph_width,
+                width: paragraph_width - hanging,
                 height: content_height,
             },
             z: i32::try_from(paragraph_index).unwrap_or(i32::MAX),
@@ -1697,6 +1768,7 @@ fn layout_rtf(
                     inset_top: 0.0,
                     inset_bottom: 0.0,
                     first_line_indent: paragraph.style.first_line_indent,
+                    paragraphs: list_layouts,
                     ..TextLayout::default()
                 },
                 visual: Box::new(Visual::RichText {
@@ -1764,6 +1836,11 @@ fn layout_rtf(
             let numeric_id = u32::try_from(document.objects.len()).map_err(|_| object_limit())?;
             let text_length =
                 u32::try_from(footnote.text.chars().count()).map_err(|_| object_limit())?;
+            let hanging = if footnote.has_list_label {
+                footnote.style.first_line_indent.min(0.0)
+            } else {
+                0.0
+            };
             document.objects.push(Object {
                 numeric_id,
                 parent_numeric_id: None,
@@ -1772,11 +1849,12 @@ fn layout_rtf(
                 kind: ObjectKind::Paragraph,
                 unit_index,
                 bounds: Rect {
-                    x: page.margin_left + footnote.style.left_indent,
+                    x: page.margin_left + footnote.style.left_indent + hanging,
                     y: footnote_y,
                     width: (content_width
                         - footnote.style.left_indent
-                        - footnote.style.right_indent)
+                        - footnote.style.right_indent
+                        - hanging)
                         .max(1.0),
                     height,
                 },
@@ -1796,6 +1874,10 @@ fn layout_rtf(
                 visual: Visual::TextLayout {
                     layout: TextLayout {
                         first_line_indent: footnote.style.first_line_indent,
+                        paragraphs: rtf_list_paragraphs(
+                            &footnote,
+                            footnote.style.left_indent + hanging,
+                        ),
                         ..TextLayout::default()
                     },
                     visual: Box::new(Visual::RichText {
@@ -2359,6 +2441,75 @@ mod tests {
         .expect("PDF rejection should not be a parse failure");
 
         assert!(parsed.is_none(), "PDF bytes must remain unsupported");
+    }
+
+    #[test]
+    fn supplied_rtf_bullet_labels_keep_native_hanging_body_anchor() {
+        for (bytes, body, marker) in [
+            (
+                include_bytes!("../../tests/fixtures/lo-bullet-label.rtf").as_slice(),
+                "AAA",
+                "·",
+            ),
+            (
+                include_bytes!("../../tests/fixtures/lo-legacy-bullet-label.rtf").as_slice(),
+                "Bullet",
+                "•",
+            ),
+        ] {
+            let doc =
+                super::parse_rtf(bytes, Limits::default(), &FontMetricTable::default()).unwrap();
+            let object = doc
+                .objects
+                .iter()
+                .find(|o| o.text.as_deref().is_some_and(|s| s.contains(body)))
+                .unwrap();
+            assert_eq!(
+                object.text.as_deref(),
+                Some(format!("{marker}\t{body}").as_str())
+            );
+            let crate::model::Visual::TextLayout { layout, .. } = &object.visual else {
+                panic!("list layout")
+            };
+            let paragraph = &layout.paragraphs[0];
+            assert_eq!(
+                object.bounds.x + paragraph.margin_left,
+                144.0,
+                "native body anchor"
+            );
+            assert_eq!(
+                object.bounds.x + paragraph.margin_left + paragraph.first_line_indent,
+                120.0,
+                "native marker anchor"
+            );
+        }
+    }
+
+    #[test]
+    fn rtf_list_labels_preserve_group_scope_and_do_not_leak_hidden_or_empty_markers() {
+        let bytes = br"{\rtf1{\info{\listtext Hidden\tab}}{\listtext\tab}\pard Body\par
+{\listtext{\plain 1.}\tab}\pard\fi-360\li720 Item\par
+{\footnote{\listtext 2.\tab}\pard\fi-360\li720 Note}}";
+        let doc = parse_rtf(bytes, Limits::default(), &FontMetricTable::default()).unwrap();
+        let texts: Vec<_> = doc
+            .objects
+            .iter()
+            .filter_map(|o| o.text.as_deref())
+            .collect();
+        assert!(texts.contains(&"Body"));
+        assert!(texts.contains(&"1.\tItem"));
+        assert!(texts.contains(&"2.\tNote"));
+        assert!(!texts.iter().any(|text| text.contains("Hidden")));
+        for object in doc
+            .objects
+            .iter()
+            .filter(|o| o.text.as_deref().is_some_and(|t| t.contains("\t")))
+        {
+            let crate::model::Visual::TextLayout { layout, .. } = &object.visual else {
+                panic!("list layout")
+            };
+            assert_eq!(object.bounds.x + layout.paragraphs[0].margin_left, 144.0);
+        }
     }
 
     #[test]

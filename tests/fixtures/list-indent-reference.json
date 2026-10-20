@@ -1,0 +1,82 @@
+{
+  "scope": "List marker preservation and authored marker/body anchors; not whole-document visual equivalence.",
+  "references": {
+    "word": "Microsoft Word native PDF export, /tmp/ov-list-word-bullet-reference/reference.pdf",
+    "odf": "LibreOffice Impress/Draw native PDF export; PDFKit text selection bounds converted from points to CSS px."
+  },
+  "cases": [
+    {
+      "fixture": "odp-paragraph-list-indent.odp",
+      "sha256": "d3ed49947fb9c3aace1371abfafcb0ddf2706c5dd4636fd895c696cdbb5bed74",
+      "source": "Local real-world /Users/wjfree/Downloads/test.odp, fifth slide; removed other pages and unreferenced package resources, retained original list/paragraph styles.",
+      "originalSha256": "60f33507297b503a51f96cd4dc2d291ae38c0bb66d7386f6a550331590a4f1f3",
+      "expected": {
+        "firstLevelBodyPx": 101.593333,
+        "secondLevelBodyPx": 197.593333,
+        "nestedBodyOffsetPx": 96
+      },
+      "before": {
+        "nestedBodyOffsetPx": 48
+      }
+    },
+    {
+      "fixture": "odg-paragraph-list-indent.odg",
+      "sha256": "af4edbc0ccdb52f8321180a7f78c4536959c0a1c19793df491e9f64fd81efa70",
+      "source": "Native Draw import of the real ODP page using --infilter=draw8, then native Save As ODG; graphics MIME independently verified.",
+      "expected": {
+        "nestedBodyOffsetPx": 96
+      },
+      "before": {
+        "nestedBodyOffsetPx": 48
+      }
+    },
+    {
+      "fixture": "lo-bullet-label.rtf",
+      "sha256": "b9d367a5b3bf04b9e1bc7452aaffc55e830c2b7039de8f1b0d89913433c88cdf",
+      "source": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/rtfexport/data/tdf167569.rtf",
+      "expected": {
+        "markerPx": 120,
+        "bodyPx": 144,
+        "gapPx": 24
+      },
+      "before": {
+        "marker": "omitted",
+        "bodyPx": 144
+      },
+      "upstreamBlobSha": "b82e4fd2d3d938fdc8f326a6595bccf835924ff8"
+    },
+    {
+      "fixture": "lo-legacy-bullet-label.rtf",
+      "sha256": "153f1c5674ee2cf4b37e74004ff899f1cb3dff759a23ca4534ba777a2ee0358d",
+      "source": "https://raw.githubusercontent.com/LibreOffice/core/master/sw/qa/extras/rtfexport/data/tdf104085.rtf",
+      "expected": {
+        "markerPx": 120,
+        "bodyPx": 144,
+        "gapPx": 24
+      },
+      "before": {
+        "markerPx": 144,
+        "bodyPx": 180,
+        "gapPx": 36
+      },
+      "upstreamBlobSha": "7deda534eaee5af3a57529227144c51df7a2ae2b"
+    }
+  ],
+  "semanticBoundaries": [
+    "ODP/ODG share the same ODF graphics text adapter. Legacy text:space-before is relative to an authored paragraph margin; the existing list label width remains the fallback body margin.",
+    "ODT label-alignment mode stores an absolute margin and explicit suffix/tab position. It is not equivalent to this legacy ODF graphics rule; its adapter remains independent and all 58 ODT tests pass.",
+    "RTF preserves the explicit cached listtext/pntext label and uses the shared TextParagraphLayout to anchor its suffix tab. This change does not implement list-table-only label generation or general RTF list numbering.",
+    "DOCX legacy inactive num tabs and DrawingML signed bullet indents have separate format semantics. No duplicate equivalent cross-format parser was found in the current worktree or HEAD."
+  ],
+  "verification": {
+    "before": "All four original/derived real-file cases fail in both Chromium and WebKit with the captured pre-fix Wasm.",
+    "after": "All four cases pass in Chromium and WebKit; no console errors.",
+    "coreTests": {
+      "flat": 8,
+      "odpAndOdg": 89,
+      "odtBoundary": 58
+    },
+    "jsFlatFormatTests": 11,
+    "screenshots": "output/playwright/list-indent/"
+  }
+}
