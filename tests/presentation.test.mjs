@@ -7,6 +7,24 @@ import { extendedFormatPack } from "../dist/extended-formats.js";
 import { createZip } from "./zip-fixture.mjs";
 import { readZipEntries } from "../scripts/accuracy-metamorphic.mjs";
 
+test("opens both supplied ActiveX PPTX files while isolating optional VML declarations", async () => {
+  const { Core, DEFAULT_LIMITS } = await import("../dist/core.js");
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
+  try {
+    for (const name of ["activex_commandbutton.pptx", "activex_togglebutton.pptx"]) {
+      const doc = core.open(await readFile(new URL(`fixtures/${name}`, import.meta.url)));
+      try {
+        assert.ok(doc.scene.info, `${name}: ${JSON.stringify(doc.scene.diagnostics)}`);
+        doc.loadUnit(0);
+        assert.equal(doc.scene.objects.filter(o => o.visual.kind === "image").length, 3);
+        assert.ok(doc.scene.diagnostics.some(d => d.code === "ACTIVE_CONTENT_BLOCKED"));
+        assert.ok(doc.scene.diagnostics.some(d => d.code === "UNSUPPORTED_FEATURE" &&
+          d.part === "ppt/drawings/vmlDrawing1.vml"));
+      } finally { doc.close(); }
+    }
+  } finally { core.close(); }
+});
+
 test("real 3D column chart projects joined faces and paints distant series first", async () => {
   const { Core, DEFAULT_LIMITS } = await import("../dist/core.js");
   const core = await Core.create(await readFile(new URL("../dist/office-viewer-core.wasm", import.meta.url)), DEFAULT_LIMITS);
