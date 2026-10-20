@@ -2364,28 +2364,38 @@ impl Paragraph {
         for source in value.chars() {
             let complex = style.force_complex_script
                 || font_character_class(source) == FontCharacterClass::ComplexScript;
-            let mut character_style = style.clone();
-            character_style.font_family = style
-                .fonts
-                .family_for(
-                    source,
-                    style.force_complex_script,
-                    theme,
-                    style.east_asia_script.as_deref(),
-                    &style.font_family,
+            let family = style.fonts.family_for(
+                source,
+                style.force_complex_script,
+                theme,
+                style.east_asia_script.as_deref(),
+                &style.font_family,
+            );
+            let (bold, italic, font_size) = if complex {
+                (
+                    style.complex_bold.unwrap_or(style.bold),
+                    style.complex_italic.unwrap_or(style.italic),
+                    style.complex_font_size.unwrap_or(style.font_size),
                 )
-                .to_owned();
-            if complex {
-                character_style.bold = style.complex_bold.unwrap_or(style.bold);
-                character_style.italic = style.complex_italic.unwrap_or(style.italic);
-                character_style.font_size = style.complex_font_size.unwrap_or(style.font_size);
-            } else if style.small_caps && source.is_lowercase() {
-                character_style.font_size *= 0.8;
-            }
-            if segment_style
-                .as_ref()
-                .is_some_and(|current| current != &character_style)
-            {
+            } else {
+                (
+                    style.bold,
+                    style.italic,
+                    if style.small_caps && source.is_lowercase() {
+                        style.font_size * 0.8
+                    } else {
+                        style.font_size
+                    },
+                )
+            };
+            // Only these four fields vary by character. Clone the remaining
+            // run properties once per resolved segment, rather than per glyph.
+            if segment_style.as_ref().is_some_and(|current| {
+                current.font_family != family
+                    || current.bold != bold
+                    || current.italic != italic
+                    || current.font_size != font_size
+            }) {
                 self.append_segment(
                     &segment,
                     segment_style.take().expect("segment style is present"),
@@ -2393,12 +2403,19 @@ impl Paragraph {
                 )?;
                 segment.clear();
             }
+            if segment_style.is_none() {
+                let mut resolved = style.clone();
+                resolved.font_family = family.to_owned();
+                resolved.bold = bold;
+                resolved.italic = italic;
+                resolved.font_size = font_size;
+                segment_style = Some(resolved);
+            }
             if style.caps || style.small_caps {
                 segment.extend(source.to_uppercase());
             } else {
                 segment.push(source);
             }
-            segment_style = Some(character_style);
         }
         if let Some(segment_style) = segment_style {
             self.append_segment(&segment, segment_style, part)?;
@@ -4999,6 +5016,11 @@ fn extract_text_boxes(
     styles: &Styles,
     theme: &DocxTheme,
 ) -> Result<VecDeque<TextBox>, Diagnostic> {
+    // The main parser still validates the full XML. Avoid a second tokenization
+    // when no text-box element can occur; UTF-16 stays on the decoded path.
+    if !bytes.contains(&0) && super::find_bytes(bytes, b"txbxContent", 0).is_none() {
+        return Ok(VecDeque::new());
+    }
     let mut depth = 0_usize;
     let mut alternate_content_depths = Vec::new();
     let mut hidden_fallback_depth = None;
@@ -30501,6 +30523,51 @@ mod tests {
                 ..
             } if (offset_x + 106.666_67).abs() < 0.01 && (offset_y + 48.0).abs() < 0.01
         ));
+    }
+
+    #[test]
+    fn text_box_preflight_preserves_utf16_and_full_document_validation() {
+        let xml = r#"<w:document xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml"><w:body>
+          <w:p><w:r><w:pict><v:rect style="width:200pt;height:40pt"><v:textbox><w:txbxContent>
+            <w:p><w:r><w:t>Box content</w:t></w:r></w:p>
+          </w:txbxContent></v:textbox></v:rect></w:pict></w:r></w:p>
+        </w:body></w:document>"#;
+        for little_endian in [true, false] {
+            for bom in [true, false] {
+                let mut bytes = Vec::new();
+                if bom {
+                    bytes.extend_from_slice(if little_endian {
+                        &[0xff, 0xfe]
+                    } else {
+                        &[0xfe, 0xff]
+                    });
+                }
+                for unit in xml.encode_utf16() {
+                    bytes.extend_from_slice(&if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+                let parsed =
+                    parse_document_xml(&bytes, Limits::default(), PART, Vec::new()).unwrap();
+                let document = layout_document(parsed, Limits::default(), PART).unwrap();
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .any(|object| object.text.as_deref() == Some("Box content"))
+                );
+            }
+        }
+        for xml in [
+            b"<w:document><w:body><w:p></w:body></w:document>".as_slice(),
+            b"<!DOCTYPE x><w:document><w:body/></w:document>".as_slice(),
+            b"<w:document><w:body><w:p><w:r><w:t>&unknown;</w:t></w:r></w:p></w:body></w:document>"
+                .as_slice(),
+        ] {
+            assert!(parse_document_xml(xml, Limits::default(), PART, Vec::new()).is_err());
+        }
     }
 
     #[test]
