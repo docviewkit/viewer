@@ -16499,6 +16499,7 @@ impl Layout<'_> {
                     0,
                     paragraph.text_length,
                     self.default_tab_stop,
+                    paragraph_width,
                     self.font_metrics,
                 ),
             })?;
@@ -17192,6 +17193,7 @@ impl Layout<'_> {
                             0,
                             paragraph.text_length,
                             self.default_tab_stop,
+                            width,
                             self.font_metrics,
                         ),
                     })?;
@@ -17467,6 +17469,7 @@ impl Layout<'_> {
                             0,
                             paragraph.text_length,
                             self.default_tab_stop,
+                            width,
                             self.font_metrics,
                         )
                     },
@@ -21765,6 +21768,7 @@ impl Layout<'_> {
                 0,
                 paragraph.text_length,
                 self.default_tab_stop,
+                text_width,
                 self.font_metrics,
             );
             if text_orientation != TextOrientation::Horizontal
@@ -22978,6 +22982,7 @@ impl Layout<'_> {
                 range_start,
                 range_end,
                 self.default_tab_stop,
+                bounds.width,
                 self.font_metrics,
             ),
         })?;
@@ -25179,6 +25184,7 @@ fn paragraph_visual(
     range_start: u32,
     range_end: u32,
     default_tab_stop: f32,
+    width: f32,
     font_metrics: &FontMetricTable,
 ) -> Visual {
     let visible_runs = paragraph
@@ -25258,8 +25264,42 @@ fn paragraph_visual(
             visual: Box::new(rich_text),
         };
     }
+    // Automatic hyphenation changes line count. Preserve these decisions for
+    // paint rather than letting the host wrap the same text into different lines.
+    let line_breaks = (paragraph.auto_hyphenation
+        && !paragraph.suppress_auto_hyphens
+        && paragraph.orientation == TextOrientation::Horizontal
+        && !east_asian_vertical)
+        .then(|| {
+            let characters = paragraph.text.chars().collect::<Vec<_>>();
+            let ranges = paragraph_line_ranges_from(
+                paragraph,
+                width,
+                font_metrics,
+                range_start,
+                range_start == 0,
+            );
+            let mut offsets = Vec::new();
+            let mut previous = range_start;
+            let mut utf16_offset = 0;
+            for (_, end) in ranges {
+                if end >= range_end {
+                    break;
+                }
+                utf16_offset += characters[previous as usize..end as usize]
+                    .iter()
+                    .map(|c| c.len_utf16() as u32)
+                    .sum::<u32>();
+                previous = end;
+                if end > range_start && characters[end as usize - 1] != '\n' {
+                    offsets.push(utf16_offset);
+                }
+            }
+            offsets
+        });
     Visual::TextLayout {
         layout: TextLayout {
+            line_breaks,
             compress_punctuation: paragraph.compress_punctuation,
             direction: paragraph.direction,
             continues_after: range_end < paragraph.text_length
@@ -27089,6 +27129,26 @@ mod tests {
         .unwrap();
         let document = parse(&package, PART, Vec::new()).unwrap();
         assert!(!document.units.is_empty());
+        let paragraph = document
+            .objects
+            .iter()
+            .find(|object| {
+                object
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with("Please provide one answer"))
+            })
+            .unwrap();
+        let Visual::TextLayout { layout, .. } = &paragraph.visual else {
+            panic!("paragraph layout expected")
+        };
+        assert!(
+            layout
+                .line_breaks
+                .as_ref()
+                .is_some_and(|breaks| !breaks.is_empty())
+        );
+
         assert!(
             document
                 .diagnostics

@@ -9,7 +9,7 @@ use crate::model::{
 };
 
 const MAGIC: u32 = 0x3144_564f;
-const VERSION: u16 = 77;
+const VERSION: u16 = 78;
 const NONE: u32 = u32::MAX;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_VISUAL_DEPTH: usize = 64;
@@ -1660,6 +1660,16 @@ fn validate_visual(visual: &Visual, depth: usize) -> Result<(), ProtocolError> {
             {
                 return Err(ProtocolError::InvalidValue);
             }
+            if let Some(breaks) = &layout.line_breaks {
+                if breaks.len() > MAX_TEXT_PARAGRAPHS {
+                    return Err(ProtocolError::TooManyFields);
+                }
+                if breaks.iter().any(|offset| *offset == 0 || *offset == NONE)
+                    || breaks.windows(2).any(|pair| pair[0] >= pair[1])
+                {
+                    return Err(ProtocolError::InvalidValue);
+                }
+            }
             if layout.tab_stops.len() > MAX_TAB_STOPS
                 || layout.paragraphs.len() > MAX_TEXT_PARAGRAPHS
             {
@@ -2338,6 +2348,12 @@ fn write_visual_at_depth<'a>(
                     .fill_character
                     .map_or(0, |(_, character)| character as u32),
             );
+            writer.u32(layout.line_breaks.as_ref().map_or(NONE, |breaks| breaks.len() as u32));
+            if let Some(breaks) = &layout.line_breaks {
+                for offset in breaks {
+                    writer.u32(*offset);
+                }
+            }
             writer.u8(visual.code());
             writer.padding(3);
             write_visual_at_depth(writer, visual, depth + 1)
@@ -3263,7 +3279,10 @@ fn visual_length_at_depth<'a>(
                 .len()
                 .try_into()
                 .map_err(|_| ProtocolError::TooManyFields)?;
-            let mut total = 112;
+            let mut total = 116;
+            if let Some(breaks) = &layout.line_breaks {
+                add_length(&mut total, breaks.len().checked_mul(4).ok_or(ProtocolError::SnapshotTooLarge)?)?;
+            }
             add_length(
                 &mut total,
                 layout
@@ -4347,6 +4366,39 @@ mod tests {
 
         assert_eq!(writer.bytes.len(), 32);
         assert_eq!(writer.bytes[29], crate::model::BlendMode::ColorDodge.code());
+    }
+
+    #[test]
+    fn authoritative_line_breaks_encode_offsets_and_reject_invalid_order() {
+        for breaks in [None, Some(vec![]), Some(vec![3, 8])] {
+            let visual = Visual::TextLayout {
+                layout: TextLayout {
+                    line_breaks: breaks.clone(),
+                    ..TextLayout::default()
+                },
+                visual: Box::new(Visual::None),
+            };
+            let expected = visual_length(&visual, &mut BinaryResources::default()).unwrap();
+            let mut writer = Writer::new(expected).unwrap();
+            write_visual(&mut writer, &visual).unwrap();
+            assert!(!writer.overflowed);
+            assert_eq!(writer.bytes.len(), expected);
+            let offset = expected - 8 - breaks.as_ref().map_or(0, |b| b.len() * 4);
+            assert_eq!(
+                u32::from_le_bytes(writer.bytes[offset..offset + 4].try_into().unwrap()),
+                breaks.as_ref().map_or(super::NONE, |b| b.len() as u32)
+            );
+        }
+        for breaks in [vec![0], vec![3, 3], vec![8, 3], vec![super::NONE]] {
+            let visual = Visual::TextLayout {
+                layout: TextLayout {
+                    line_breaks: Some(breaks),
+                    ..TextLayout::default()
+                },
+                visual: Box::new(Visual::None),
+            };
+            assert!(super::validate_visual(&visual, 0).is_err());
+        }
     }
 
     #[test]

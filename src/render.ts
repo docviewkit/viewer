@@ -4122,6 +4122,7 @@ function drawPaintedGeometry(
 }
 
 export interface TextLayoutOptions {
+  readonly lineBreaks?: readonly number[];
   readonly fillCharacter?: SceneTextLayout["fillCharacter"];
   /** Rectangular exclusions relative to the text origin. */
   readonly wrapRegions?: readonly Rect[];
@@ -4816,6 +4817,8 @@ export function layoutTextRuns(
   runs: readonly SceneTextRun[],
   options: TextLayoutOptions,
 ): TextLayout {
+  // Adapter pagination and paint must consume the same line decisions.
+  if (options.lineBreaks !== undefined) options = { ...options, wrap: false };
   const maxWidth = Math.max(1, options.maxWidth);
   if (options.fillCharacter !== undefined) {
     const { offset, character } = options.fillCharacter;
@@ -5141,8 +5144,26 @@ export function layoutTextRuns(
     };
     const lineRight = (): number => maxWidth - (lineParagraphs[line]?.marginRight ?? paragraph.marginRight);
     applyLineWrap();
+    let breakIndex = 0;
     const horizontalItems = preparedRuns.flatMap(({ run, horizontalTokens }) => (
-      horizontalTokens.map((part) => ({ ...part, token: part.text, run }))
+      horizontalTokens.flatMap((part) => {
+        if (options.lineBreaks === undefined || part.start === undefined || part.end === undefined) {
+          return [{ token: part.text, run, ...(part.start === undefined ? {} : { start: part.start }), ...(part.end === undefined ? {} : { end: part.end }) }];
+        }
+        const items = [];
+        let start = part.start;
+        while (breakIndex < options.lineBreaks.length) {
+          const offset = options.lineBreaks[breakIndex]!;
+          if (offset > part.end) break;
+          breakIndex++;
+          if (offset < start) continue;
+          if (offset > start) items.push({ start, end: offset, token: part.text.slice(start - part.start, offset - part.start), run });
+          items.push({ start: offset, end: offset, token: "\u2028", run });
+          start = offset;
+        }
+        if (start < part.end) items.push({ start, end: part.end, token: part.text.slice(start - part.start), run });
+        return items;
+      })
     ));
     const listMarkerRun = paragraph.authored && runs.length > 1 && runs[0]?.text.endsWith("\t")
       && /\S/u.test(runs[0].text)
@@ -6208,6 +6229,7 @@ function drawText(
     fixedLineHeight: textLayout?.fixedLineHeight === true || (textLayout?.textBaseline ?? 0) > 0,
     compressPunctuation: textLayout?.compressPunctuation ?? false,
     continuesAfter: textLayout?.continuesAfter ?? false,
+    ...(textLayout?.lineBreaks === undefined ? {} : { lineBreaks: textLayout.lineBreaks }),
     wrapRegions: textLayout?.wrapRegions ?? [],
     maxWidth: columnWidth,
     maxHeight: availableHeight,

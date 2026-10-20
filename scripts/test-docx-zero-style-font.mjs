@@ -40,7 +40,17 @@ try {
             const objects = await doc.listObjects({ unitIndex });
             const frame = await doc.render({ unitIndex, scale: 1, includeTextFragments: true });
             try {
-              pages.push({ objects: objects.length, text: objects.map(o => o.text ?? "").join(" "), fragments: frame.textFragments.length });
+              let paragraphGap;
+              if (unitIndex === 0) {
+                const previous = objects.find(o => o.text?.startsWith("Please provide one answer"));
+                const next = objects.find(o => o.text?.startsWith("All answers are non-binding"));
+                if (!previous || !next) throw new Error("Missing survey paragraphs");
+                const previousBottom = Math.max(...frame.textFragments.filter(f => f.objectId === previous.id).map(f => f.transform.f + f.height));
+                const nextTop = Math.min(...frame.textFragments.filter(f => f.objectId === next.id).map(f => f.transform.f));
+                paragraphGap = nextTop - previousBottom;
+                if (previousBottom > nextTop) throw new Error(`Survey paragraphs overlap by ${previousBottom - nextTop}px`);
+              }
+              pages.push({ paragraphGap, objects: objects.length, text: objects.map(o => o.text ?? "").join(" "), fragments: frame.textFragments.length });
             } finally { frame.bitmap.close(); }
           }
           return { pages, diagnostics: doc.info.diagnostics };
@@ -52,8 +62,9 @@ try {
       assert.match(result.pages.at(-1).text, /Question 13:/);
       assert.deepEqual(errors, []);
       await page.screenshot({ path: `${output}/${name}-after.png`, fullPage: true });
+      await page.screenshot({ path: `${output}/${name}-overlap-fixed.png`, clip: { x: 310, y: 345, width: 850, height: 180 } });
       await writeFile(`${output}/${name}-result.json`, JSON.stringify(result, null, 2));
-      console.log(name, JSON.stringify({ pages: result.pages.length, fragments: result.pages.map(p => p.fragments), errors }));
+      console.log(name, JSON.stringify({ pages: result.pages.length, paragraphGap: result.pages[0].paragraphGap, fragments: result.pages.map(p => p.fragments), errors }));
     } finally { await browser.close(); }
   }
 } finally { server.kill(); }

@@ -215,6 +215,19 @@ test("supplied ODS number fills survive the snapshot and render at all three pos
   }
 });
 
+test("authoritative line breaks preserve UTF-16 offsets across styled runs", () => {
+  const style = { fontFamily: "Arial", fontSize: 14, color: 0xff, bold: false, italic: false, letterSpacing: 0 };
+  const runs = [{ ...style, text: "A😀BC" }, { ...style, bold: true, text: "DE FG" }];
+  const result = layoutTextRuns(recordingContext(), runs, {
+    maxWidth: 1, lineHeight: 18, lineBreaks: [3, 5, 8],
+  });
+  assert.deepEqual(Array.from({ length: 4 }, (_, line) => result.runs.filter(r => r.line === line).map(r => r.text).join("")), ["A😀", "BC", "DE ", "FG"]);
+  assert.equal(result.runs.map(r => r.text).join(""), "A😀BCDE FG");
+  assert.ok(result.runs.every(r => r.text === "A😀BCDE FG".slice(r.start, r.end)));
+  const single = layoutTextRuns(recordingContext(), runs, { maxWidth: 1, lineBreaks: [] });
+  assert.ok(single.runs.every(r => r.line === 0));
+});
+
 test("fill characters use measured spare width and preserve source offsets", () => {
   const context = recordingContext();
   context.measureText = function(text) {

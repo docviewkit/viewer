@@ -1652,6 +1652,8 @@ pub struct TextParagraphLayout {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextLayout {
+    /// Authoritative soft-line starts at UTF-16 offsets; None lets the host wrap.
+    pub line_breaks: Option<Vec<u32>>,
     /// Repeat a glyph into spare line width at a UTF-16 source-text offset.
     pub fill_character: Option<(u32, char)>,
     /// Rectangular exclusions relative to the inset text origin, in layout units.
@@ -1717,6 +1719,7 @@ pub struct TextLayout {
 impl Default for TextLayout {
     fn default() -> Self {
         Self {
+            line_breaks: None,
             fill_character: None,
             wrap_regions: Vec::new(),
             compress_punctuation: false,
