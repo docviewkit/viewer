@@ -1409,25 +1409,37 @@ try {
         });
         for (const [start, end, reverse] of [[0, 5, false], [0, 5, true], [0, 35, false]]) {
           const drag = await page.locator("docviewkit-viewer").evaluate((viewer, { start, end }) => {
-            // Each case starts a new selection, not a native drag of the previous selection.
             (viewer.shadowRoot.getSelection?.() ?? document.getSelection())?.removeAllRanges();
-            const item = [...viewer.shadowRoot.querySelectorAll(".text-layer-item")]
+            const page = viewer.shadowRoot.querySelector('.continuous-page[data-unit-index="0"]');
+            const item = [...page.querySelectorAll(".text-layer-item")]
               .find((node) => node.textContent.startsWith("中国"));
-            const all = [...viewer.shadowRoot.querySelectorAll(".text-layer-fragment")];
+            const all = [...page.querySelectorAll(".text-layer-fragment")];
             const fragments = all.slice(all.indexOf(item.querySelector(".text-layer-fragment")));
-            const point = (index, ratio) => {
-              const bounds = fragments[index].getBoundingClientRect();
-              return { x: bounds.left + bounds.width * ratio, y: bounds.top + bounds.height / 2 };
-            };
+            const selector = fragment => `.continuous-page[data-unit-index="0"] .text-layer-item[data-object-id="${CSS.escape(fragment.closest(".text-layer-item").dataset.objectId)}"] .text-layer-fragment[data-text-start="${fragment.dataset.textStart}"][data-text-end="${fragment.dataset.textEnd}"]`;
             return {
-              anchor: point(start, 0.1), focus: point(end, 0.9),
+              anchor: selector(fragments[start]), focus: selector(fragments[end]),
               expected: fragments.slice(start, end + 1).map((node) => node.textContent).join(""),
             };
           }, { start, end });
-          const [anchor, focus] = reverse ? [drag.focus, drag.anchor] : [drag.anchor, drag.focus];
-          await page.mouse.move(anchor.x, anchor.y);
+          const viewer = page.locator("docviewkit-viewer");
+          const anchor = viewer.locator(reverse ? drag.focus : drag.anchor);
+          const focus = viewer.locator(reverse ? drag.anchor : drag.focus);
+          const pointAt = async (node, ratio) => {
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const bounds = node.getBoundingClientRect();
+            return { x: bounds.left + bounds.width * ratio, y: bounds.top + bounds.height / 2 };
+          };
+          // Enter the workspace first, then remeasure after scrollbar layout.
+          // Locator.hover() would scroll these transformed glyphs under the toolbar.
+          const initial = await anchor.evaluate(pointAt, reverse ? 0.9 : 0.1);
+          await page.mouse.move(initial.x, initial.y);
+          const anchorPoint = await anchor.evaluate(pointAt, reverse ? 0.9 : 0.1);
+          await page.mouse.move(anchorPoint.x, anchorPoint.y);
+          const hit = await anchor.evaluate((node, point) => node.getRootNode().elementFromPoint(point.x, point.y) === node, anchorPoint);
+          if (!hit) throw new Error(`${name} OFD drag anchor missed its live glyph`);
           await page.mouse.down();
-          await page.mouse.move(focus.x, focus.y, { steps: 20 });
+          const focusPoint = await focus.evaluate(pointAt, reverse ? 0.1 : 0.9);
+          await page.mouse.move(focusPoint.x, focusPoint.y, { steps: 20 });
           await page.mouse.up();
           await page.waitForFunction(() => document.querySelector("docviewkit-viewer")
             .shadowRoot.querySelectorAll(".text-selection-highlight").length > 0);

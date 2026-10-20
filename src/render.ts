@@ -3097,6 +3097,20 @@ function pathFillPaint(paint: ScenePaint, mode: ScenePathFillMode): ScenePaint {
   return paint;
 }
 
+// Reuse the existing connector endpoint trimming and group-scale handling for
+// the explicit shaft/arrow layers emitted by the OOXML adapters.
+function layeredConnectorPath(geometry: SceneGeometry): SceneGeometry | undefined {
+  if (typeof geometry !== "object" || geometry.kind !== "layered-path" || geometry.layers.length < 2) return undefined;
+  const first = geometry.layers[0]!;
+  if (!geometry.layers.every(layer => layer.fillRule === first.fillRule
+    && (layer.fill === "none" && layer.stroke
+      || layer.fill === "normal" && !layer.stroke && isClosedLineEndSubpath(layer.commands)))) return undefined;
+  const commands = geometry.layers.flatMap(layer => layer.commands);
+  const ends = attachedClosedLineEnds(geometrySubpaths(commands));
+  if (ends.length === 0 || ends.length !== geometry.layers.filter(layer => layer.fill === "normal").length) return undefined;
+  return { kind: "path", fillRule: first.fillRule, commands };
+}
+
 function drawLegacyGeometry(
   context: OffscreenCanvasRenderingContext2D,
   object: SceneObject,
@@ -3104,6 +3118,13 @@ function drawLegacyGeometry(
   strokeStyle?: SceneStrokeStyle,
   groupedScale = 1,
 ): void {
+  if (visual.fill === visual.stroke) {
+    const geometry = layeredConnectorPath(visual.geometry);
+    if (geometry !== undefined) {
+      drawLegacyGeometry(context, object, { ...visual, geometry, fill: 0 }, strokeStyle, groupedScale);
+      return;
+    }
+  }
   if (typeof visual.geometry === "object" && visual.geometry.kind === "layered-path") {
     // Paint the entire composite surface before any outlines.
     for (const strokePass of [false, true]) {
@@ -4005,6 +4026,12 @@ function drawPaintedGeometry(
   strokeVisualPattern?: CanvasPattern,
   groupedScale = 1,
 ): void {
+  const connectorGeometry = layeredConnectorPath(visual.geometry);
+  if (connectorGeometry !== undefined && JSON.stringify(visual.fill) === JSON.stringify(visual.stroke)) {
+    drawPaintedGeometry(context, object, { ...visual, geometry: connectorGeometry, fill: { kind: "none" } },
+      fillImage, strokeStyle, fillVisualPattern, strokeVisualPattern, groupedScale);
+    return;
+  }
   if (typeof visual.geometry === "object" && visual.geometry.kind === "layered-path") {
     // Paint the entire composite surface before any outlines.
     for (const strokePass of [false, true]) {
