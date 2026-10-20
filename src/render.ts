@@ -4158,8 +4158,6 @@ export interface TextLayoutOptions {
   /** The final paragraph continues in another frame, so its last line may justify. */
   readonly continuesAfter?: boolean;
   readonly maxWidth: number;
-  /** Leftmost drawable coordinate relative to the text frame. Defaults to zero. */
-  readonly minX?: number;
   readonly maxHeight?: number;
   readonly lineHeight?: number;
   readonly align?: SceneTextAlign;
@@ -4682,28 +4680,6 @@ function finalizeHorizontalTextLayout(state: HorizontalTextLayoutState): TextLay
       || last < first
       || remaining <= 0) continue;
 
-    const whitespaceGaps: number[] = [];
-    if (paragraphAlign === "justify") {
-      for (let index = first + 1; index < last; index += 1) {
-        if (placements[index]?.text.trim() === "") whitespaceGaps.push(index);
-      }
-    }
-    if (whitespaceGaps.length > 0) {
-      const extra = remaining / whitespaceGaps.length;
-      let preceding = 0;
-      let gapCursor = 0;
-      for (let index = first; index <= last; index += 1) {
-        while ((whitespaceGaps[gapCursor] ?? Number.POSITIVE_INFINITY) < index) {
-          preceding += 1;
-          gapCursor += 1;
-        }
-        placementShift[index] = preceding * extra;
-        if (whitespaceGaps[gapCursor] === index) placementExtraWidth[index] = extra;
-      }
-      stretchedLines[lineIndex] = true;
-      continue;
-    }
-
     const lineGraphemes: Array<{ placementIndex: number; text: string }> = [];
     for (let placementIndex = first; placementIndex <= last; placementIndex += 1) {
       const placement = placements[placementIndex];
@@ -4722,6 +4698,31 @@ function finalizeHorizontalTextLayout(state: HorizontalTextLayoutState): TextLay
         eligibleBoundaries.push(index);
       }
     }
+    const whitespaceGaps: number[] = [];
+    if (paragraphAlign === "justify") {
+      for (let index = first + 1; index < last; index += 1) {
+        if (placements[index]?.text.trim() === "") whitespaceGaps.push(index);
+      }
+    }
+    // Word uses the available CJK character boundaries before stretching
+    // a Latin prefix's spaces (including a manually typed list marker).
+    const hasCjkGaps = eligibleBoundaries.some(index => CJK_SCRIPT.test(lineGraphemes[index]?.text ?? ""));
+    if (whitespaceGaps.length > 0 && !hasCjkGaps) {
+      const extra = remaining / whitespaceGaps.length;
+      let preceding = 0;
+      let gapCursor = 0;
+      for (let index = first; index <= last; index += 1) {
+        while ((whitespaceGaps[gapCursor] ?? Number.POSITIVE_INFINITY) < index) {
+          preceding += 1;
+          gapCursor += 1;
+        }
+        placementShift[index] = preceding * extra;
+        if (whitespaceGaps[gapCursor] === index) placementExtraWidth[index] = extra;
+      }
+      stretchedLines[lineIndex] = true;
+      continue;
+    }
+
     if (eligibleBoundaries.length === 0) continue;
     const extra = remaining / eligibleBoundaries.length;
     let preceding = 0;
@@ -5123,8 +5124,7 @@ export function layoutTextRuns(
     lineParagraphs[0] = paragraph;
     lineOffsets[0] = paragraph.spaceBefore;
     lineHeights[0] = paragraph.lineHeight;
-    const minX = Number.isFinite(options.minX) ? Math.min(0, options.minX ?? 0) : 0;
-    let x = Math.max(minX, paragraph.marginLeft + paragraph.firstLineIndent);
+    let x = Math.max(0, paragraph.marginLeft + paragraph.firstLineIndent);
     lineWidths[0] = x;
     lineStarts[0] = x;
     const lineBaseStarts: number[] = [x];
@@ -5341,7 +5341,7 @@ export function layoutTextRuns(
         nextOffset = Math.max(nextOffset, dropCapBottom + previousParagraph.spaceAfter + nextParagraph.spaceBefore);
         dropCapBottom = 0;
         dropCapRemaining = nextParagraph.dropCap?.characters ?? 0;
-        dropCapX = Math.max(minX, nextParagraph.marginLeft + nextParagraph.firstLineIndent);
+        dropCapX = Math.max(0, nextParagraph.marginLeft + nextParagraph.firstLineIndent);
       }
       let nextColumn = lineColumns[line] ?? 0;
       if (columns > 1
@@ -5360,7 +5360,7 @@ export function layoutTextRuns(
       lineCompressionCapacity[line] = 0;
       lineHasTab[line] = false;
       x = paragraphBreak
-        ? Math.max(minX, paragraph.marginLeft + paragraph.firstLineIndent)
+        ? Math.max(0, paragraph.marginLeft + paragraph.firstLineIndent)
         : paragraph.continuationX;
       lineWidths[line] = x;
       lineStarts[line] = x;
@@ -6261,8 +6261,6 @@ function drawText(
     continuesAfter: textLayout?.continuesAfter ?? false,
     ...(textLayout?.lineBreaks === undefined ? {} : { lineBreaks: textLayout.lineBreaks }),
     wrapRegions: textLayout?.wrapRegions ?? [],
-    // An outdent may use the page margin, but must not leave the page.
-    minX: rotated || rotationDegrees !== 0 ? 0 : -Math.max(0, originX),
     maxWidth: columnWidth,
     maxHeight: availableHeight,
     lineHeight: visual.kind === "rich-text" ? visual.lineHeight : visual.fontSize * 1.2,
