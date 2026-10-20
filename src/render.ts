@@ -4158,6 +4158,8 @@ export interface TextLayoutOptions {
   /** The final paragraph continues in another frame, so its last line may justify. */
   readonly continuesAfter?: boolean;
   readonly maxWidth: number;
+  /** Leftmost drawable coordinate relative to the text frame. Defaults to zero. */
+  readonly minX?: number;
   readonly maxHeight?: number;
   readonly lineHeight?: number;
   readonly align?: SceneTextAlign;
@@ -5121,7 +5123,8 @@ export function layoutTextRuns(
     lineParagraphs[0] = paragraph;
     lineOffsets[0] = paragraph.spaceBefore;
     lineHeights[0] = paragraph.lineHeight;
-    let x = Math.max(0, paragraph.marginLeft + paragraph.firstLineIndent);
+    const minX = Number.isFinite(options.minX) ? Math.min(0, options.minX ?? 0) : 0;
+    let x = Math.max(minX, paragraph.marginLeft + paragraph.firstLineIndent);
     lineWidths[0] = x;
     lineStarts[0] = x;
     const lineBaseStarts: number[] = [x];
@@ -5338,7 +5341,7 @@ export function layoutTextRuns(
         nextOffset = Math.max(nextOffset, dropCapBottom + previousParagraph.spaceAfter + nextParagraph.spaceBefore);
         dropCapBottom = 0;
         dropCapRemaining = nextParagraph.dropCap?.characters ?? 0;
-        dropCapX = Math.max(0, nextParagraph.marginLeft + nextParagraph.firstLineIndent);
+        dropCapX = Math.max(minX, nextParagraph.marginLeft + nextParagraph.firstLineIndent);
       }
       let nextColumn = lineColumns[line] ?? 0;
       if (columns > 1
@@ -5357,7 +5360,7 @@ export function layoutTextRuns(
       lineCompressionCapacity[line] = 0;
       lineHasTab[line] = false;
       x = paragraphBreak
-        ? Math.max(0, paragraph.marginLeft + paragraph.firstLineIndent)
+        ? Math.max(minX, paragraph.marginLeft + paragraph.firstLineIndent)
         : paragraph.continuationX;
       lineWidths[line] = x;
       lineStarts[line] = x;
@@ -6258,6 +6261,8 @@ function drawText(
     continuesAfter: textLayout?.continuesAfter ?? false,
     ...(textLayout?.lineBreaks === undefined ? {} : { lineBreaks: textLayout.lineBreaks }),
     wrapRegions: textLayout?.wrapRegions ?? [],
+    // An outdent may use the page margin, but must not leave the page.
+    minX: rotated || rotationDegrees !== 0 ? 0 : -Math.max(0, originX),
     maxWidth: columnWidth,
     maxHeight: availableHeight,
     lineHeight: visual.kind === "rich-text" ? visual.lineHeight : visual.fontSize * 1.2,
