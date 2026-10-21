@@ -25,11 +25,17 @@ try {
   });
   for (const [name, type] of Object.entries({ chromium, webkit })) {
     const browser = await type.launch({ headless: true });
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });
     try {
       const errors = [];
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      if (process.env.SHEET_DRAWING_BASELINE_WASM) {
+        const bytes = await readFile(process.env.SHEET_DRAWING_BASELINE_WASM);
+        await page.route("**/dist/office-viewer-pdf.wasm", route => route.fulfill({
+          contentType: "application/wasm", body: bytes,
+        }));
+      }
       await page.goto(`${url}examples/viewer.html?filePicker=true`);
       await page.waitForFunction(() => document.querySelector("#viewer").state.status === "ready");
       await page.locator("#viewer-file-input").setInputFiles(file);
@@ -45,6 +51,17 @@ try {
         const doc = await engine.open(await (await fetch("/tests/fixtures/numbers-multiple-sheets-charts.numbers")).arrayBuffer());
         try {
           const unit = doc.info.units[0];
+          const objects = await doc.listObjects();
+          const table = objects.find(object => object.unitIndex === 0 && object.type === "table");
+          const title = objects.find(object => object.unitIndex === 0 && object.text === "Monthly Budget");
+          const instructions = objects.find(object => object.unitIndex === 0 && object.text?.startsWith("HOW TO USE"));
+          const nativeLayout = {
+            // Read from Numbers' own accessibility geometry for the supplied file.
+            tableY: table?.bounds.y, expectedTableY: 440 * 4 / 3,
+            instructionsY: instructions?.bounds.y, expectedInstructionsY: 44 * 4 / 3,
+            titleWidth: title?.bounds.width,
+            charts: objects.filter(object => object.unitIndex === 0 && object.source.kind === "chart").length,
+          };
           const canvas = v.shadowRoot.querySelector(".surface");
           const actual = { width: canvas.width / v.state.zoom, height: canvas.height / v.state.zoom };
           const direct = await doc.render({ unitIndex: 0, scale: v.state.zoom, pixelRatio: 1,
@@ -66,12 +83,20 @@ try {
               if (y / v.state.zoom > gridHeight && pixels[offset + 3] > 0
                 && Math.min(pixels[offset], pixels[offset + 1], pixels[offset + 2]) < 220) overflowInk++;
             }
-            return { actual, expected: { width: unit.width, height: unit.height }, maxDelta, overflowInk };
+            return { actual, expected: { width: unit.width, height: unit.height }, maxDelta, overflowInk, nativeLayout,
+              percentageFragments: direct.textFragments.filter(fragment => fragment.text.includes("%") || /^\d+$/.test(fragment.text)).map(fragment => fragment.text) };
           } finally { direct.bitmap.close(); }
         } finally { doc.close(); engine.close(); }
       });
       assert.ok(full.actual.width >= full.expected.width - 1 && full.actual.height >= full.expected.height - 1,
         `${name}: chart clipped to table: ${JSON.stringify(full)}`);
+      assert.equal(full.nativeLayout.charts, 2, `${name}: missing native donut or column chart`);
+      assert.ok(Math.abs(full.nativeLayout.tableY - full.nativeLayout.expectedTableY) < 1,
+        `${name}: table must remain below both native charts`);
+      assert.ok(Math.abs(full.nativeLayout.instructionsY - full.nativeLayout.expectedInstructionsY) < 1
+        && full.nativeLayout.titleWidth > 670, `${name}: native title/instructions geometry lost`);
+      for (const percentage of ["29%", "21%", "17%"])
+        assert.ok(full.percentageFragments.includes(percentage), `${name}: wrapped doughnut label ${percentage}: ${JSON.stringify(full.percentageFragments)}`);
       assert.ok(full.overflowInk > 100, `${name}: missing chart pixels below the last table row`);
       assert.ok(full.maxDelta <= 1, `${name}: tiled chart differs from direct rendering: ${JSON.stringify(full)}`);
       // Exercise zoom, scroll, and cached tiles beyond the last cell in both axes.

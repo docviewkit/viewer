@@ -175,7 +175,11 @@ test("opens supplied Numbers tables after charts across multiple sheets", async 
     assert.equal(document.info.format, "numbers");
     assert.deepEqual(document.info.units.map(unit => unit.name), ["Budget", "Transactions"]);
     const objects = await document.listObjects();
-    assert.equal(objects.length, 144);
+    assert.ok(objects.length > 144, "native text boxes and both charts must be retained");
+    assert.equal(objects.filter(object => object.source.kind === "chart").length, 2);
+    const table = objects.find(object => object.type === "table" && object.unitIndex === 0);
+    assert.ok(Math.abs(table.bounds.y - 440 * 4 / 3) < 1);
+    assert.ok(objects.some(object => object.text === "Monthly Budget" && object.bounds.width > 670));
     for (const text of ["Category", "Entertainment", "205.75"]) {
       assert.ok(objects.some(object => object.type === "cell" && object.text === text));
     }
@@ -198,14 +202,19 @@ for (const file of ["numbers-multiple-sheets-charts.numbers", "chart-empty-title
     const canvas = installRecordingCanvas();
     try {
       const unit = document.info.units[0];
+      if (unit.rows === 0) {
+        const [page] = sheetPrintPages(unit);
+        assert.deepEqual(page.viewport, { x: 0, y: 0, width: unit.width, height: unit.height });
+        assert.ok(page.width > 0 && page.height > 0 && page.scale > 0);
+      }
       const firstSize = axis => axis.spans.find(span => span.start === 0)?.size ?? axis.defaultSize;
-      for (const [sheetSizes, dx, dy] of [
-        [undefined, 0, 0],
-        [{ rows: [], columns: [] }, 0, 0],
-        [{ rows: [{ index: 0, size: firstSize(unit.rowAxis) + 10 }],
-          columns: [{ index: 0, size: firstSize(unit.columnAxis) + 20 }] }, 20, 10],
-      ]) {
-        const frame = await document.render({ unitIndex: 0, scale: 1, sheetSizes });
+      const requests = [[undefined, 0, 0], [{ rows: [], columns: [] }, 0, 0]];
+      if (unit.rows > 0 && unit.columns > 0) requests.push([
+        { rows: [{ index: 0, size: firstSize(unit.rowAxis) + 10 }],
+          columns: [{ index: 0, size: firstSize(unit.columnAxis) + 20 }] }, 20, 10]);
+      for (const [sheetSizes, dx, dy] of requests) {
+        const frame = await document.render({ unitIndex: 0, scale: 1, sheetSizes,
+          ...(unit.rows === 0 ? { viewport: { x: 0, y: 0, width: unit.width, height: unit.height } } : {}) });
         try {
           assert.ok(Math.abs(frame.viewport.width - unit.width - dx) < .001,
             `chart width clipped: ${frame.viewport.width} instead of ${unit.width + dx}`);

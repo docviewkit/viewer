@@ -600,6 +600,19 @@ test("optional native packs preserve legacy Office and iWork source locators", (
   });
 });
 
+test("iWork adapters share native drawable source kinds", () => {
+  for (const [code, format, kindCode, unitType] of [[14, "pages", 3, 3], [15, "numbers", 2, 2], [16, "keynote", 1, 1]]) {
+    for (const kind of ["shape", "image", "media", "text-box", "table", "table-title", "table-grid", "table-cell", "chart", "chart-series"]) {
+      const source = decodeSnapshot(sourceSnapshot(code, kindCode, kind, [["component", "archive-42"]], unitType)).objects[0].source;
+      assert.equal(source.format, format);
+      assert.equal(source.kind, kind);
+      assert.equal(source.component, "archive-42");
+    }
+  }
+  assert.throws(() => decodeSnapshot(sourceSnapshot(15, 2, "body", [["component", "archive-42"]], 2)),
+    error => error?.code === "CORE_PROTOCOL_INVALID");
+});
+
 test("optional native source locators reject cross-family kinds", () => {
   assert.throws(
     () => decodeSnapshot(sourceSnapshot(11, 1, "cell", [["stream", "PowerPoint Document"]])),
