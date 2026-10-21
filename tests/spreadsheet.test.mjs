@@ -190,6 +190,37 @@ test("opens supplied Numbers tables after charts across multiple sheets", async 
   }
 });
 
+for (const file of ["numbers-multiple-sheets-charts.numbers", "chart-empty-title-original.xlsx", "oasis-3883-chart-legend.ods"]) {
+  test(`preserves drawing canvas extents with sheet size overrides in ${file}`, async () => {
+    const { engine, document } = await open(await readFile(new URL(
+      `./fixtures/${file}`, import.meta.url,
+    )));
+    const canvas = installRecordingCanvas();
+    try {
+      const unit = document.info.units[0];
+      const firstSize = axis => axis.spans.find(span => span.start === 0)?.size ?? axis.defaultSize;
+      for (const [sheetSizes, dx, dy] of [
+        [undefined, 0, 0],
+        [{ rows: [], columns: [] }, 0, 0],
+        [{ rows: [{ index: 0, size: firstSize(unit.rowAxis) + 10 }],
+          columns: [{ index: 0, size: firstSize(unit.columnAxis) + 20 }] }, 20, 10],
+      ]) {
+        const frame = await document.render({ unitIndex: 0, scale: 1, sheetSizes });
+        try {
+          assert.ok(Math.abs(frame.viewport.width - unit.width - dx) < .001,
+            `chart width clipped: ${frame.viewport.width} instead of ${unit.width + dx}`);
+          assert.ok(Math.abs(frame.viewport.height - unit.height - dy) < .001,
+            `chart height clipped: ${frame.viewport.height} instead of ${unit.height + dy}`);
+        } finally { frame.bitmap.close(); }
+      }
+    } finally {
+      document.close();
+      engine.close();
+      canvas.restore();
+    }
+  });
+}
+
 test("renders the original Numbers chart through the public protocol", async () => {
   const { engine, document } = await open(await readFile(new URL("./fixtures/chart-original.numbers", import.meta.url)));
   const canvas = installRecordingCanvas();

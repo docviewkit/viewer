@@ -183,6 +183,20 @@ class SheetAxisMapper {
   get total(): number { return this.offset(this.#count); }
 }
 
+/** Includes floating drawings beyond the cell grid, after row/column resizing. */
+export function sheetContentExtent(
+  unit: Pick<UnitDescriptor, "width" | "height">,
+  axes: {
+    readonly rows: Pick<SheetAxisMapper, "map" | "total">;
+    readonly columns: Pick<SheetAxisMapper, "map" | "total">;
+  },
+): { readonly width: number; readonly height: number } {
+  return {
+    width: Math.max(axes.columns.total, axes.columns.map(unit.width)),
+    height: Math.max(axes.rows.total, axes.rows.map(unit.height)),
+  };
+}
+
 const SHEET_CSS_PIXELS_PER_INCH = 96;
 const SHEET_DEFAULT_MARGINS = Object.freeze({ left: .7, right: .7, top: .75, bottom: .75 });
 const SHEET_PAPER_INCHES: Readonly<Record<number, readonly [number, number]>> = Object.freeze({
@@ -6983,11 +6997,12 @@ export class SceneRenderer {
       throw new OfficeEngineError("INVALID_RENDER_REQUEST", "colorScheme must be light or dark");
     }
     const watermark = request.watermark?.trim();
+    const extent = mappers === undefined ? unit : sheetContentExtent(unit, mappers);
     const viewport = request.viewport ?? {
       x: 0,
       y: 0,
-      width: mappers?.columns.total ?? unit.width,
-      height: mappers?.rows.total ?? unit.height,
+      width: extent.width,
+      height: extent.height,
     };
     validateNumber(viewport.x, "viewport.x", true);
     validateNumber(viewport.y, "viewport.y", true);
