@@ -167,6 +167,29 @@ function installRecordingCanvas() {
   };
 }
 
+test("opens supplied Numbers tables after charts across multiple sheets", async () => {
+  const { engine, document } = await open(await readFile(new URL(
+    "./fixtures/numbers-multiple-sheets-charts.numbers", import.meta.url,
+  )));
+  try {
+    assert.equal(document.info.format, "numbers");
+    assert.deepEqual(document.info.units.map(unit => unit.name), ["Budget", "Transactions"]);
+    const objects = await document.listObjects();
+    assert.equal(objects.length, 144);
+    for (const text of ["Category", "Entertainment", "205.75"]) {
+      assert.ok(objects.some(object => object.type === "cell" && object.text === text));
+    }
+    assert.ok(objects.some(object => object.unitIndex === 1 && object.text === "Groceries"));
+    assert.ok(objects.some(object => object.source.kind === "chart"));
+    for (const unit of document.info.units) {
+      assert.ok(objects.some(object => object.unitIndex === unit.index));
+    }
+  } finally {
+    document.close();
+    engine.close();
+  }
+});
+
 test("renders the original Numbers chart through the public protocol", async () => {
   const { engine, document } = await open(await readFile(new URL("./fixtures/chart-original.numbers", import.meta.url)));
   const canvas = installRecordingCanvas();

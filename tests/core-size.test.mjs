@@ -52,7 +52,11 @@ test("PDF pack stays within the reviewed binary size budget", async () => {
   // document rendering semantics remain unchanged.
   // Shared preflight reuse adds 2,181 bytes (3,144,830 -> 3,147,011).
   // Exact search and CMYK Decode tables: 3,147,815 -> 3,154,935 bytes.
-  assert.ok(bytes.byteLength <= 3_156_000, `PDF Wasm is ${bytes.byteLength} bytes`);
+  // Rebuilding pre-fix HEAD with the current shared scanner/font code yields
+  // 3,167,491 bytes (the previous dist pack was stale). The shared iWork ID
+  // allocator adds 56 bytes, to 3,167,547, and fixes the supplied two-sheet
+  // Numbers file; reviewed Pages/Keynote scenes remain identical.
+  assert.ok(bytes.byteLength <= 3_168_000, `PDF Wasm is ${bytes.byteLength} bytes`);
 });
 
 test("binary Dingbats font preserves the original decoded font bytes", async () => {
@@ -113,7 +117,10 @@ const scenes = {
   "pdf": {
     "word-original.pages": "9ec57779010c6bd3ee7f85f83c5594bacc8464ef281f333dde67e8013219d677",
     "keynote-first-line-indent.key": "d1b2ba39ae4a0356b99a0e043da10e03310aff094cf1ac8d2bf169b0dccf576e",
-    "chart-original.numbers": "cfe0aa24ce73398bd6ba8c73316b6da3a768640f002713079d5b07984080a920"
+    // Only cell/border numeric IDs become one-based to share the chart ID space.
+    // Compared all initial/incremental/full scene fields: content, z-order,
+    // geometry, visuals, source mappings and diagnostics remain identical.
+    "chart-original.numbers": "5353fa0ea3c990ca15a8141725df072b1e0887c02d8a4aca12e5d0a5f0a8e6f8"
   },
   "xps": {
     "ecma-388-cover.xps": "0b77e74e8931c0ed08a97a5587e488714c52d259e1b3d7c604a68f9553d628f6"

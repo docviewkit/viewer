@@ -2557,6 +2557,15 @@ fn numbers_document(
     })
 }
 
+// Native cells, table borders, and chart parents/children share one ID space.
+#[inline]
+fn iwork_next_object_id(objects: &[Object], part: &str) -> Result<u32, Diagnostic> {
+    u32::try_from(objects.len())
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| iwa_error(part, "iWork native object identifier overflows"))
+}
+
 fn numbers_table(
     messages: &NumbersMessageSpace,
     model: &IwaMessage,
@@ -2721,8 +2730,9 @@ fn numbers_table(
                 "Numbers cells exceed the configured object limit",
             ));
         }
-        let numeric_id = u32::try_from(objects.len())
-            .map_err(|_| iwa_error(&cell.part, "Numbers object count exceeds u32"))?;
+        // Use the same one-based IDs as the shared iWork chart emitters: a
+        // later table may follow chart children from an earlier sheet.
+        let numeric_id = iwork_next_object_id(objects, &cell.part)?;
         let address = numbers_cell_address(cell.row, cell.column);
         objects.push(Object {
             numeric_id,
@@ -2737,7 +2747,7 @@ fn numbers_table(
                 width: column_offsets[end_column] - column_offsets[column],
                 height: row_offsets[end_row] - row_offsets[row],
             },
-            z: i32::try_from(numeric_id)
+            z: i32::try_from(numeric_id - 1)
                 .map_err(|_| iwa_error(&cell.part, "Numbers z-order exceeds i32"))?,
             text: cell.text,
             source: SourceRef {
@@ -2771,8 +2781,7 @@ fn numbers_table(
             continue;
         };
         scale_iwork_visual(&mut visual);
-        let numeric_id = u32::try_from(objects.len())
-            .map_err(|_| iwa_error(model_part, "Numbers object count exceeds u32"))?;
+        let numeric_id = iwork_next_object_id(objects, model_part)?;
         let orientation = if border.horizontal {
             "horizontal"
         } else {
@@ -2789,7 +2798,7 @@ fn numbers_table(
             kind: ObjectKind::Shape,
             unit_index,
             bounds,
-            z: i32::try_from(numeric_id)
+            z: i32::try_from(numeric_id - 1)
                 .map_err(|_| iwa_error(model_part, "Numbers z-order exceeds i32"))?,
             text: None,
             source: SourceRef {
@@ -6509,10 +6518,7 @@ fn iwork_push_pdf_objects(
         .collect::<HashMap<_, _>>();
     for (index, mut source) in pdf.objects.into_iter().enumerate() {
         rename_iwork_pdf_visual_fonts(&mut source.visual, &font_families);
-        let numeric_id = u32::try_from(objects.len())
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| iwa_error(part, "Pages embedded PDF object identifier overflows"))?;
+        let numeric_id = iwork_next_object_id(objects, part)?;
         objects.push(Object {
             numeric_id,
             parent_numeric_id: None,
@@ -7802,15 +7808,7 @@ fn pages_push_object(
         )
         .in_part(DOCUMENT_COMPONENT));
     }
-    let numeric_id = u32::try_from(objects.len())
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(|| {
-            iwa_error(
-                DOCUMENT_COMPONENT,
-                "Pages native object identifier overflows",
-            )
-        })?;
+    let numeric_id = iwork_next_object_id(objects, DOCUMENT_COMPONENT)?;
     objects.push(Object {
         numeric_id,
         parent_numeric_id: None,
@@ -8046,10 +8044,7 @@ fn keynote_preview_document(
             continue;
         };
         objects.push(Object {
-            numeric_id: u32::try_from(objects.len())
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| iwa_error(DOCUMENT_COMPONENT, "Keynote object id overflows"))?,
+            numeric_id: iwork_next_object_id(&objects, DOCUMENT_COMPONENT)?,
             parent_numeric_id: None,
             stable_id: format!("iwork-slide-preview-{slide_node_identifier}"),
             parent_stable_id: None,
@@ -10952,10 +10947,7 @@ fn keynote_push_chart_child(
     *serial = serial
         .checked_add(1)
         .ok_or_else(|| iwa_error(part, "Keynote chart object identifier overflows"))?;
-    let numeric_id = u32::try_from(objects.len())
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(|| iwa_error(part, "Keynote native object identifier overflows"))?;
+    let numeric_id = iwork_next_object_id(objects, part)?;
     objects.push(Object {
         numeric_id,
         parent_numeric_id,
@@ -11025,10 +11017,7 @@ fn push_keynote_native_object(
         )
         .in_part(part));
     }
-    let numeric_id = u32::try_from(objects.len())
-        .ok()
-        .and_then(|value| value.checked_add(1))
-        .ok_or_else(|| iwa_error(part, "Keynote native object identifier overflows"))?;
+    let numeric_id = iwork_next_object_id(objects, part)?;
     objects.push(Object {
         numeric_id,
         parent_numeric_id: None,
@@ -16753,6 +16742,44 @@ mod tests {
                 .all(|diagnostic| !diagnostic.message.contains("PREVIEW_ONLY"))
         );
         crate::protocol::encode(&document).expect("native Numbers document should encode");
+    }
+
+    #[test]
+    fn supplied_numbers_multiple_sheets_keep_unique_object_ids() {
+        let bytes = include_bytes!("../../tests/fixtures/numbers-multiple-sheets-charts.numbers");
+        let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+        let mut ids = std::collections::HashSet::new();
+        for object in &document.objects {
+            assert!(
+                ids.insert(object.numeric_id),
+                "duplicate object ID {} in unit {}",
+                object.numeric_id,
+                object.unit_index
+            );
+            if let Some(parent) = object.parent_numeric_id {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .any(|candidate| candidate.numeric_id == parent
+                            && candidate.unit_index == object.unit_index
+                            && Some(candidate.stable_id.as_str())
+                                == object.parent_stable_id.as_deref())
+                );
+            }
+        }
+        assert!(document.units.len() > 1);
+        assert!(
+            document
+                .objects
+                .iter()
+                .any(|object| object.kind == ObjectKind::Cell)
+        );
+        assert!(document.objects.iter().any(|object| matches!(
+            object.source.locator,
+            SourceLocator::Iwork { kind: "chart", .. }
+        )));
+        crate::protocol::encode(&document).unwrap();
     }
 
     #[test]
