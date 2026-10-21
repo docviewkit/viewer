@@ -319,7 +319,7 @@ export type SourceRef =
   | {
       readonly format: "numbers";
       readonly part: string;
-      readonly kind: "preview" | "cell" | IworkDrawableKind;
+      readonly kind: "preview" | "cell" | "sheet-background" | IworkDrawableKind;
       readonly component: string;
       readonly mapping: MappingQuality;
     }
