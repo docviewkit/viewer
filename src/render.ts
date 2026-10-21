@@ -855,6 +855,7 @@ interface PreparedSceneUnit {
   readonly key: string;
   readonly objects: readonly PreparedSceneObject[];
   readonly maximumBottoms: Float64Array;
+  readonly sheetBackground: PreparedSceneObject | undefined;
 }
 
 function visualText(visual: SceneVisual): string | undefined {
@@ -7109,9 +7110,15 @@ export class SceneRenderer {
     const first = firstMaximumBottomAfter(prepared.maximumBottoms, viewport.y);
     const end = firstObjectStartingAtOrAfter(prepared.objects, viewport.y + viewport.height);
     const visibleObjects: { object: SceneObject; state: VisualState }[] = [];
+    // A solid TN sheet fill covers its infinite canvas, including tile viewports
+    // outside the content extent; the scene keeps the finite content bounds.
+    const sheetBackground = prepared.sheetBackground;
+    if (sheetBackground !== undefined) visibleObjects.push({
+      object: { ...sheetBackground.object, bounds: viewport }, state: sheetBackground.state,
+    });
     for (let index = first; index < end; index += 1) {
       const candidate = prepared.objects[index]!;
-      if (!intersects(candidate.bounds, viewport)) continue;
+      if (candidate === sheetBackground || !intersects(candidate.bounds, viewport)) continue;
       visibleObjects.push({
         object: candidate.object,
         state: candidate.state,
@@ -7884,12 +7891,19 @@ export class SceneRenderer {
       ));
     const maximumBottoms = new Float64Array(objects.length);
     let maximumBottom = Number.NEGATIVE_INFINITY;
+    let sheetBackground: PreparedSceneObject | undefined;
     for (let index = 0; index < objects.length; index += 1) {
-      const bounds = objects[index]!.bounds;
+      const candidate = objects[index]!;
+      const bounds = candidate.bounds;
+      if (unit.type === "sheet" && candidate.object.source.format === "numbers"
+        && candidate.object.source.kind === "sheet-background"
+        && candidate.object.visual.kind === "painted-shape" && candidate.object.visual.fill.kind === "solid") {
+        sheetBackground = candidate;
+      }
       maximumBottom = Math.max(maximumBottom, bounds.y + bounds.height);
       maximumBottoms[index] = maximumBottom;
     }
-    const prepared = { key, objects, maximumBottoms };
+    const prepared = { key, objects, maximumBottoms, sheetBackground };
     this.#preparedUnits.set(request.unitIndex, prepared);
     while (this.#preparedUnits.size > 32) {
       const oldest = this.#preparedUnits.keys().next().value;

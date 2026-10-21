@@ -152,3 +152,38 @@ pack passes Chromium/WebKit cap-pixel and text-fragment checks without console
 errors. The PDF/iWork pack grows by 4,351 bytes (3,199,308 → 3,203,659; 0.14%).
 No font files or dependencies change. Outputs are in
 `output/playwright/numbers-dice/`; captures remain verification artifacts only.
+
+## Retirement: hidden helper rows and sheet background
+
+The current supplied Downloads workbook is retained as
+`tests/fixtures/numbers-retirement.numbers`, SHA-256
+`87c180274536b6896024162339d907f82b8d379cf468619789359445a291a0de`.
+Its Retirement Goals table stores five physical rows, but header bucket 1139771
+marks the last three as hidden. A saved size of zero alone means automatic sizing;
+the separate `hidingState` controls visibility. The shared iWork header reader now
+preserves that distinction. Numbers collapses hidden dimensions without changing
+cell addresses, and omits their text/fills. Pages/Keynote fixed-frame tables reuse
+the same header interpretation, retaining zero hidden dimensions when distributing
+automatic sizes. Degenerate border segments are omitted.
+
+TN sheet style 12050 stores a cream fill, RGB (255, 251, 239). Its bounded TSS
+inheritance lookup reuses the existing TSD background decoder. The new Numbers
+`sheet-background` source object keeps finite content bounds; the renderer caches
+its solid fill and covers each requested viewport, including tiles outside the
+content extent. Transparent cells reveal the sheet fill. Image and gradient
+backgrounds retain their authored extent. Malformed optional background metadata
+produces a local diagnostic while retaining the rest of the sheet.
+
+```sh
+node scripts/test-numbers-retirement.mjs
+NUMBERS_RETIREMENT_BASELINE_WASM=output/playwright/numbers-retirement/before.wasm NUMBERS_RETIREMENT_OUTPUT=output/playwright/numbers-retirement/baseline node scripts/test-numbers-retirement.mjs
+```
+
+The unchanged real file fails hidden-text, table-height and three background
+pixel checks with the old pack, then passes in Chromium and WebKit with no console
+errors. Core regressions cover the real header bucket, hidden rows and both sheet
+fills. The reviewed `chart-original.numbers` scene adds only one white background
+object; all its preexisting objects remain identical. Selected Pages/Keynote scene
+hashes remain unchanged. The PDF/iWork pack grows by 2,751 bytes
+(3,203,659 → 3,206,410; 0.09%), without font or dependency changes. Verification
+captures and logs are under `output/playwright/numbers-retirement/`.

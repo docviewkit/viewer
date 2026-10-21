@@ -530,6 +530,12 @@ test("optional native packs preserve legacy Office and iWork source locators", (
     mapping: "exact",
   });
 
+  const numbersBackground = decodeSnapshot(sourceSnapshot(15, 2, "sheet-background", [
+    ["component", "archive-1139413"],
+  ], 2)).objects[0].source;
+  assert.equal(numbersBackground.kind, "sheet-background");
+  assert.equal(numbersBackground.format, "numbers");
+
   for (const kind of [
     "slide-background",
     "shape",

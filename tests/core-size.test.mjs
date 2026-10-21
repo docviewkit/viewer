@@ -66,7 +66,10 @@ test("PDF pack stays within the reviewed binary size budget", async () => {
   // Authored TSCH rounded ends, series-axis labels, axis titles and tick/grid
   // counts: 3,199,308 -> 3,203,659 (+4,351; 0.14%). Dice Lab has a native
   // reference and red-to-green Chromium/WebKit cap/label pixel checks.
-  assert.ok(bytes.byteLength <= 3_206_000, `PDF Wasm is ${bytes.byteLength} bytes`);
+  // Hidden TST headers and inherited TN sheet fills: 3,203,659 -> 3,206,410
+  // (+2,751; 0.09%). Retirement's hidden rows and cream canvas/cell pixels
+  // have real-file Chromium/WebKit checks, including out-of-content tiles.
+  assert.ok(bytes.byteLength <= 3_209_000, `PDF Wasm is ${bytes.byteLength} bytes`);
 });
 
 test("binary Dingbats font preserves the original decoded font bytes", async () => {
@@ -129,7 +132,8 @@ const scenes = {
     "keynote-first-line-indent.key": "d1b2ba39ae4a0356b99a0e043da10e03310aff094cf1ac8d2bf169b0dccf576e",
     // Restores 34 authored default grid strokes and natural numeric right alignment.
     // The added strokes shift numeric IDs; chart geometry, visuals and text are unchanged.
-    "chart-original.numbers": "6d63062c2359f9a32c31baf36f2c513d00516585325539b4d1fe43d601a74e7e"
+    // TN sheet fill adds one white sheet-background object; every prior object is unchanged.
+    "chart-original.numbers": "e3f96733326203f5efa605725a680a656b170f8d19e74b66cda38ad8ce51a65b"
   },
   "xps": {
     "ecma-388-cover.xps": "0b77e74e8931c0ed08a97a5587e488714c52d259e1b3d7c604a68f9553d628f6"

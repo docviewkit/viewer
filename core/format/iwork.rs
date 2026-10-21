@@ -2528,6 +2528,56 @@ fn numbers_document(
                 width = width.max(object.bounds.x + object.bounds.width);
                 height = height.max(object.bounds.y + object.bounds.height);
             }
+            let background = numbers_sheet_background(
+                package,
+                &messages,
+                &data_files,
+                sheet,
+                sheet_part,
+                width / IWORK_POINT_TO_CSS_PIXEL,
+                height / IWORK_POINT_TO_CSS_PIXEL,
+                limits,
+            );
+            match background {
+                Ok(Some(mut visual)) => {
+                    scale_iwork_visual(&mut visual);
+                    push_keynote_native_object(
+                        &mut objects,
+                        limits,
+                        sheet_identifier,
+                        unit_index,
+                        sheet_part,
+                        "sheet-background",
+                        ObjectKind::Shape,
+                        Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width,
+                            height,
+                        },
+                        i32::MIN,
+                        None,
+                        MappingQuality::Exact,
+                        visual,
+                    )?;
+                    objects
+                        .last_mut()
+                        .unwrap()
+                        .stable_id
+                        .push_str(":sheet-background");
+                }
+                Ok(None) => {}
+                Err(error) if error.code == DiagnosticCode::FormatInvalid => diagnostics.push(
+                    Diagnostic::warning(
+                        DiagnosticCode::FormatInvalid,
+                        Phase::Parse,
+                        Fidelity::Omitted,
+                        format!("NUMBERS_SHEET_BACKGROUND_INVALID: {error}"),
+                    )
+                    .in_part(sheet_part),
+                ),
+                Err(error) => return Err(error),
+            }
             units.push(Unit {
                 kind: UnitKind::Sheet,
                 index: unit_index,
@@ -2690,6 +2740,48 @@ fn numbers_document(
         font_alternate_names: Vec::new(),
         diagnostics,
     })
+}
+
+// TN sheet styles inherit like the other TSS styles. Their fill reuses the
+// existing TSD background decoder, including real image resources and gradients.
+fn numbers_sheet_background(
+    package: &Package<'_>,
+    messages: &NumbersMessageSpace,
+    data_files: &[(u64, String)],
+    sheet: &IwaMessage,
+    part: &str,
+    width: f32,
+    height: f32,
+    limits: Limits,
+) -> Result<Option<Visual>, Diagnostic> {
+    let mut reference = numbers_references(&sheet.payload, 22, part)?
+        .first()
+        .copied();
+    let mut path = Vec::new();
+    while let Some(id) = reference {
+        if path.len() >= 32 || path.contains(&id) {
+            return Err(iwa_error(
+                part,
+                "Numbers sheet style inheritance is cyclic or too deep",
+            ));
+        }
+        path.push(id);
+        let Some((style_part, style)) = messages.message(id, 12050)? else {
+            return Ok(None);
+        };
+        if let Some(properties) = numbers_first_bytes(&style.payload, 3, style_part)?
+            && let Some(fill) = numbers_first_bytes(properties, 1, style_part)?
+        {
+            return keynote_background_visual(
+                package, data_files, fill, style_part, width, height, limits,
+            );
+        }
+        reference = numbers_first_bytes(&style.payload, 1, style_part)?
+            .map(|super_style| numbers_references(super_style, 3, style_part))
+            .transpose()?
+            .and_then(|refs| refs.first().copied());
+    }
+    Ok(None)
 }
 
 // Numbers tables retain their model's row/column sizes and canvas origin.
@@ -3042,6 +3134,9 @@ fn numbers_table(
         if end_row >= row_offsets.len() || end_column >= column_offsets.len() {
             continue;
         }
+        if row_heights[row] <= 0.0 || column_widths[column] <= 0.0 {
+            continue;
+        }
         let table_cell_style = cell
             .style_index
             .and_then(|index| usize::try_from(index).ok())
@@ -3334,6 +3429,9 @@ fn iwork_table_border_visual(
                 - *rows.get((start - row_start) as usize)?,
         }
     };
+    if bounds.width <= 0.0 && bounds.height <= 0.0 {
+        return None;
+    }
     let mut visual = Visual::PaintedShape {
         geometry: Geometry::Line,
         fill: Paint::None,
@@ -7612,11 +7710,21 @@ fn pages_table_header_sizes(
 ) -> Result<Vec<f32>, Diagnostic> {
     let count = usize::try_from(count)
         .map_err(|_| iwa_error(part, "Pages table header count is not addressable"))?;
-    let fallback = || vec![total / count as f32; count];
-    let Some(mut sizes) = iwork_table_header_sizes(messages, header_references, count)?
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-    else {
+    let sizes = iwork_table_header_sizes(messages, header_references, count)?;
+    let fallback = || {
+        let visible = sizes.iter().filter(|size| **size != Some(0.0)).count();
+        sizes
+            .iter()
+            .map(|size| {
+                if *size == Some(0.0) {
+                    0.0
+                } else {
+                    total / visible.max(1) as f32
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let Some(mut sizes) = sizes.iter().copied().collect::<Option<Vec<_>>>() else {
         return Ok(fallback());
     };
     let authored_total = sizes.iter().sum::<f32>();
@@ -7651,8 +7759,12 @@ fn iwork_table_header_sizes(
             if index >= sizes.len() {
                 continue;
             }
-            sizes[index] = keynote_fixed32_field(entry, 2, header_part)?
-                .filter(|size| size.is_finite() && *size > 0.0);
+            sizes[index] = if numbers_varint(entry, 3, header_part)?.unwrap_or(0) != 0 {
+                Some(0.0)
+            } else {
+                keynote_fixed32_field(entry, 2, header_part)?
+                    .filter(|size| size.is_finite() && *size > 0.0)
+            };
         }
     }
     Ok(sizes)
@@ -8195,7 +8307,11 @@ fn pages_push_table_grid(
         let Ok(row) = usize::try_from(cell.row) else {
             continue;
         };
-        if column + 1 >= columns.len() || row + 1 >= row_offsets.len() {
+        if column + 1 >= columns.len()
+            || row + 1 >= row_offsets.len()
+            || columns[column + 1] <= columns[column]
+            || row_offsets[row + 1] <= row_offsets[row]
+        {
             continue;
         }
         if cell.row >= header_rows
@@ -8373,6 +8489,9 @@ fn pages_push_table_grid(
         let row_index = usize::try_from(cell.row)
             .map_err(|_| iwa_error(model_part, "Pages table row is not addressable"))?;
         let row_height = row_offsets[row_index + 1] - row_offsets[row_index];
+        if row_height <= 0.0 || columns[column + 1] <= columns[column] {
+            continue;
+        }
         let x = columns[column];
         let end_column = merges
             .iter()
@@ -18101,6 +18220,102 @@ mod tests {
                 .all(|diagnostic| !diagnostic.message.contains("PREVIEW_ONLY"))
         );
         crate::protocol::encode(&document).expect("native Numbers document should encode");
+    }
+
+    #[test]
+    fn shared_iwork_headers_distinguish_automatic_size_from_hidden() {
+        let limits = Limits::default();
+        let package = super::Package::open_iwork(
+            include_bytes!("../../tests/fixtures/numbers-retirement.numbers"),
+            limits,
+        )
+        .unwrap();
+        let part = "Index/Tables/HeaderStorageBucket-1139771-2.iwa";
+        let archives = super::parse_iwa_archives(
+            &package,
+            part,
+            &package.required_part(part).unwrap(),
+            limits,
+        )
+        .unwrap();
+        let messages = super::NumbersMessageSpace {
+            archives: archives
+                .into_iter()
+                .map(|archive| super::NumbersArchive {
+                    part: part.to_owned(),
+                    archive,
+                })
+                .collect(),
+        };
+        assert_eq!(
+            super::iwork_table_header_sizes(&messages, &[1139771], 5).unwrap(),
+            vec![None, None, Some(0.0), Some(0.0), Some(0.0)]
+        );
+        assert_eq!(
+            super::pages_table_header_sizes(&messages, &[1139771], 5, 100.0, part).unwrap(),
+            vec![50.0, 50.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn supplied_numbers_retirement_omits_hidden_auxiliary_rows() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/numbers-retirement.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        for hidden in [
+            "Present value of needed funds",
+            "First year savings contribution",
+            "Real dollar contribution at year 0",
+        ] {
+            assert!(
+                !document
+                    .objects
+                    .iter()
+                    .any(|o| o.unit_index == 0 && o.text.as_deref() == Some(hidden)),
+                "hidden row was rendered: {hidden}"
+            );
+        }
+        assert!(
+            document
+                .objects
+                .iter()
+                .any(|o| o.text.as_deref() == Some("Starting monthly savings goal"))
+        );
+        let table = document
+            .objects
+            .iter()
+            .find(|o| o.kind == ObjectKind::Table && o.stable_id.ends_with("-1139670"))
+            .unwrap();
+        assert!(
+            (table.bounds.height - 2.0 * 21.659973 * super::IWORK_POINT_TO_CSS_PIXEL).abs() < 0.01
+        );
+    }
+
+    #[test]
+    fn supplied_numbers_retirement_preserves_sheet_background() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/numbers-retirement.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        for unit in &document.units {
+            assert!(
+                document.objects.iter().any(|o| o.unit_index == unit.index
+                    && o.z == i32::MIN
+                    && matches!(
+                        &o.visual,
+                        Visual::PaintedShape {
+                            fill: Paint::Solid(0xfffb_efff),
+                            ..
+                        }
+                    )),
+                "native cream sheet background missing"
+            );
+        }
     }
 
     #[test]

@@ -704,7 +704,7 @@ function readSource(
       };
     }
     case "numbers": {
-      if (kind !== "preview" && kind !== "cell" && !isIworkDrawableKind(kind)) break;
+      if (kind !== "preview" && kind !== "cell" && kind !== "sheet-background" && !isIworkDrawableKind(kind)) break;
       return {
         format,
         part,
