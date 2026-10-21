@@ -69,7 +69,11 @@ test("PDF pack stays within the reviewed binary size budget", async () => {
   // Hidden TST headers and inherited TN sheet fills: 3,203,659 -> 3,206,410
   // (+2,751; 0.09%). Retirement's hidden rows and cream canvas/cell pixels
   // have real-file Chromium/WebKit checks, including out-of-content tiles.
-  assert.ok(bytes.byteLength <= 3_209_000, `PDF Wasm is ${bytes.byteLength} bytes`);
+  // Native TSCH scatter XY caches, markers, linear trendlines and numeric axes,
+  // plus retained table-title alignment and paragraph rules: 3,206,410 ->
+  // 3,219,656 (+13,246; 0.41%). Correlation's original file has red-to-green
+  // Chromium/WebKit marker/trendline/separator pixels and label geometry checks.
+  assert.ok(bytes.byteLength <= 3_223_000, `PDF Wasm is ${bytes.byteLength} bytes`);
 });
 
 test("binary Dingbats font preserves the original decoded font bytes", async () => {

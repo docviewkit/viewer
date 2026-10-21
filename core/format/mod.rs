@@ -3216,8 +3216,147 @@ fn append_elliptical_arc(
     }
 }
 
-// Ordinary least squares shared by OOXML and ODF; chart adapters own domains and clipping.
-#[cfg(any(feature = "native-formats", feature = "odf-formats"))]
+// Marker geometry is format-independent; adapters retain symbol IDs, sizing and paint.
+#[cfg(any(
+    feature = "native-formats",
+    feature = "legacy-office-formats",
+    feature = "iwork-formats"
+))]
+pub(super) fn chart_marker_geometry(symbol: &str, size: f32) -> Option<(Geometry, bool)> {
+    Some(match symbol {
+        "square" => (Geometry::Rectangle, true),
+        "diamond" => (
+            Geometry::Path {
+                fill_rule: FillRule::NonZero,
+                commands: vec![
+                    PathCommand::MoveTo {
+                        x: size / 2.0,
+                        y: 0.0,
+                    },
+                    PathCommand::LineTo {
+                        x: size,
+                        y: size / 2.0,
+                    },
+                    PathCommand::LineTo {
+                        x: size / 2.0,
+                        y: size,
+                    },
+                    PathCommand::LineTo {
+                        x: 0.0,
+                        y: size / 2.0,
+                    },
+                    PathCommand::ClosePath,
+                ],
+            },
+            true,
+        ),
+        "circle" => (Geometry::Ellipse, true),
+        "triangle" | "triangleDown" => (
+            Geometry::Path {
+                fill_rule: FillRule::NonZero,
+                commands: vec![
+                    PathCommand::MoveTo {
+                        x: size / 2.0,
+                        y: if symbol == "triangleDown" { size } else { 0.0 },
+                    },
+                    PathCommand::LineTo {
+                        x: size,
+                        y: if symbol == "triangleDown" { 0.0 } else { size },
+                    },
+                    PathCommand::LineTo {
+                        x: 0.0,
+                        y: if symbol == "triangleDown" { 0.0 } else { size },
+                    },
+                    PathCommand::ClosePath,
+                ],
+            },
+            true,
+        ),
+        "plus" => (
+            Geometry::Path {
+                fill_rule: FillRule::NonZero,
+                commands: vec![
+                    PathCommand::MoveTo {
+                        x: size / 2.0,
+                        y: 0.0,
+                    },
+                    PathCommand::LineTo {
+                        x: size / 2.0,
+                        y: size,
+                    },
+                    PathCommand::MoveTo {
+                        x: 0.0,
+                        y: size / 2.0,
+                    },
+                    PathCommand::LineTo {
+                        x: size,
+                        y: size / 2.0,
+                    },
+                ],
+            },
+            false,
+        ),
+        "x" => (
+            Geometry::Path {
+                fill_rule: FillRule::NonZero,
+                commands: vec![
+                    PathCommand::MoveTo { x: 0.0, y: 0.0 },
+                    PathCommand::LineTo { x: size, y: size },
+                    PathCommand::MoveTo { x: size, y: 0.0 },
+                    PathCommand::LineTo { x: 0.0, y: size },
+                ],
+            },
+            false,
+        ),
+        _ => return None,
+    })
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "native-formats",
+        feature = "legacy-office-formats",
+        feature = "iwork-formats"
+    )
+))]
+#[test]
+fn chart_markers_preserve_filled_and_open_symbol_semantics() {
+    let (plus, filled) = chart_marker_geometry("plus", 8.0).unwrap();
+    assert!(!filled);
+    let Geometry::Path { commands, .. } = plus else {
+        panic!("plus must be a stroked path")
+    };
+    assert_eq!(
+        commands,
+        vec![
+            PathCommand::MoveTo { x: 4.0, y: 0.0 },
+            PathCommand::LineTo { x: 4.0, y: 8.0 },
+            PathCommand::MoveTo { x: 0.0, y: 4.0 },
+            PathCommand::LineTo { x: 8.0, y: 4.0 }
+        ]
+    );
+    for (symbol, apex) in [("triangle", 0.0), ("triangleDown", 8.0)] {
+        let (Geometry::Path { commands, .. }, filled) = chart_marker_geometry(symbol, 8.0).unwrap()
+        else {
+            panic!("triangle must be a filled path")
+        };
+        assert!(filled);
+        assert_eq!(commands[0], PathCommand::MoveTo { x: 4.0, y: apex });
+    }
+    assert_eq!(
+        chart_marker_geometry("circle", 8.0),
+        Some((Geometry::Ellipse, true))
+    );
+    assert!(chart_marker_geometry("none", 8.0).is_none());
+}
+
+// Ordinary least squares shared by OOXML, ODF and iWork; chart adapters own domains and clipping.
+#[cfg(any(
+    feature = "native-formats",
+    feature = "odf-formats",
+    feature = "iwork-formats"
+))]
 pub(super) fn linear_regression(x_values: &[f32], y_values: &[f32]) -> Option<(f32, f32, f32)> {
     let points = x_values
         .iter()
@@ -3263,7 +3402,14 @@ pub(super) fn linear_regression(x_values: &[f32], y_values: &[f32]) -> Option<(f
     ))
 }
 
-#[cfg(all(test, any(feature = "native-formats", feature = "odf-formats")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "native-formats",
+        feature = "odf-formats",
+        feature = "iwork-formats"
+    )
+))]
 #[test]
 fn chart_linear_regression_preserves_finite_pairs_and_degenerate_cases() {
     let (slope, intercept, r_squared) =
