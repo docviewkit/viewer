@@ -63,7 +63,10 @@ test("PDF pack stays within the reviewed binary size budget", async () => {
   // TST currency/date formats, checkbox vectors, style separators/banding and
   // native pie labels: 3,180,410 -> 3,199,308 (+18,898; 0.59%). The supplied
   // soccer-team document has native-app and Chromium/WebKit pixel regressions.
-  assert.ok(bytes.byteLength <= 3_202_000, `PDF Wasm is ${bytes.byteLength} bytes`);
+  // Authored TSCH rounded ends, series-axis labels, axis titles and tick/grid
+  // counts: 3,199,308 -> 3,203,659 (+4,351; 0.14%). Dice Lab has a native
+  // reference and red-to-green Chromium/WebKit cap/label pixel checks.
+  assert.ok(bytes.byteLength <= 3_206_000, `PDF Wasm is ${bytes.byteLength} bytes`);
 });
 
 test("binary Dingbats font preserves the original decoded font bytes", async () => {
