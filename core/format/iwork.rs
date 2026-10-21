@@ -485,6 +485,8 @@ struct KeynoteChart {
     background_stroke: (Paint, f32, StrokeStyle),
     plot_fill: Paint,
     bar_gaps: Option<(f32, f32)>,
+    bar_corner_radius: f32,
+    bar_outer_end_only: bool,
     title_style: KeynoteTextStyle,
     value_axis: IworkChartAxis,
     category_axis: IworkChartAxis,
@@ -498,6 +500,12 @@ struct IworkChartAxis {
     vertical_labels: bool,
     show_axis: bool,
     show_labels: bool,
+    show_series_labels: bool,
+    major_intervals: u32,
+    minor_count: u32,
+    minor_grid: Option<(Paint, f32, StrokeStyle)>,
+    title: Option<String>,
+    title_style: KeynoteTextStyle,
     grid: Option<(Paint, f32, StrokeStyle)>,
 }
 
@@ -10746,7 +10754,13 @@ fn keynote_push_chart(
         chart.value_axis.show_labels
     };
     let left = if show_left_labels && (cartesian || chart.doughnut) {
-        label_width + 8.0
+        label_width
+            + 8.0
+            + chart
+                .value_axis
+                .title
+                .as_ref()
+                .map_or(0.0, |_| chart.value_axis.title_style.font_size * 1.2 + 5.0)
     } else {
         0.0
     };
@@ -11087,6 +11101,80 @@ fn keynote_push_chart_legend(
     Ok(())
 }
 
+fn iwork_bar_geometry(
+    bounds: Rect,
+    horizontal: bool,
+    value: f32,
+    fraction: f32,
+    outer_only: bool,
+) -> Geometry {
+    let radius = bounds.width.min(bounds.height) * fraction / 2.0;
+    if radius <= 0.0 {
+        return Geometry::Rectangle;
+    }
+    if !outer_only {
+        return Geometry::RoundedRectangle {
+            radius_x: radius,
+            radius_y: radius,
+        };
+    }
+    let (w, h) = (bounds.width, bounds.height);
+    let mut commands = Vec::new();
+    for (index, (x, y, angle)) in [
+        (w, 0.0, -std::f32::consts::FRAC_PI_2),
+        (w, h, 0.0),
+        (0.0, h, std::f32::consts::FRAC_PI_2),
+        (0.0, 0.0, std::f32::consts::PI),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let outer = if horizontal {
+            (x == w) == (value >= 0.0)
+        } else {
+            (y == 0.0) == (value >= 0.0)
+        };
+        let r = if outer { radius } else { 0.0 };
+        let center = (
+            if x == 0.0 { r } else { w - r },
+            if y == 0.0 { r } else { h - r },
+        );
+        let start = (center.0 + r * angle.cos(), center.1 + r * angle.sin());
+        commands.push(if index == 0 {
+            PathCommand::MoveTo {
+                x: start.0,
+                y: start.1,
+            }
+        } else {
+            PathCommand::LineTo {
+                x: start.0,
+                y: start.1,
+            }
+        });
+        if r > 0.0 {
+            let [first, second, last] = super::ellipse_arc_bezier_points(
+                center,
+                (r, r),
+                angle,
+                angle + std::f32::consts::FRAC_PI_2,
+            );
+            commands.push(PathCommand::BezierCurveTo {
+                cp1x: first.0,
+                cp1y: first.1,
+                cp2x: second.0,
+                cp2y: second.1,
+                x: last.0,
+                y: last.1,
+            });
+        }
+    }
+    commands.push(PathCommand::ClosePath);
+    Geometry::Path {
+        commands,
+        fill_rule: FillRule::NonZero,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn keynote_push_bar_chart(
     chart: &KeynoteChart,
@@ -11134,8 +11222,8 @@ fn keynote_push_bar_chart(
     } else {
         plot.width / categories as f32
     };
-    for tick in (0..=4).filter(|_| chart.value_axis.show_labels) {
-        let ratio = tick as f32 / 4.0;
+    for tick in (0..=chart.value_axis.major_intervals).filter(|_| chart.value_axis.show_labels) {
+        let ratio = tick as f32 / chart.value_axis.major_intervals as f32;
         let value = minimum + span * ratio;
         let bounds = if horizontal {
             Rect {
@@ -11233,6 +11321,47 @@ fn keynote_push_bar_chart(
             visual,
         )?;
     }
+    for (axis, vertical) in [
+        (&chart.value_axis, !horizontal),
+        (&chart.category_axis, horizontal),
+    ] {
+        if let Some(title) = &axis.title {
+            let thickness = axis.title_style.font_size * 1.2;
+            let bounds = if vertical {
+                Rect {
+                    x: plot.x - value_label_width - 13.0 - thickness,
+                    y: plot.y,
+                    width: thickness,
+                    height: plot.height,
+                }
+            } else {
+                Rect {
+                    x: plot.x,
+                    y: plot.y + plot.height + axis.text.font_size * 1.2 + 7.0,
+                    width: plot.width,
+                    height: thickness,
+                }
+            };
+            let mut visual =
+                keynote_chart_label_visual(title.clone(), TextAlign::Center, &axis.title_style);
+            if vertical && let Visual::TextLayout { layout, .. } = &mut visual {
+                layout.orientation = TextOrientation::Rotated270;
+            }
+            keynote_push_chart_child(
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                bounds,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+                visual,
+            )?;
+        }
+    }
     let series_count = if chart.stacked {
         1
     } else {
@@ -11302,24 +11431,77 @@ fn keynote_push_bar_chart(
                     height: (end_position - start_position).abs().max(0.5),
                 }
             };
-            keynote_push_chart_child(
-                identifier,
-                unit_index,
-                part,
-                limits,
-                objects,
-                bar_bounds,
-                z,
-                parent_numeric_id,
-                parent_stable_id,
-                serial,
-                Visual::PaintedShape {
-                    geometry: Geometry::Rectangle,
-                    fill: Paint::Solid(keynote_chart_color(chart, series_index)),
-                    stroke: Paint::None,
-                    stroke_width: 0.0,
-                },
-            )?;
+            if value != 0.0 {
+                keynote_push_chart_child(
+                    identifier,
+                    unit_index,
+                    part,
+                    limits,
+                    objects,
+                    bar_bounds,
+                    z,
+                    parent_numeric_id,
+                    parent_stable_id,
+                    serial,
+                    Visual::PaintedShape {
+                        geometry: iwork_bar_geometry(
+                            bar_bounds,
+                            horizontal,
+                            value,
+                            chart.bar_corner_radius,
+                            chart.bar_outer_end_only,
+                        ),
+                        fill: Paint::Solid(keynote_chart_color(chart, series_index)),
+                        stroke: Paint::None,
+                        stroke_width: 0.0,
+                    },
+                )?;
+            }
+            if chart.category_axis.show_series_labels && !chart.stacked {
+                if let Some(label) = chart
+                    .series_names
+                    .get(series_index)
+                    .filter(|label| !label.is_empty())
+                {
+                    let bounds = if horizontal {
+                        Rect {
+                            x: plot.x - 100.0,
+                            y: bar_bounds.y + bar_bounds.height / 2.0
+                                - chart.category_axis.text.font_size * 0.6,
+                            width: 94.0,
+                            height: chart.category_axis.text.font_size * 1.2,
+                        }
+                    } else {
+                        Rect {
+                            x: bar_bounds.x + bar_bounds.width / 2.0 - series_step / 2.0,
+                            y: plot.y + plot.height + 3.0,
+                            width: series_step,
+                            height: chart.category_axis.text.font_size * 1.2 + 2.0,
+                        }
+                    };
+                    keynote_push_chart_child(
+                        identifier,
+                        unit_index,
+                        part,
+                        limits,
+                        objects,
+                        bounds,
+                        z,
+                        parent_numeric_id,
+                        parent_stable_id,
+                        serial,
+                        keynote_chart_label_visual(
+                            label.clone(),
+                            if horizontal {
+                                TextAlign::End
+                            } else {
+                                TextAlign::Center
+                            },
+                            &chart.category_axis.text,
+                        ),
+                    )?;
+                }
+            }
             if chart
                 .show_data_labels
                 .get(series_index)
@@ -11809,10 +11991,28 @@ fn keynote_push_chart_axes(
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
-    if let Some((stroke, stroke_width, style)) = &chart.value_axis.grid {
+    for (grid, minor) in [
+        (&chart.value_axis.grid, false),
+        (&chart.value_axis.minor_grid, true),
+    ] {
+        let Some((stroke, stroke_width, style)) = grid else {
+            continue;
+        };
+        if minor && chart.value_axis.minor_count == 0 {
+            continue;
+        }
+        let step = if minor {
+            chart.value_axis.minor_count + 1
+        } else {
+            1
+        };
+        let intervals = chart.value_axis.major_intervals * step;
         let mut commands = Vec::new();
-        for tick in 0..=4 {
-            let ratio = tick as f32 / 4.0;
+        for tick in 0..=intervals {
+            if minor && tick % step == 0 {
+                continue;
+            }
+            let ratio = tick as f32 / intervals as f32;
             let (start, end) = if horizontal {
                 ((plot.width * ratio, 0.0), (plot.width * ratio, plot.height))
             } else {
@@ -11893,7 +12093,8 @@ fn keynote_push_chart_axes(
         commands.truncate(2);
     }
     if !chart.category_axis.show_axis
-        || (chart.value_axis.grid.is_some()
+        || (!chart.category_axis.show_series_labels
+            && chart.value_axis.grid.is_some()
             && (baseline
                 - if horizontal {
                     plot.x
@@ -12881,6 +13082,38 @@ fn keynote_chart(
                     .or(keynote_fixed32_field(&style, 10, part)?)
                     .is_some_and(|angle| (angle.abs().rem_euclid(180.0) - 90.0).abs() < 0.01),
             grid,
+            show_series_labels: !value && numbers_varint(&nonstyle, 12, part)? == Some(1),
+            major_intervals: if value {
+                numbers_varint(&nonstyle, 5, part)?
+                    .filter(|count| *count > 0)
+                    .unwrap_or(4)
+                    .min(64) as u32
+            } else {
+                4
+            },
+            minor_count: numbers_varint(&nonstyle, 6, part)?.unwrap_or(0).min(8) as u32,
+            minor_grid: if value && numbers_varint(&style, 33, part)? == Some(1) {
+                numbers_first_bytes(&style, 23, part)?
+                    .map(|bytes| keynote_stroke(bytes, part))
+                    .transpose()?
+            } else {
+                None
+            },
+            title: if numbers_varint(&nonstyle, if value { 14 } else { 13 }, part)? == Some(1) {
+                numbers_first_bytes(&nonstyle, if value { 16 } else { 15 }, part)?
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                    .map(str::to_owned)
+            } else {
+                None
+            },
+            title_style: iwork_chart_text_style(
+                &style,
+                if value { 40 } else { 38 },
+                &paragraph_styles,
+                stylesheet_archives,
+                part,
+                KeynoteTextStyle::default(),
+            )?,
             show_axis: numbers_varint(&style, if value { 25 } else { 24 }, part)?.unwrap_or(1) != 0,
             show_labels: numbers_varint(&nonstyle, if value { 11 } else { 9 }, part)?.unwrap_or(1)
                 != 0,
@@ -13034,6 +13267,10 @@ fn keynote_chart(
         background_stroke,
         plot_fill,
         bar_gaps,
+        bar_corner_radius: keynote_fixed32_field(&chart_style, 122, part)?
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0),
+        bar_outer_end_only: numbers_varint(&chart_style, 123, part)?.unwrap_or(0) != 0,
         title_style,
         value_axis: axis(true)?,
         category_axis: axis(false)?,
@@ -17866,6 +18103,101 @@ mod tests {
         crate::protocol::encode(&document).expect("native Numbers document should encode");
     }
 
+    #[test]
+    fn iwork_bar_corners_preserve_sharp_and_outer_end_boundaries() {
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 40.0,
+        };
+        assert_eq!(
+            super::iwork_bar_geometry(bounds, false, 2.0, 0.0, false),
+            Geometry::Rectangle
+        );
+        assert_eq!(
+            super::iwork_bar_geometry(bounds, false, 2.0, 1.0, false),
+            Geometry::RoundedRectangle {
+                radius_x: 5.0,
+                radius_y: 5.0
+            }
+        );
+        for horizontal in [false, true] {
+            for value in [-2.0, 2.0] {
+                let Geometry::Path { commands, .. } =
+                    super::iwork_bar_geometry(bounds, horizontal, value, 1.0, true)
+                else {
+                    panic!("outer-end shape");
+                };
+                let curves = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        PathCommand::BezierCurveTo { x, y, .. } => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(curves.len(), 2);
+                assert!(curves.iter().all(|(x, y)| if horizontal {
+                    if value > 0.0 {
+                        *x >= bounds.width / 2.0 - 0.001
+                    } else {
+                        *x <= bounds.width / 2.0 + 0.001
+                    }
+                } else {
+                    if value > 0.0 {
+                        *y <= bounds.height / 2.0 + 0.001
+                    } else {
+                        *y >= bounds.height / 2.0 - 0.001
+                    }
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn supplied_numbers_dice_has_rounded_columns() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/numbers-dice-lab.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let bars = document.objects.iter().filter(|o| o.parent_stable_id.as_deref().is_some_and(|id| id.ends_with("-729688")) && matches!(o.visual, Visual::PaintedShape { geometry: Geometry::RoundedRectangle { radius_x, radius_y }, .. } if radius_x > 0.0 && radius_y > 0.0)).collect::<Vec<_>>();
+        assert_eq!(
+            bars.len(),
+            4,
+            "four nonzero dice columns must have rounded ends; zero values must not paint slivers"
+        );
+    }
+
+    #[test]
+    fn supplied_numbers_dice_has_series_axis_labels() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/numbers-dice-lab.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let labels = document
+            .objects
+            .iter()
+            .filter(|o| {
+                o.parent_stable_id
+                    .as_deref()
+                    .is_some_and(|id| id.ends_with("-729688"))
+                    && o.bounds.y > (421.6 + 202.0) * super::IWORK_POINT_TO_CSS_PIXEL
+            })
+            .filter_map(|o| match &o.visual {
+                Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                    Visual::RichText { runs, .. } => runs.first().map(|run| run.text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, (2..=12).map(|n| n.to_string()).collect::<Vec<_>>());
+    }
+
     fn team_budget_document() -> crate::model::Document {
         detect_and_parse(
             include_bytes!("../../tests/fixtures/numbers-team-budget.numbers"),
@@ -18162,7 +18494,7 @@ mod tests {
                 ) && matches!(
                     object.visual,
                     Visual::PaintedShape {
-                        geometry: Geometry::Rectangle,
+                        geometry: Geometry::RoundedRectangle { .. },
                         fill: Paint::Solid(_),
                         ..
                     }

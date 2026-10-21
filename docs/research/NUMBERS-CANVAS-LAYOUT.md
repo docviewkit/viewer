@@ -114,3 +114,41 @@ Captures and results are under `output/playwright/numbers-team/`. These are
 focused feature checks, not a claim of pixel equality for every sheet: category
 summary rows, photo-frame effects, arbitrary custom formats and per-slice label
 styles still require additional coverage.
+
+## Dice Lab: rounded columns and series labels
+
+The Dice Lab workbook supplied under the same Downloads filename is retained as
+`tests/fixtures/numbers-dice-lab.numbers`, SHA-256
+`53969437e12f4a5f3aed70e0b9c853a13267b1e0dcae984ecb9800724aac2456`.
+The native Numbers window and supplied side-by-side screenshot show a 266 × 202 pt
+column plot at (244, 421.6), four nonzero rounded columns, series names 2–12 under
+the columns, major value ticks 0/1/2 and a vertical “Total Occurrences” title.
+
+The cached chart has eleven series and one category. Category labels are disabled,
+while series labels are enabled (TSCH category nonstyle field 12). Treating those
+switches as one setting suppressed the entire horizontal axis labeling. Series
+labels now use the same computed bar centers and group spacing as the columns;
+category labels keep their independent switch. Chart style fields 122/123 supply
+corner fraction and outer-end-only behavior. Full rounding maps to the shared
+`RoundedRectangle` geometry; end-specific corners reuse the common ellipse Bezier
+primitive for positive/negative vertical/horizontal bars. Zero values retain their
+data labels without painting artificial half-pixel columns.
+
+Axis nonstyle fields 5/6 supply major intervals and intermediate minor lines;
+style field 23 preserves the minor grid stroke. Axis titles retain their own
+paragraph style and visibility. These TSCH properties share the existing iWork
+chart emitter across Numbers, Pages and Keynote; they are not document-specific
+substitutions. The older monthly-budget fixture also explicitly stores corner
+fraction 1, so its 18 columns now correctly use rounded geometry; its positions
+and tiled/direct pixel agreement remain covered by the existing browser harness.
+
+```sh
+node scripts/test-numbers-dice-chart.mjs
+NUMBERS_DICE_BASELINE_WASM=output/playwright/numbers-dice/before.wasm NUMBERS_DICE_OUTPUT=output/playwright/numbers-dice/baseline node scripts/test-numbers-dice-chart.mjs
+```
+
+The baseline fails both named defects and the axis title/tick checks. The fixed
+pack passes Chromium/WebKit cap-pixel and text-fragment checks without console
+errors. The PDF/iWork pack grows by 4,351 bytes (3,199,308 → 3,203,659; 0.14%).
+No font files or dependencies change. Outputs are in
+`output/playwright/numbers-dice/`; captures remain verification artifacts only.
