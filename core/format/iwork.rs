@@ -394,6 +394,8 @@ struct NumbersCell {
     part: String,
     style_index: Option<u32>,
     text_style_index: Option<u32>,
+    checkbox: Option<bool>,
+    value_type: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -469,6 +471,9 @@ struct KeynoteChart {
     start_rotation: f32,
     legend_style: KeynoteTextStyle,
     pie_label_style: KeynoteTextStyle,
+    pie_label_radius: f32,
+    pie_show_category: bool,
+    pie_stroke: (Paint, f32, StrokeStyle),
     legend_geometry: Option<KeynoteGeometry>,
     stacked: bool,
     title: Option<String>,
@@ -2777,6 +2782,13 @@ fn numbers_canvas_drawable(
         for object in &mut objects[first_cell..] {
             object.bounds.x += x;
             object.bounds.y += y;
+            // Group child bounds use document coordinates in the shared scene protocol.
+            if let Visual::Group { children } = &mut object.visual {
+                for child in children {
+                    child.bounds.x += x;
+                    child.bounds.y += y;
+                }
+            }
             object.stable_id = format!("numbers:{unit_index}:{identifier}:{}", object.stable_id);
         }
         push_keynote_native_object(
@@ -2827,6 +2839,74 @@ fn numbers_canvas_drawable(
     Ok(omitted)
 }
 
+// Checkbox controls are static vector content, independent of installed symbol fonts.
+fn iwork_checkbox_visual(checked: bool, fill: Paint, cell: Rect) -> Visual {
+    let (width, height) = (cell.width, cell.height);
+    use crate::model::VisualBrushChild;
+    let size = 12.0_f32.min(width).min(height);
+    let bounds = Rect {
+        x: cell.x + (width - size) / 2.0,
+        y: cell.y + (height - size) / 2.0,
+        width: size,
+        height: size,
+    };
+    let mut children = vec![
+        VisualBrushChild {
+            bounds: cell,
+            visual: Visual::PaintedShape {
+                geometry: Geometry::Rectangle,
+                fill,
+                stroke: Paint::None,
+                stroke_width: 0.0,
+            },
+        },
+        VisualBrushChild {
+            bounds,
+            visual: Visual::PaintedShape {
+                geometry: Geometry::Rectangle,
+                fill: Paint::Solid(0xd6d6d6ff),
+                stroke: Paint::Solid(0xa0a0a0ff),
+                stroke_width: 0.4,
+            },
+        },
+    ];
+    if checked {
+        children.push(VisualBrushChild {
+            bounds,
+            visual: Visual::StrokeStyle {
+                style: StrokeStyle {
+                    cap: LineCap::Round,
+                    join: LineJoin::Round,
+                    ..StrokeStyle::default()
+                },
+                visual: Box::new(Visual::PaintedShape {
+                    geometry: Geometry::Path {
+                        commands: vec![
+                            PathCommand::MoveTo {
+                                x: size * 0.18,
+                                y: size * 0.49,
+                            },
+                            PathCommand::LineTo {
+                                x: size * 0.43,
+                                y: size * 0.76,
+                            },
+                            PathCommand::LineTo {
+                                x: size * 0.94,
+                                y: -size * 0.08,
+                            },
+                        ],
+                        fill_rule: FillRule::NonZero,
+                    },
+                    fill: Paint::None,
+                    stroke: Paint::Solid(0x000000ff),
+                    stroke_width: 2.2,
+                }),
+            },
+        });
+    }
+    Visual::Group { children }
+}
+
 // Native cells, table borders, and chart parents/children share one ID space.
 #[inline]
 fn iwork_next_object_id(objects: &[Object], part: &str) -> Result<u32, Diagnostic> {
@@ -2847,7 +2927,8 @@ fn numbers_table(
     objects: &mut Vec<Object>,
 ) -> Result<(Unit, Vec<Diagnostic>), Diagnostic> {
     let mut diagnostics = Vec::new();
-    let (rows, columns, mut cells) = numbers_table_cells(messages, model, model_part, limits)?;
+    let (rows, columns, mut cells) =
+        numbers_table_cells(messages, model, model_part, limits, &mut diagnostics)?;
     let store = numbers_first_bytes(&model.payload, 4, model_part)?
         .ok_or_else(|| iwa_error(model_part, "Numbers table has no data store"))?;
     let merges = numbers_table_merges(messages, model, store, rows, columns, model_part, limits)?;
@@ -2899,6 +2980,13 @@ fn numbers_table(
         iwork_table_text_styles(messages, stylesheet_archives, model, model_part, limits)?;
     let borders = iwork_table_borders(messages, model, model_part, rows, columns, &mut diagnostics)
         .unwrap_or_default();
+    let banded_fills = keynote_table_banded_fills(
+        stylesheet_archives,
+        model,
+        model_part,
+        width / IWORK_POINT_TO_CSS_PIXEL,
+        height / IWORK_POINT_TO_CSS_PIXEL,
+    )?;
     let header_rows = numbers_varint(&model.payload, 9, model_part)?.unwrap_or(0);
     let header_columns = numbers_varint(&model.payload, 10, model_part)?.unwrap_or(0);
     let footer_rows = numbers_varint(&model.payload, 11, model_part)?.unwrap_or(0);
@@ -2952,7 +3040,7 @@ fn numbers_table(
             .and_then(|index| table_cell_styles.get(index))
             .cloned()
             .unwrap_or_default();
-        let fill = if table_cell_style.authored_fill {
+        let mut fill = if table_cell_style.authored_fill {
             table_cell_style.fill
         } else {
             let index = if u64::from(cell.row) < header_rows {
@@ -2966,23 +3054,35 @@ fn numbers_table(
             };
             default_fills[index].clone()
         };
-        let mut visual = if let Some(text) = cell.text.as_ref() {
-            let style = cell
-                .text_style_index
-                .and_then(|index| usize::try_from(index).ok())
-                .and_then(|index| cell_text_styles.get(index))
-                .and_then(Clone::clone)
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    pages_table_text_style(
-                        model,
-                        model_part,
-                        stylesheet_archives,
-                        cell.row,
-                        cell.column,
-                        rows,
-                    )
-                })?;
+        if u64::from(cell.row) >= header_rows
+            && u64::from(cell.row) < u64::from(rows).saturating_sub(footer_rows)
+            && (u64::from(cell.row) - header_rows) % 2 == 1
+            && let Some((body, banded)) = &banded_fills
+            && fill == *body
+        {
+            fill = banded.clone();
+        }
+        let mut visual = if let Some(checked) = cell.checkbox {
+            iwork_checkbox_visual(
+                checked,
+                fill,
+                Rect {
+                    x: column_offsets[column] / IWORK_POINT_TO_CSS_PIXEL,
+                    y: row_offsets[row] / IWORK_POINT_TO_CSS_PIXEL,
+                    width: (column_offsets[end_column] - column_offsets[column])
+                        / IWORK_POINT_TO_CSS_PIXEL,
+                    height: (row_offsets[end_row] - row_offsets[row]) / IWORK_POINT_TO_CSS_PIXEL,
+                },
+            )
+        } else if let Some(text) = cell.text.as_ref() {
+            let style = iwork_table_cell_text_style(
+                &cell,
+                rows,
+                &cell_text_styles,
+                model,
+                model_part,
+                stylesheet_archives,
+            )?;
             let previous_occupied = cell
                 .column
                 .checked_sub(1)
@@ -3157,13 +3257,23 @@ fn iwork_table_borders(
     columns: u32,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Vec<NumbersTableBorder>> {
-    let result = numbers_references(&model.payload, 49, part).and_then(|references| {
-        if references.is_empty() {
-            Ok(None)
-        } else {
-            numbers_table_borders(messages, model, part, rows, columns).map(Some)
-        }
-    });
+    let result =
+        numbers_table_default_borders(messages, model, part, rows, columns).and_then(|defaults| {
+            let has_sidecar = !numbers_references(&model.payload, 49, part)?.is_empty();
+            if !has_sidecar && defaults.is_none() {
+                Ok(None)
+            } else {
+                numbers_table_borders_with_defaults(
+                    messages,
+                    model,
+                    part,
+                    rows,
+                    columns,
+                    defaults.unwrap_or_default(),
+                )
+                .map(Some)
+            }
+        });
     match result {
         Ok(borders) => borders,
         Err(error) => {
@@ -3231,18 +3341,171 @@ fn iwork_table_border_visual(
     Some((bounds, visual))
 }
 
-fn numbers_table_borders(
+// Table-style strokes precede per-cell sidecar overrides in all TST tables.
+fn numbers_table_default_borders(
+    messages: &NumbersMessageSpace,
+    model: &IwaMessage,
+    part: &str,
+    rows: u32,
+    columns: u32,
+) -> Result<Option<Vec<NumbersTableBorder>>, Diagnostic> {
+    let mut reference = numbers_references(&model.payload, 3, part)?
+        .first()
+        .copied();
+    let mut chain = Vec::new();
+    let mut properties = Vec::new();
+    while let Some(id) = reference {
+        if chain.len() >= 32 || chain.contains(&id) {
+            return Err(iwa_error(
+                part,
+                "iWork table style inheritance is cyclic or too deep",
+            ));
+        }
+        chain.push(id);
+        let Some((style_part, style)) = messages.message(id, 6003)? else {
+            break;
+        };
+        if let Some(props) = numbers_first_bytes(&style.payload, 11, style_part)? {
+            properties.push((style_part, props));
+        }
+        reference = numbers_first_bytes(&style.payload, 1, style_part)?
+            .map(|super_style| numbers_references(super_style, 3, style_part))
+            .transpose()?
+            .and_then(|refs| refs.first().copied());
+    }
+    if properties.is_empty() {
+        return Ok(None);
+    }
+    let mut strokes = HashMap::new();
+    for (part, props) in properties.into_iter().rev() {
+        for field in 46..=61 {
+            if let Some(stroke) = numbers_first_bytes(props, field, part)? {
+                strokes.insert(field, numbers_stroke(stroke, part)?);
+            }
+        }
+    }
+    let header_rows = numbers_varint(&model.payload, 9, part)?
+        .unwrap_or(0)
+        .min(u64::from(rows)) as u32;
+    let header_columns = numbers_varint(&model.payload, 10, part)?
+        .unwrap_or(0)
+        .min(u64::from(columns)) as u32;
+    let footer_start = rows.saturating_sub(
+        numbers_varint(&model.payload, 11, part)?
+            .unwrap_or(0)
+            .min(u64::from(rows)) as u32,
+    );
+    let mut borders = Vec::new();
+    let mut push = |horizontal, boundary, origin, length, field| {
+        if length > 0
+            && let Some(Some(stroke)) = strokes.get(&field)
+        {
+            borders.push(NumbersTableBorder {
+                horizontal,
+                boundary,
+                origin,
+                length,
+                stroke: stroke.clone(),
+            });
+        }
+    };
+    for boundary in 0..=rows {
+        let field = if boundary == header_rows && header_rows > 0 {
+            46
+        } else if boundary == footer_start && footer_start < rows {
+            54
+        } else if boundary == 0 {
+            if header_rows > 0 { 47 } else { 58 }
+        } else if boundary == rows {
+            if footer_start < rows { 55 } else { 58 }
+        } else if boundary < header_rows {
+            48
+        } else if boundary > footer_start {
+            56
+        } else {
+            60
+        };
+        if (boundary == header_rows && header_rows > 0)
+            || (boundary == footer_start && footer_start < rows)
+        {
+            push(true, boundary, 0, columns, field);
+        } else {
+            push(
+                true,
+                boundary,
+                0,
+                header_columns,
+                if boundary == 0 || boundary == rows {
+                    50
+                } else {
+                    52
+                },
+            );
+            push(
+                true,
+                boundary,
+                header_columns,
+                columns - header_columns,
+                field,
+            );
+        }
+    }
+    for boundary in 0..=columns {
+        let field = if boundary == header_columns && header_columns > 0 {
+            51
+        } else if boundary == 0 || boundary == columns {
+            if boundary < header_columns { 50 } else { 59 }
+        } else if boundary < header_columns {
+            53
+        } else {
+            61
+        };
+        push(
+            false,
+            boundary,
+            0,
+            header_rows,
+            if boundary == 0 || boundary == columns {
+                47
+            } else {
+                49
+            },
+        );
+        push(
+            false,
+            boundary,
+            header_rows,
+            footer_start.saturating_sub(header_rows),
+            field,
+        );
+        push(
+            false,
+            boundary,
+            footer_start,
+            rows - footer_start,
+            if boundary == 0 || boundary == columns {
+                55
+            } else {
+                57
+            },
+        );
+    }
+    Ok(Some(borders))
+}
+
+fn numbers_table_borders_with_defaults(
     messages: &NumbersMessageSpace,
     model: &IwaMessage,
     model_part: &str,
     rows: u32,
     columns: u32,
+    defaults: Vec<NumbersTableBorder>,
 ) -> Result<Vec<NumbersTableBorder>, Diagnostic> {
     let Some(sidecar_reference) = numbers_references(&model.payload, 49, model_part)?
         .into_iter()
         .next()
     else {
-        return Ok(Vec::new());
+        return Ok(defaults);
     };
     let (sidecar_part, sidecar) = messages
         .message(sidecar_reference, NUMBERS_STROKE_SIDECAR_TYPE)?
@@ -3306,6 +3569,14 @@ fn numbers_table_borders(
     }
     runs.sort_by_key(|run| run.0);
     let mut segments = HashMap::new();
+    for border in defaults {
+        for segment in border.origin..border.origin.saturating_add(border.length) {
+            segments.insert(
+                (border.horizontal, border.boundary, segment),
+                border.stroke.clone(),
+            );
+        }
+    }
     for (_, horizontal, boundary, origin, end, stroke) in runs {
         for segment in origin..end {
             let key = (horizontal, boundary, segment);
@@ -3358,6 +3629,7 @@ fn numbers_table_cells(
     model: &IwaMessage,
     model_part: &str,
     limits: Limits,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<(u32, u32, Vec<NumbersCell>), Diagnostic> {
     let rows = numbers_varint(&model.payload, 6, model_part)?
         .and_then(|value| u32::try_from(value).ok())
@@ -3371,6 +3643,11 @@ fn numbers_table_cells(
         .ok_or_else(|| iwa_error(model_part, "Numbers table has no data store"))?;
     let strings = numbers_data_list_reference(messages, store, 4, model_part, limits)?;
     let rich_strings = numbers_data_list_reference(messages, store, 17, model_part, limits)?;
+    let formats =
+        iwork_table_formats(messages, store, model_part, limits).unwrap_or_else(|error| {
+            diagnostics.push(iwork_cell_format_diagnostic(error, model_part));
+            HashMap::new()
+        });
     let tile_storage = numbers_first_bytes(store, 3, model_part)?
         .ok_or_else(|| iwa_error(model_part, "Numbers table has no tile storage"))?;
     let mut tiles = Vec::new();
@@ -3426,7 +3703,28 @@ fn numbers_table_cells(
                     ));
                 }
                 let (style_index, text_style_index) = numbers_cell_style_indexes(cell, tile_part)?;
-                let text = numbers_cell_text(cell, &strings, &rich_strings, tile_part)?;
+                let mut text = numbers_cell_text(cell, &strings, &rich_strings, tile_part)?;
+                let formatted = (|| -> Result<Option<bool>, Diagnostic> {
+                    let format = numbers_cell_format(cell, &formats, tile_part)?;
+                    let checkbox = format
+                        .map(|format| numbers_varint(format, 1, tile_part))
+                        .transpose()?
+                        .flatten()
+                        .filter(|kind| *kind == 263)
+                        .and_then(|_| text.as_ref().map(|text| text.text == "TRUE"));
+                    if let (Some(text), Some(format)) = (&mut text, format) {
+                        if let Some(formatted) =
+                            iwork_formatted_cell_text(cell, &text.text, format, tile_part)?
+                        {
+                            text.text = formatted;
+                        }
+                    }
+                    Ok(checkbox)
+                })();
+                let checkbox = formatted.unwrap_or_else(|error| {
+                    diagnostics.push(iwork_cell_format_diagnostic(error, tile_part));
+                    None
+                });
                 cells.push(NumbersCell {
                     row,
                     column,
@@ -3436,6 +3734,15 @@ fn numbers_table_cells(
                     part: tile_part.to_owned(),
                     style_index,
                     text_style_index,
+                    checkbox,
+                    value_type: cell
+                        .get(if cell.first() == Some(&4) || cell.first() == Some(&5) {
+                            1
+                        } else {
+                            2
+                        })
+                        .copied()
+                        .unwrap_or(0),
                 });
             }
         }
@@ -3834,44 +4141,229 @@ fn numbers_new_cell_text(
     )
 }
 
+fn iwork_cell_format_diagnostic(error: Diagnostic, part: &str) -> Diagnostic {
+    Diagnostic::warning(DiagnosticCode::FormatInvalid, Phase::Parse, Fidelity::Approximate,
+        format!("IWORK_CELL_FORMAT_INVALID: displaying the stored cell value without optional formatting: {error}"))
+        .in_part(part)
+}
+
+// TST v5 stores optional values first, followed by 32-bit list indexes in bit order.
+// This layout is shared by Numbers, Pages and Keynote table cells.
+fn iwork_cell_field_offset(
+    bytes: &[u8],
+    flag: u32,
+    part: &str,
+) -> Result<Option<usize>, Diagnostic> {
+    if bytes.first().copied() != Some(5) {
+        return Ok(None);
+    }
+    let fields = numbers_le_u32(bytes, 8, part)?;
+    if fields & flag == 0 {
+        return Ok(None);
+    }
+    let mut offset = 12;
+    for (bit, width) in [(1, 16), (2, 8), (4, 8)] {
+        if bit < flag && fields & bit != 0 {
+            offset += width;
+        }
+    }
+    offset += ((fields & (flag - 1)) & !7).count_ones() as usize * 4;
+    Ok(Some(offset))
+}
+
+fn iwork_table_formats(
+    messages: &NumbersMessageSpace,
+    store: &[u8],
+    part: &str,
+    limits: Limits,
+) -> Result<HashMap<u32, Vec<u8>>, Diagnostic> {
+    let mut formats = HashMap::new();
+    let Some(reference) = numbers_references(store, 22, part)?.first().copied() else {
+        return Ok(formats);
+    };
+    let Some((part, list)) = messages.message(reference, NUMBERS_DATA_LIST_TYPE)? else {
+        return Ok(formats);
+    };
+    for entry in numbers_bytes(&list.payload, 3, part)? {
+        let Some(index) =
+            numbers_varint(entry, 1, part)?.and_then(|index| u32::try_from(index).ok())
+        else {
+            continue;
+        };
+        if formats.len() >= limits.max_document_objects {
+            return Err(iwa_error(
+                part,
+                "iWork formats exceed the configured object limit",
+            ));
+        }
+        if let Some(format) = numbers_first_bytes(entry, 6, part)? {
+            formats.insert(index, format.to_vec());
+        }
+    }
+    Ok(formats)
+}
+
+fn numbers_cell_format<'a>(
+    bytes: &[u8],
+    formats: &'a HashMap<u32, Vec<u8>>,
+    part: &str,
+) -> Result<Option<&'a [u8]>, Diagnostic> {
+    let flag = match bytes.get(1) {
+        Some(2 | 10) => 0x2000,
+        Some(5) => 0x8000,
+        Some(6) => 0x40000,
+        Some(7) => 0x10000,
+        _ => 0x20000,
+    };
+    // A numeric currency cell uses its currency slot in place of the decimal slot.
+    let offset = if matches!(bytes.get(1), Some(2 | 10))
+        && iwork_cell_field_offset(bytes, 0x4000, part)?.is_some()
+    {
+        iwork_cell_field_offset(bytes, 0x4000, part)?
+    } else {
+        iwork_cell_field_offset(bytes, flag, part)?
+    };
+    Ok(offset
+        .map(|offset| numbers_le_u32(bytes, offset, part))
+        .transpose()?
+        .and_then(|index| formats.get(&index))
+        .map(Vec::as_slice))
+}
+
+fn iwork_formatted_cell_text(
+    bytes: &[u8],
+    text: &str,
+    format: &[u8],
+    part: &str,
+) -> Result<Option<String>, Diagnostic> {
+    let kind = numbers_varint(format, 1, part)?.unwrap_or(0);
+    if kind == 261
+        && let Some(offset) = iwork_cell_field_offset(bytes, 4, part)?
+    {
+        let seconds = numbers_le_f64(bytes, offset, part)?;
+        let pattern =
+            numbers_first_bytes(format, 14, part)?.and_then(|p| std::str::from_utf8(p).ok());
+        return Ok(pattern.and_then(|pattern| iwork_format_datetime(seconds, pattern)));
+    }
+    if !matches!(kind, 256..=259) {
+        return Ok(None);
+    }
+    let Some(mut value) = text.parse::<f64>().ok().filter(|value| value.is_finite()) else {
+        return Ok(None);
+    };
+    if !matches!(bytes.get(1), Some(2 | 10)) {
+        return Ok(None);
+    }
+    let Some(decimals) = numbers_varint(format, 2, part)?.filter(|places| *places <= 15) else {
+        return Ok(None);
+    };
+    if kind == 258 {
+        value *= 100.0;
+    }
+    let mut rendered = if kind == 259 {
+        format!("{:.*E}", decimals as usize, value)
+    } else {
+        format!("{:.*}", decimals as usize, value.abs())
+    };
+    if numbers_varint(format, 5, part)? == Some(1) && kind != 259 {
+        rendered = super::group_decimal_digits(&rendered);
+    }
+    if kind == 257 {
+        let code = numbers_first_bytes(format, 3, part)?
+            .and_then(|code| std::str::from_utf8(code).ok())
+            .unwrap_or("");
+        let symbol = match code {
+            "CNY" | "JPY" => "¥",
+            "USD" => "$",
+            "EUR" => "€",
+            "GBP" => "£",
+            "KRW" => "₩",
+            other => other,
+        };
+        rendered.insert_str(0, symbol);
+    }
+    if kind == 258 {
+        rendered.push('%');
+    }
+    if value < 0.0 && kind != 259 {
+        if matches!(numbers_varint(format, 4, part)?, Some(2 | 3)) {
+            rendered = format!("({rendered})");
+        } else {
+            rendered.insert(0, '-');
+        }
+    }
+    Ok(Some(rendered))
+}
+
+// TSK date patterns use ICU tokens (M = month, m = minute), unlike Excel formats.
+fn iwork_format_datetime(seconds: f64, pattern: &str) -> Option<String> {
+    if !seconds.is_finite() || seconds.abs() > 1.0e12 || pattern.len() > 1024 {
+        return None;
+    }
+    let (year, month, day) = super::civil_from_days((seconds / 86_400.0).floor() as i64 + 11_323);
+    let time = (seconds.floor() as i64).rem_euclid(86_400);
+    let hour = time / 3600;
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut result = String::new();
+    let mut index = 0;
+    let mut quoted = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\'' {
+            if chars.get(index + 1) == Some(&'\'') {
+                result.push('\'');
+                index += 2;
+                continue;
+            }
+            quoted = !quoted;
+            index += 1;
+            continue;
+        }
+        if quoted || !ch.is_ascii_alphabetic() {
+            result.push(ch);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < chars.len() && chars[index] == ch {
+            index += 1;
+        }
+        let count = index - start;
+        let number = match ch {
+            'y' => {
+                if count == 2 {
+                    year.rem_euclid(100)
+                } else {
+                    year
+                }
+            }
+            'M' if count <= 2 => i64::from(month),
+            'd' if count <= 2 => i64::from(day),
+            'H' => hour,
+            'h' => (hour + 11) % 12 + 1,
+            'm' => time / 60 % 60,
+            's' => time % 60,
+            'a' => {
+                result.push_str(if hour < 12 { "AM" } else { "PM" });
+                continue;
+            }
+            _ => return None,
+        };
+        result.push_str(&format!("{number:0count$}"));
+    }
+    (!quoted).then_some(result)
+}
+
 fn numbers_cell_style_indexes(
     bytes: &[u8],
     part: &str,
 ) -> Result<(Option<u32>, Option<u32>), Diagnostic> {
-    if bytes.first().copied() != Some(5) {
-        return Ok((None, None));
-    }
-    let fields = numbers_le_u32(bytes, 8, part)?;
-    let mut offset = 12_usize;
-    for (flag, width) in [(0x0001_u32, 16_usize), (0x0002, 8), (0x0004, 8)] {
-        if fields & flag != 0 {
-            offset = offset
-                .checked_add(width)
-                .ok_or_else(|| iwa_error(part, "Numbers cell style offset overflows"))?;
-        }
-    }
-    for flag in [0x0008_u32, 0x0010] {
-        if fields & flag != 0 {
-            offset = offset
-                .checked_add(4)
-                .ok_or_else(|| iwa_error(part, "Numbers cell style offset overflows"))?;
-        }
-    }
-    let cell_style = if fields & 0x0020 != 0 {
-        let value = numbers_le_u32(bytes, offset, part)?;
-        offset = offset
-            .checked_add(4)
-            .ok_or_else(|| iwa_error(part, "Numbers text style offset overflows"))?;
-        Some(value)
-    } else {
-        None
+    let index = |flag| {
+        iwork_cell_field_offset(bytes, flag, part)?
+            .map(|offset| numbers_le_u32(bytes, offset, part))
+            .transpose()
     };
-    let text_style = if fields & 0x0040 != 0 {
-        Some(numbers_le_u32(bytes, offset, part)?)
-    } else {
-        None
-    };
-    Ok((cell_style, text_style))
+    Ok((index(0x20)?, index(0x40)?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3945,18 +4437,8 @@ fn numbers_format_number(value: f64) -> String {
 }
 
 fn numbers_format_date(seconds_since_2001: f64) -> String {
-    let days_since_unix = (seconds_since_2001 / 86_400.0).floor() as i64 + 11_323;
-    let z = days_since_unix + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
+    let (year, month, day) =
+        super::civil_from_days((seconds_since_2001 / 86_400.0).floor() as i64 + 11_323);
     format!("{year:04}-{month:02}-{day:02}")
 }
 
@@ -6317,7 +6799,8 @@ fn pages_attachment_objects(
             else {
                 continue;
             };
-            let (rows, columns, cells) = numbers_table_cells(messages, model, model_part, limits)?;
+            let (rows, columns, cells) =
+                numbers_table_cells(messages, model, model_part, limits, diagnostics)?;
             let target = page.targets.iter().find(|target| {
                 target.anchored_start <= character_index && character_index <= target.anchored_end
             });
@@ -7213,6 +7696,28 @@ fn pages_table_text_style(
     Ok(style)
 }
 
+fn iwork_table_cell_text_style(
+    cell: &NumbersCell,
+    rows: u32,
+    styles: &[Option<KeynoteTextStyle>],
+    model: &IwaMessage,
+    part: &str,
+    archives: &[IwaArchive],
+) -> Result<KeynoteTextStyle, Diagnostic> {
+    let mut style = cell
+        .text_style_index
+        .and_then(|index| styles.get(index as usize))
+        .and_then(Clone::clone)
+        .map(Ok)
+        .unwrap_or_else(|| {
+            pages_table_text_style(model, part, archives, cell.row, cell.column, rows)
+        })?;
+    if style.natural_alignment && matches!(cell.value_type, 2 | 5 | 7 | 10) {
+        style.align = TextAlign::End;
+    }
+    Ok(style)
+}
+
 fn iwork_table_text_styles(
     messages: &NumbersMessageSpace,
     archives: &[IwaArchive],
@@ -7868,22 +8373,14 @@ fn pages_push_table_grid(
             .filter(|end| *end < columns.len())
             .unwrap_or(column + 1);
         let width = columns[end_column] - x;
-        let mut style = cell
-            .text_style_index
-            .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| cell_text_styles.get(index))
-            .and_then(Clone::clone)
-            .map(Ok)
-            .unwrap_or_else(|| {
-                pages_table_text_style(
-                    model,
-                    model_part,
-                    text_style_archives,
-                    cell.row,
-                    column_index,
-                    rows,
-                )
-            })?;
+        let mut style = iwork_table_cell_text_style(
+            cell,
+            rows,
+            cell_text_styles,
+            model,
+            model_part,
+            text_style_archives,
+        )?;
         if borders.is_none() && end_column > column + 1 && cell.row >= header_rows {
             style.align = TextAlign::End;
             style.color = 0xffff_ffff;
@@ -9600,7 +10097,8 @@ fn keynote_native_drawable(
             path.pop();
             return Ok(1);
         };
-        let (rows, columns, cells) = numbers_table_cells(messages, model, model_part, limits)?;
+        let (rows, columns, cells) =
+            numbers_table_cells(messages, model, model_part, limits, diagnostics)?;
         let column_widths =
             pages_table_column_widths(messages, model, model_part, columns, bounds.width)?;
         let mut row_heights =
@@ -10247,7 +10745,7 @@ fn keynote_push_chart(
     } else {
         chart.value_axis.show_labels
     };
-    let left = if show_left_labels {
+    let left = if show_left_labels && (cartesian || chart.doughnut) {
         label_width + 8.0
     } else {
         0.0
@@ -10268,17 +10766,12 @@ fn keynote_push_chart(
         chart.category_axis.text.font_size
     } * 1.2
         + 5.0;
-    // Cartesian TSCH drawable geometry is the plot frame; labels/title extend
-    // outside it. Pie layout has a different frame contract and remains separate.
-    let bounds = if cartesian || chart.doughnut {
-        Rect {
-            x: authored.x - left,
-            y: authored.y - top,
-            width: authored.width + left,
-            height: authored.height + top + bottom,
-        }
-    } else {
-        authored
+    // TSCH drawable geometry is the plot frame; labels/title extend outside it.
+    let bounds = Rect {
+        x: authored.x - left,
+        y: authored.y - top,
+        width: authored.width + left,
+        height: authored.height + top + bottom,
     };
     push_keynote_native_object(
         objects,
@@ -10304,18 +10797,7 @@ fn keynote_push_chart(
     )?;
     let parent_numeric_id = objects.last().map(|object| object.numeric_id);
     let parent_stable_id = objects.last().map(|object| object.stable_id.clone());
-    let padding_x = (bounds.width * 0.07).min(28.0);
-    let padding_y = (bounds.height * 0.08).min(22.0);
-    let mut plot = if cartesian || chart.doughnut {
-        authored
-    } else {
-        Rect {
-            x: bounds.x + padding_x,
-            y: bounds.y + padding_y,
-            width: (bounds.width - padding_x * 2.0).max(1.0),
-            height: (bounds.height - padding_y * 2.0).max(1.0),
-        }
-    };
+    let plot = authored;
     let legend = chart.show_legend.then(|| {
         if let Some(geometry) = chart.legend_geometry {
             return Rect {
@@ -10326,9 +10808,6 @@ fn keynote_push_chart(
             };
         }
         let width = (bounds.width * 0.28).clamp(70.0, 120.0);
-        if !cartesian && !chart.doughnut {
-            plot.width = (plot.width - width - 12.0).max(1.0);
-        }
         Rect {
             x: plot.x + plot.width + 12.0,
             y: bounds.y + (bounds.height - chart.series_names.len() as f32 * 18.0 - 8.0) / 2.0,
@@ -11018,7 +11497,7 @@ fn keynote_push_pie_chart(
     if total <= f32::EPSILON {
         return Ok(());
     }
-    let size = plot.width.min(plot.height) * if chart.doughnut { 1.0 } else { 0.58 };
+    let size = plot.width.min(plot.height);
     let pie = Rect {
         x: plot.x + (plot.width - size) / 2.0,
         y: plot.y + (plot.height - size) / 2.0,
@@ -11033,56 +11512,44 @@ fn keynote_push_pie_chart(
             continue;
         }
         let end_angle = start_angle + std::f32::consts::TAU * value / total;
-        let segments = (((end_angle - start_angle).abs() / std::f32::consts::TAU) * 48.0)
-            .ceil()
-            .max(2.0) as usize;
         let mut commands = vec![PathCommand::MoveTo {
-            x: center,
-            y: center,
+            x: center + radius * start_angle.cos(),
+            y: center + radius * start_angle.sin(),
         }];
-        for segment in 0..=segments {
-            let ratio = segment as f32 / segments as f32;
-            let angle = start_angle + (end_angle - start_angle) * ratio;
-            commands.push(PathCommand::LineTo {
-                x: center + radius * angle.cos(),
-                y: center + radius * angle.sin(),
-            });
-        }
-        if chart.hole_ratio > 0.0 {
-            // The shared ellipse primitive is also used by DrawingML charts;
-            // TSCH supplies the inner-radius ratio and start rotation directly.
-            let inner = radius * chart.hole_ratio;
-            commands = vec![PathCommand::MoveTo {
-                x: center + radius * start_angle.cos(),
-                y: center + radius * start_angle.sin(),
-            }];
-            let count = ((end_angle - start_angle).abs() / std::f32::consts::FRAC_PI_2)
-                .ceil()
-                .max(1.0) as usize;
-            for (r, from, to) in [
-                (radius, start_angle, end_angle),
-                (inner, end_angle, start_angle),
-            ] {
-                if r == inner {
-                    commands.push(PathCommand::LineTo {
-                        x: center + r * from.cos(),
-                        y: center + r * from.sin(),
-                    });
-                }
-                for segment in 0..count {
-                    let a = from + (to - from) * segment as f32 / count as f32;
-                    let b = from + (to - from) * (segment + 1) as f32 / count as f32;
-                    let [first, second, last] =
-                        super::ellipse_arc_bezier_points((center, center), (r, r), a, b);
-                    commands.push(PathCommand::BezierCurveTo {
-                        cp1x: first.0,
-                        cp1y: first.1,
-                        cp2x: second.0,
-                        cp2y: second.1,
-                        x: last.0,
-                        y: last.1,
-                    });
-                }
+        let count = ((end_angle - start_angle).abs() / std::f32::consts::FRAC_PI_2)
+            .ceil()
+            .max(1.0) as usize;
+        let inner = radius * chart.hole_ratio;
+        for (r, from, to) in [
+            (radius, start_angle, end_angle),
+            (inner, end_angle, start_angle),
+        ] {
+            if r == 0.0 {
+                commands.push(PathCommand::LineTo {
+                    x: center,
+                    y: center,
+                });
+                break;
+            }
+            if r == inner {
+                commands.push(PathCommand::LineTo {
+                    x: center + r * from.cos(),
+                    y: center + r * from.sin(),
+                });
+            }
+            for segment in 0..count {
+                let a = from + (to - from) * segment as f32 / count as f32;
+                let b = from + (to - from) * (segment + 1) as f32 / count as f32;
+                let [first, second, last] =
+                    super::ellipse_arc_bezier_points((center, center), (r, r), a, b);
+                commands.push(PathCommand::BezierCurveTo {
+                    cp1x: first.0,
+                    cp1y: first.1,
+                    cp2x: second.0,
+                    cp2y: second.1,
+                    x: last.0,
+                    y: last.1,
+                });
             }
         }
         commands.push(PathCommand::ClosePath);
@@ -11097,18 +11564,24 @@ fn keynote_push_pie_chart(
             parent_numeric_id,
             parent_stable_id,
             serial,
-            Visual::PaintedShape {
-                geometry: Geometry::Path {
-                    fill_rule: FillRule::NonZero,
-                    commands,
-                },
-                fill: Paint::Solid(keynote_chart_color(chart, index)),
-                stroke: if chart.doughnut {
-                    Paint::None
+            {
+                let visual = Visual::PaintedShape {
+                    geometry: Geometry::Path {
+                        fill_rule: FillRule::NonZero,
+                        commands,
+                    },
+                    fill: Paint::Solid(keynote_chart_color(chart, index)),
+                    stroke: chart.pie_stroke.0.clone(),
+                    stroke_width: chart.pie_stroke.1,
+                };
+                if chart.pie_stroke.2 == StrokeStyle::default() {
+                    visual
                 } else {
-                    Paint::Solid(0xffff_ffff)
-                },
-                stroke_width: if chart.doughnut { 0.0 } else { 1.0 },
+                    Visual::StrokeStyle {
+                        style: chart.pie_stroke.2.clone(),
+                        visual: Box::new(visual),
+                    }
+                }
             },
         )?;
         if let Some(category) = chart
@@ -11116,7 +11589,7 @@ fn keynote_push_pie_chart(
             .get(index)
             .filter(|value| !value.is_empty())
         {
-            let label = if chart.doughnut {
+            let label = if !chart.pie_show_category {
                 format!("{:.0}%", value / total * 100.0)
             } else {
                 format!("{category}\n{:.0}%", value / total * 100.0)
@@ -11128,15 +11601,11 @@ fn keynote_push_pie_chart(
             } else {
                 plot.width * 0.38
             };
-            let label_height = if chart.doughnut {
-                style.font_size * 1.2
-            } else {
-                26.0
-            };
+            let label_height = style.font_size * if chart.pie_show_category { 2.4 } else { 1.2 };
             let label_radius = if chart.doughnut {
                 radius + 15.0
             } else {
-                size * 0.78
+                radius * chart.pie_label_radius
             };
             let label_y = pie.y + center + label_radius * midpoint.sin() - label_height / 2.0;
             let right = midpoint.cos() >= 0.0;
@@ -11205,27 +11674,19 @@ fn keynote_push_pie_chart(
                 parent_numeric_id,
                 parent_stable_id,
                 serial,
-                if chart.doughnut {
-                    keynote_chart_label_visual(
-                        label,
+                keynote_chart_label_visual(
+                    label,
+                    if chart.doughnut {
                         if right {
                             TextAlign::Start
                         } else {
                             TextAlign::End
-                        },
-                        style,
-                    )
-                } else {
-                    Visual::RichText {
-                        geometry: Geometry::Rectangle,
-                        fill: Paint::None,
-                        stroke: Paint::None,
-                        stroke_width: 0.0,
-                        align: TextAlign::Center,
-                        line_height: 10.8,
-                        runs: vec![keynote_text_run(label, style)],
-                    }
-                },
+                        }
+                    } else {
+                        TextAlign::Center
+                    },
+                    style,
+                ),
             )?;
         }
         start_angle = end_angle;
@@ -12510,7 +12971,7 @@ fn keynote_chart(
                 ..KeynoteTextStyle::default()
             },
         )?,
-        pie_label_style: if chart_type == 25 {
+        pie_label_style: {
             iwork_chart_text_style(
                 &iwork_chart_properties(
                     stylesheet_archives,
@@ -12518,7 +12979,7 @@ fn keynote_chart(
                     IWORK_CHART_SERIES_STYLE_TYPE,
                     part,
                 )?,
-                29,
+                if chart_type == 25 { 29 } else { 23 },
                 &paragraph_styles,
                 stylesheet_archives,
                 part,
@@ -12528,12 +12989,39 @@ fn keynote_chart(
                     ..KeynoteTextStyle::default()
                 },
             )?
-        } else {
-            KeynoteTextStyle {
-                font_family: "Helvetica".to_owned(),
-                font_size: 9.0,
-                ..KeynoteTextStyle::default()
-            }
+        },
+        pie_stroke: {
+            let properties = iwork_chart_properties(
+                stylesheet_archives,
+                style_references.first().copied().unwrap_or(0),
+                IWORK_CHART_SERIES_STYLE_TYPE,
+                part,
+            )?;
+            numbers_first_bytes(&properties, 52, part)?
+                .map(|bytes| keynote_stroke(bytes, part))
+                .transpose()?
+                .unwrap_or((Paint::None, 0.0, StrokeStyle::default()))
+        },
+        pie_label_radius: {
+            let properties = iwork_chart_properties(
+                archives,
+                series_nonstyles.first().copied().unwrap_or(0),
+                IWORK_CHART_SERIES_NONSTYLE_TYPE,
+                part,
+            )?;
+            keynote_fixed32_field(&properties, 147, part)?
+                .unwrap_or(67.0)
+                .clamp(0.0, 200.0)
+                / 100.0
+        },
+        pie_show_category: {
+            let properties = iwork_chart_properties(
+                archives,
+                series_nonstyles.first().copied().unwrap_or(0),
+                IWORK_CHART_SERIES_NONSTYLE_TYPE,
+                part,
+            )?;
+            numbers_varint(&properties, 31, part)?.unwrap_or(0) != 0
         },
         legend_geometry,
         stacked,
@@ -14361,7 +14849,7 @@ fn pages_paragraph_layouts(
                         messages.message(*model_identifier, NUMBERS_TABLE_MODEL_TYPE)?
                 {
                     let (rows, _, cells) =
-                        numbers_table_cells(messages, model, model_part, limits)?;
+                        numbers_table_cells(messages, model, model_part, limits, &mut Vec::new())?;
                     let mut heights =
                         pages_table_row_heights(messages, model, model_part, rows, line_height)?;
                     let header_rows =
@@ -17378,6 +17866,218 @@ mod tests {
         crate::protocol::encode(&document).expect("native Numbers document should encode");
     }
 
+    fn team_budget_document() -> crate::model::Document {
+        detect_and_parse(
+            include_bytes!("../../tests/fixtures/numbers-team-budget.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn supplied_numbers_team_preserves_dates_and_native_pie_frame() {
+        let document = team_budget_document();
+        for (address, expected) in [
+            ("numbers:1:10032:numbers:1:A2", "10/25/20"),
+            ("numbers:1:10032:numbers:1:C2", "9:00 AM"),
+            ("numbers:1:10032:numbers:1:C5", "12:00 PM"),
+        ] {
+            assert_eq!(
+                document
+                    .objects
+                    .iter()
+                    .find(|o| o.stable_id == address)
+                    .unwrap()
+                    .text
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        let slices = document.objects.iter().filter(|o| o.unit_index == 3 && matches!(&o.visual, Visual::PaintedShape { geometry: Geometry::Path { commands, .. }, fill: Paint::Solid(_), .. } if commands.iter().any(|c| matches!(c, PathCommand::BezierCurveTo { .. })))).collect::<Vec<_>>();
+        assert_eq!(slices.len(), 4);
+        for slice in slices {
+            assert!((slice.bounds.width - 218.0 * super::IWORK_POINT_TO_CSS_PIXEL).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn supplied_numbers_team_isolates_corrupt_optional_formats() {
+        let limits = Limits::default();
+        let package = super::Package::open_iwork(
+            include_bytes!("../../tests/fixtures/numbers-team-budget.numbers"),
+            limits,
+        )
+        .unwrap();
+        let part = "Index/Tables/DataList-9801.iwa";
+        let archives = super::parse_iwa_archives(
+            &package,
+            part,
+            &package.required_part(part).unwrap(),
+            limits,
+        )
+        .unwrap();
+        let mut replaced = false;
+        let records = archives
+            .iter()
+            .flat_map(|archive| {
+                archive
+                    .messages
+                    .iter()
+                    .map(move |message| (archive, message))
+            })
+            .map(|(archive, message)| {
+                let payload = if archive.identifier == 9801
+                    && message.message_type == super::NUMBERS_DATA_LIST_TYPE
+                {
+                    replaced = true;
+                    &[0x0f][..]
+                } else {
+                    &message.payload
+                };
+                iwa_archive(
+                    archive.identifier,
+                    message.message_type,
+                    payload,
+                    &message.data_references,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(replaced);
+        let replacement = iwa_stream(&records);
+        let parts = package
+            .entry_names()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    if name == part {
+                        replacement.clone()
+                    } else {
+                        package.required_part(name).unwrap().to_vec()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let bytes = stored_zip(
+            &parts
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+                .collect::<Vec<_>>(),
+        );
+        let parsed = detect_and_parse(&bytes, limits).unwrap().unwrap();
+        assert_eq!(parsed.units.len(), 4);
+        assert_eq!(
+            parsed
+                .objects
+                .iter()
+                .filter(|o| o.kind == ObjectKind::Cell)
+                .count(),
+            team_budget_document()
+                .objects
+                .iter()
+                .filter(|o| o.kind == ObjectKind::Cell)
+                .count()
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("IWORK_CELL_FORMAT_INVALID"))
+        );
+        assert!(
+            parsed
+                .objects
+                .iter()
+                .any(|o| o.text.as_deref() == Some("¥50"))
+        );
+        assert!(
+            parsed
+                .objects
+                .iter()
+                .any(|o| o.text.as_deref() == Some("Todd"))
+        );
+    }
+
+    #[test]
+    fn supplied_numbers_team_keeps_currency_units() {
+        let document = team_budget_document();
+        for (address, expected) in [
+            ("numbers:3:10256:numbers:3:B2", "¥50"),
+            ("numbers:3:10258:numbers:3:B14", "¥556"),
+        ] {
+            assert_eq!(
+                document
+                    .objects
+                    .iter()
+                    .find(|o| o.stable_id == address)
+                    .unwrap()
+                    .text
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn supplied_numbers_team_renders_checkbox_geometry() {
+        let document = team_budget_document();
+        for row in 2..=13 {
+            let cell = document
+                .objects
+                .iter()
+                .find(|o| o.stable_id == format!("numbers:3:10258:numbers:3:B{row}"))
+                .unwrap();
+            let Visual::Group { children } = &cell.visual else {
+                panic!("checkbox {row} must use vector geometry");
+            };
+            assert_eq!(children.len(), if row <= 3 { 3 } else { 2 });
+            for (actual, expected) in [
+                (children[0].bounds.x, cell.bounds.x),
+                (children[0].bounds.y, cell.bounds.y),
+                (children[0].bounds.width, cell.bounds.width),
+                (children[0].bounds.height, cell.bounds.height),
+            ] {
+                assert!(
+                    (actual - expected).abs() < 0.001,
+                    "checkbox fill must remain in its own cell"
+                );
+            }
+            assert!(
+                (children[1].bounds.x + children[1].bounds.width / 2.0
+                    - cell.bounds.x
+                    - cell.bounds.width / 2.0)
+                    .abs()
+                    < 0.001
+            );
+            assert!(
+                (children[1].bounds.y + children[1].bounds.height / 2.0
+                    - cell.bounds.y
+                    - cell.bounds.height / 2.0)
+                    .abs()
+                    < 0.001
+            );
+        }
+    }
+
+    #[test]
+    fn supplied_numbers_team_preserves_style_separator_lines() {
+        let document = team_budget_document();
+        assert!(
+            document
+                .objects
+                .iter()
+                .any(|o| o.stable_id == "numbers:3:10256:numbers:3:border:horizontal:1:0:5"),
+            "Cost Breakdown header separator is missing"
+        );
+        assert!(
+            document
+                .objects
+                .iter()
+                .any(|o| o.stable_id == "numbers:3:10258:numbers:3:border:horizontal:13:0:2"),
+            "Cost Per Player footer separator is missing"
+        );
+    }
+
     #[test]
     fn supplied_numbers_canvas_preserves_native_sheet_layout() {
         let document = detect_and_parse(
@@ -18916,6 +19616,8 @@ mod tests {
             part: "tile".to_owned(),
             style_index: None,
             text_style_index: None,
+            checkbox: None,
+            value_type: 3,
         });
         let mut objects = Vec::new();
         super::pages_push_table_grid(
