@@ -60,7 +60,10 @@ test("PDF pack stays within the reviewed binary size budget", async () => {
   // 3,167,547 -> 3,180,410 (+12,863; 0.41%). The supplied original is compared
   // against Numbers' native geometry in Chromium/WebKit; Pages/Keynote baselines
   // remain unchanged and malformed local tables retain the other canvas objects.
-  assert.ok(bytes.byteLength <= 3_182_000, `PDF Wasm is ${bytes.byteLength} bytes`);
+  // TST currency/date formats, checkbox vectors, style separators/banding and
+  // native pie labels: 3,180,410 -> 3,199,308 (+18,898; 0.59%). The supplied
+  // soccer-team document has native-app and Chromium/WebKit pixel regressions.
+  assert.ok(bytes.byteLength <= 3_202_000, `PDF Wasm is ${bytes.byteLength} bytes`);
 });
 
 test("binary Dingbats font preserves the original decoded font bytes", async () => {
@@ -121,11 +124,9 @@ const scenes = {
   "pdf": {
     "word-original.pages": "9ec57779010c6bd3ee7f85f83c5594bacc8464ef281f333dde67e8013219d677",
     "keynote-first-line-indent.key": "d1b2ba39ae4a0356b99a0e043da10e03310aff094cf1ac8d2bf169b0dccf576e",
-    // Numbers now keeps the native sheet canvas and table identity. Its four
-    // cells use the authored 53 pt columns / 14.25 pt rows (previously 72/15).
-    // Cell content/visuals/source locators and chart geometry/visuals are unchanged;
-    // only IDs, table geometry, canvas extent and the added table frame differ.
-    "chart-original.numbers": "4bdfc74268b35df5dc62a4ff4e8843ec9b8516175c42afb213717afb470055b0"
+    // Restores 34 authored default grid strokes and natural numeric right alignment.
+    // The added strokes shift numeric IDs; chart geometry, visuals and text are unchanged.
+    "chart-original.numbers": "6d63062c2359f9a32c31baf36f2c513d00516585325539b4d1fe43d601a74e7e"
   },
   "xps": {
     "ecma-388-cover.xps": "0b77e74e8931c0ed08a97a5587e488714c52d259e1b3d7c604a68f9553d628f6"

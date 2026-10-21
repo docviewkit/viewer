@@ -4,7 +4,8 @@
 #[cfg(any(
     feature = "native-formats",
     feature = "legacy-office-formats",
-    feature = "odf-formats"
+    feature = "odf-formats",
+    feature = "iwork-formats"
 ))]
 fn group_decimal_digits(rendered: &str) -> String {
     let (sign, unsigned) = rendered
@@ -2030,8 +2031,8 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-#[cfg(feature = "native-formats")]
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+#[cfg(any(feature = "native-formats", feature = "iwork-formats"))]
+pub(super) fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let days = days + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
     let day_of_era = days - era * 146_097;

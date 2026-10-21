@@ -180,7 +180,7 @@ test("opens supplied Numbers tables after charts across multiple sheets", async 
     const table = objects.find(object => object.type === "table" && object.unitIndex === 0);
     assert.ok(Math.abs(table.bounds.y - 440 * 4 / 3) < 1);
     assert.ok(objects.some(object => object.text === "Monthly Budget" && object.bounds.width > 670));
-    for (const text of ["Category", "Entertainment", "205.75"]) {
+    for (const text of ["Category", "Entertainment", "¥205.75"]) {
       assert.ok(objects.some(object => object.type === "cell" && object.text === text));
     }
     assert.ok(objects.some(object => object.unitIndex === 1 && object.text === "Groceries"));
