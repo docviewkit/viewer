@@ -1,6 +1,6 @@
 //! Shared DrawingML/ChartML data used by DOCX, PPTX, and XLSX host adapters.
 
-pub(super) use super::ellipse_arc_bezier_points;
+pub(super) use super::{chart_marker_geometry, ellipse_arc_bezier_points};
 
 use std::collections::HashMap;
 #[cfg(feature = "native-formats")]

@@ -187,3 +187,52 @@ object; all its preexisting objects remain identical. Selected Pages/Keynote sce
 hashes remain unchanged. The PDF/iWork pack grows by 2,751 bytes
 (3,203,659 → 3,206,410; 0.09%), without font or dependency changes. Verification
 captures and logs are under `output/playwright/numbers-retirement/`.
+
+## Correlation Project: native scatter chart and text rules
+
+`tests/fixtures/numbers-correlation.numbers` is the unchanged supplied
+`Untitled 3.numbers`, SHA-256
+`ae22bbfbaf5470cb5ca5d6bf8beed60a676f9df4c9e09d97d7b9ae9bf0d819a3`.
+Numbers shows chart 729357, a 246.628067 × 238 pt scatter plot at (280, 447),
+with four plus markers at (55.5, 6), (61.2, 6.2), (69, 7.4), (66.5, 7),
+a linear trendline and no point-connection lines. X is 0–70 with five intervals;
+Y is 0–8 with five intervals and one intermediate dotted grid line per interval.
+The native Series inspector confirms Linear and an automatically sized plus.
+
+TSCH type 9 now shares the existing iWork chart emitter across Numbers, Pages and
+Keynote. Its two value axes retain their independent style/nonstyle references,
+titles and grid settings. Shared-X and separate-X/Y caches preserve sparse pairs,
+row/column direction and empty series indices; absent cells and f64-to-f32 overflow
+are excluded rather than becoming false zero-valued observations. Other chart
+kinds retain their existing zero substitution. Existing iWork numeric ticks,
+axis titles and grid emission are reused. Tick-label width considers intermediate
+values such as 6.4 so the vertical title does not overlap them.
+
+Ordinary least squares reuses the common OOXML/ODF implementation. Marker
+geometry moved from DrawingML to the common format layer, with plus and inverted
+triangle support; each adapter retains its symbol IDs, sizing, fill and stroke
+semantics. This is not a conversion through another document format. TSCH automatic
+range selection, plot geometry, theme inheritance and cached-series layout remain
+format-specific. This regression covers linear scatter plots, not bubble charts,
+nonlinear trendlines, logarithmic axes or complete interactive chart behavior.
+
+The same real file exposed two additional layout losses: the `Data` table title
+was forcibly centered, and multiline text layout discarded already parsed
+paragraph rules. Table titles now honor their resolved alignment, and native
+text frames retain above/below rules in the shared paragraph model.
+
+```sh
+node scripts/test-numbers-correlation.mjs
+NUMBERS_CORRELATION_BASELINE_WASM=output/playwright/numbers-correlation/before.wasm NUMBERS_CORRELATION_OUTPUT=output/playwright/numbers-correlation/baseline node scripts/test-numbers-correlation.mjs
+```
+
+With the old pack, this unchanged file fails chart/marker/trendline, numeric-axis,
+title-alignment and separator checks. Chromium and WebKit pass after the fix,
+including actual marker/trendline/separator pixels and nonoverlapping axis text,
+without console errors. Core tests cover the real chart and paragraph rule plus
+sparse shared/separate caches, transposition and overflow. Common marker and
+regression tests and existing OOXML scatter tests pass. Existing Dice Lab, team
+budget, Retirement and sheet drawing-extent browser checks pass in both engines;
+the selected Numbers/Pages/Keynote scene hashes are unchanged. The PDF/iWork pack
+grows from 3,206,410 to 3,219,656 bytes (+13,246; 0.41%), without new fonts or dependencies. Captures and logs
+are under `output/playwright/numbers-correlation/`.
