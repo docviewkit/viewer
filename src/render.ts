@@ -305,6 +305,15 @@ export function sheetPrintPages(
   });
   const printableWidth = Math.max(1, paper.width - margins.left - margins.right);
   const printableHeight = Math.max(1, paper.height - margins.top - margins.bottom);
+  // A sheet of positioned drawings has no indexed grid to paginate. Preserve
+  // its complete canvas as one printable fragment rather than an empty range.
+  if (unit.rows === 0 || unit.columns === 0) {
+    const viewport = Object.freeze({ x: 0, y: 0, width: unit.width, height: unit.height });
+    const scale = Math.min((settings?.scale ?? 100) / 100,
+      printableWidth / unit.width, printableHeight / unit.height);
+    return [Object.freeze({ viewport, width: unit.width, height: unit.height,
+      fragments: [Object.freeze({ viewport, x: 0, y: 0 })], paper, margins, scale })];
+  }
   const rows = new SheetAxisMapper(unit.rowAxis, unit.rows, sizes.rows);
   const columns = new SheetAxisMapper(unit.columnAxis, unit.columns, sizes.columns);
   const range = sheetPrintRange(unit);
@@ -363,7 +372,8 @@ export function sheetFormulaViewportBounds(
   unit: UnitDescriptor,
   request: Pick<RenderRequest, "viewport" | "sheetSizes">,
 ): { readonly maxRow: number; readonly maxColumn: number } | undefined {
-  if (unit.type !== "sheet" || request.viewport === undefined) return undefined;
+  if (unit.type !== "sheet" || unit.rows === 0 || unit.columns === 0
+    || request.viewport === undefined) return undefined;
   const rows = new SheetAxisMapper(unit.rowAxis, unit.rows, request.sheetSizes?.rows);
   const columns = new SheetAxisMapper(unit.columnAxis, unit.columns, request.sheetSizes?.columns);
   const bottom = request.viewport.y + request.viewport.height;

@@ -79,6 +79,7 @@ const IWORK_MEDIA_STYLE_TYPE: u64 = 3_016;
 const IWORK_CHART_TYPE: u64 = 5_021;
 const IWORK_CHART_STYLE_TYPE: u64 = 5_022;
 const IWORK_CHART_TITLE_TYPE: u64 = 5_023;
+const IWORK_CHART_LEGEND_STYLE_TYPE: u64 = 5_024;
 const IWORK_CHART_AXIS_STYLE_TYPE: u64 = 5_026;
 const IWORK_CHART_AXIS_NONSTYLE_TYPE: u64 = 5_027;
 const IWORK_CHART_SERIES_STYLE_TYPE: u64 = 5_028;
@@ -179,6 +180,7 @@ struct KeynoteTextStyle {
 #[derive(Clone, Debug)]
 struct IworkTableCellStyle {
     fill: Paint,
+    authored_fill: bool,
     wrap: bool,
 }
 
@@ -202,6 +204,7 @@ impl Default for IworkTableCellStyle {
     fn default() -> Self {
         Self {
             fill: Paint::None,
+            authored_fill: false,
             wrap: false,
         }
     }
@@ -461,6 +464,12 @@ enum KeynoteChartKind {
 struct KeynoteChart {
     geometry: KeynoteGeometry,
     kind: KeynoteChartKind,
+    doughnut: bool,
+    hole_ratio: f32,
+    start_rotation: f32,
+    legend_style: KeynoteTextStyle,
+    pie_label_style: KeynoteTextStyle,
+    legend_geometry: Option<KeynoteGeometry>,
     stacked: bool,
     title: Option<String>,
     series_names: Vec<String>,
@@ -481,6 +490,7 @@ struct KeynoteChart {
 #[derive(Clone, Debug)]
 struct IworkChartAxis {
     text: KeynoteTextStyle,
+    vertical_labels: bool,
     show_axis: bool,
     show_labels: bool,
     grid: Option<(Paint, f32, StrokeStyle)>,
@@ -2375,6 +2385,11 @@ fn numbers_document(
         })
         .map(|entry| entry.archive.clone())
         .collect::<Vec<_>>();
+    let native_archives = archives
+        .iter()
+        .map(|entry| entry.archive.clone())
+        .collect::<Vec<_>>();
+    let data_files = iwork_data_files(package, limits)?;
     let messages = NumbersMessageSpace { archives };
     let root = root_message(document_archives, DOCUMENT_COMPONENT)?;
     let sheet_references = numbers_references(&root.payload, 1, DOCUMENT_COMPONENT)?;
@@ -2399,6 +2414,7 @@ fn numbers_document(
     ];
     let mut units = Vec::new();
     let mut objects = Vec::new();
+    let mut embedded_fonts = Vec::new();
     for sheet_identifier in sheet_references {
         let (sheet_part, sheet) = messages
             .message(sheet_identifier, NUMBERS_SHEET_TYPE)?
@@ -2415,6 +2431,112 @@ fn numbers_document(
             .to_owned();
         let first_unit = units.len();
         let drawable_references = numbers_references(&sheet.payload, 2, sheet_part)?;
+        // Native Numbers sheets are canvases: tables and other drawables keep
+        // independent origins. Geometry-free tile tables retain the grid adapter
+        // below; inventing a canvas position would lose information.
+        let mut has_canvas_geometry = false;
+        for identifier in &drawable_references {
+            if let Some((part, table)) = messages.message(*identifier, NUMBERS_TABLE_INFO_TYPE)? {
+                match pages_table_geometry(&table.payload, part) {
+                    Ok(geometry) => {
+                        has_canvas_geometry |= geometry.width > 0.0 && geometry.height > 0.0
+                    }
+                    // Let the drawable adapter diagnose and isolate this table.
+                    Err(error) if error.code == DiagnosticCode::FormatInvalid => {
+                        has_canvas_geometry = true
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if has_canvas_geometry {
+            let first = objects.len();
+            let unit_index = u32::try_from(units.len())
+                .map_err(|_| iwa_error(sheet_part, "Numbers sheet count exceeds u32"))?;
+            for (z, identifier) in drawable_references.iter().copied().enumerate() {
+                let part = messages
+                    .archives
+                    .iter()
+                    .find(|entry| entry.archive.identifier == identifier)
+                    .map_or(sheet_part, |entry| entry.part.as_str());
+                let first_drawable = objects.len();
+                let result = numbers_canvas_drawable(
+                    &mut diagnostics,
+                    package,
+                    &messages,
+                    &native_archives,
+                    &data_files,
+                    identifier,
+                    unit_index,
+                    part,
+                    limits,
+                    &mut objects,
+                    i32::try_from(z).unwrap_or(i32::MAX).saturating_mul(100),
+                    &sheet_name,
+                    &mut embedded_fonts,
+                );
+                let omitted = match result {
+                    Ok(omitted) => omitted != 0,
+                    Err(error) if error.code == DiagnosticCode::FormatInvalid => {
+                        objects.truncate(first_drawable);
+                        diagnostics.push(
+                            Diagnostic::warning(
+                                DiagnosticCode::UnsupportedFeature,
+                                Phase::Parse,
+                                Fidelity::Omitted,
+                                format!(
+                                    "NUMBERS_DRAWABLE_OMITTED: {identifier}: {}",
+                                    error.message
+                                ),
+                            )
+                            .in_part(part),
+                        );
+                        false
+                    }
+                    Err(error) => return Err(error),
+                };
+                if omitted {
+                    diagnostics.push(
+                        Diagnostic::warning(
+                            DiagnosticCode::UnsupportedFeature,
+                            Phase::Render,
+                            Fidelity::Omitted,
+                            format!("NUMBERS_DRAWABLE_OMITTED: unsupported object {identifier}"),
+                        )
+                        .in_part(part),
+                    );
+                }
+            }
+            if objects.len() == first {
+                continue;
+            }
+            let (mut width, mut height) = (1.0_f32, 1.0_f32);
+            for object in &objects[first..] {
+                width = width.max(object.bounds.x + object.bounds.width);
+                height = height.max(object.bounds.y + object.bounds.height);
+            }
+            units.push(Unit {
+                kind: UnitKind::Sheet,
+                index: unit_index,
+                id: format!("numbers-sheet-{sheet_identifier}"),
+                name: sheet_name,
+                width,
+                height,
+                rows: 0,
+                columns: 0,
+                frozen_rows: 0,
+                frozen_columns: 0,
+                frozen_width: 0.0,
+                frozen_height: 0.0,
+                row_axis: crate::model::SheetAxis::default(),
+                column_axis: crate::model::SheetAxis::default(),
+                show_grid_lines: false,
+                tab_color: None,
+                sheet: None,
+                slide: None,
+            });
+            continue;
+        }
         for table_identifier in drawable_references.iter().copied() {
             let Some((table_part, table_info)) =
                 messages.message(table_identifier, NUMBERS_TABLE_INFO_TYPE)?
@@ -2551,10 +2673,158 @@ fn numbers_document(
         units,
         outline: Vec::new(),
         objects,
-        embedded_fonts: Vec::new(),
+        embedded_fonts,
         font_alternate_names: Vec::new(),
         diagnostics,
     })
+}
+
+// Numbers tables retain their model's row/column sizes and canvas origin.
+// Pages/Keynote tables instead fit those sizes to a fixed frame. Only the former
+// requires this adapter; ordinary TSD/TSWP/TSCH drawables share their emitters.
+#[allow(clippy::too_many_arguments)]
+fn numbers_canvas_drawable(
+    diagnostics: &mut Vec<Diagnostic>,
+    package: &Package<'_>,
+    messages: &NumbersMessageSpace,
+    archives: &[IwaArchive],
+    data_files: &[(u64, String)],
+    identifier: u64,
+    unit_index: u32,
+    part: &str,
+    limits: Limits,
+    objects: &mut Vec<Object>,
+    z: i32,
+    sheet_name: &str,
+    embedded_fonts: &mut Vec<EmbeddedFont>,
+) -> Result<usize, Diagnostic> {
+    let first_drawable = objects.len();
+    if let Some((table_part, table)) = messages.message(identifier, NUMBERS_TABLE_INFO_TYPE)? {
+        let geometry = pages_table_geometry(&table.payload, table_part)?;
+        if geometry.width <= 0.0 || geometry.height <= 0.0 {
+            return Err(iwa_error(
+                table_part,
+                "Numbers canvas table has no usable geometry",
+            ));
+        }
+        let Some(model_id) = numbers_references(&table.payload, 2, table_part)?
+            .first()
+            .copied()
+        else {
+            return Err(iwa_error(table_part, "Numbers table model is unavailable"));
+        };
+        let Some((model_part, model)) = messages.message(model_id, NUMBERS_TABLE_MODEL_TYPE)?
+        else {
+            return Err(iwa_error(table_part, "Numbers table model is unavailable"));
+        };
+        let mut title_height = 0.0;
+        if numbers_varint(&model.payload, 22, model_part)? == Some(1) {
+            let title = numbers_first_bytes(&model.payload, 8, model_part)?
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .unwrap_or("");
+            let style = numbers_references(&model.payload, 30, model_part)?
+                .first()
+                .copied()
+                .map(|id| keynote_text_style(archives, id, model_part))
+                .transpose()?
+                .unwrap_or_default();
+            // A zero name height requests automatic text height. Native
+            // TST captions reserve eight points above/below the font box.
+            title_height = numbers_fixed64(&model.payload, 33, model_part)?
+                .filter(|height| *height > 0.0)
+                .unwrap_or(style.font_size + 16.0);
+            let mut visual =
+                keynote_chart_label_visual(title.to_owned(), TextAlign::Center, &style);
+            if let Visual::TextLayout { layout, .. } = &mut visual {
+                layout.vertical_align = TextVerticalAlign::Center;
+            }
+            push_keynote_native_object(
+                objects,
+                limits,
+                identifier,
+                unit_index,
+                table_part,
+                "table-title",
+                ObjectKind::TextBox,
+                Rect {
+                    x: geometry.x,
+                    y: geometry.y,
+                    width: geometry.width,
+                    height: title_height,
+                },
+                z,
+                Some(title.to_owned()),
+                MappingQuality::Derived,
+                visual,
+            )?;
+            objects.last_mut().unwrap().stable_id.push_str(":title");
+            scale_iwork_point_objects(&mut objects[first_drawable..]);
+        }
+        let first_cell = objects.len();
+        let (table_unit, table_diagnostics) = numbers_table(
+            messages,
+            model,
+            model_part,
+            unit_index,
+            sheet_name.to_owned(),
+            limits,
+            archives,
+            objects,
+        )?;
+        diagnostics.extend(table_diagnostics);
+        let x = geometry.x * IWORK_POINT_TO_CSS_PIXEL;
+        let y = (geometry.y + title_height) * IWORK_POINT_TO_CSS_PIXEL;
+        for object in &mut objects[first_cell..] {
+            object.bounds.x += x;
+            object.bounds.y += y;
+            object.stable_id = format!("numbers:{unit_index}:{identifier}:{}", object.stable_id);
+        }
+        push_keynote_native_object(
+            objects,
+            limits,
+            identifier,
+            unit_index,
+            table_part,
+            "table",
+            ObjectKind::Table,
+            Rect {
+                x,
+                y,
+                width: table_unit.width,
+                height: table_unit.height,
+            },
+            z,
+            None,
+            MappingQuality::Exact,
+            Visual::None,
+        )?;
+        return Ok(0);
+    }
+    let omitted = keynote_native_drawable(
+        diagnostics,
+        package,
+        archives,
+        archives,
+        messages,
+        data_files,
+        identifier,
+        unit_index,
+        part,
+        limits,
+        objects,
+        &mut Vec::new(),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        z,
+        true,
+        embedded_fonts,
+        IWORK_POINT_TO_CSS_PIXEL,
+        None,
+    )?;
+    scale_iwork_point_objects(&mut objects[first_drawable..]);
+    Ok(omitted)
 }
 
 // Native cells, table borders, and chart parents/children share one ID space.
@@ -2590,13 +2860,19 @@ fn numbers_table(
         .map_err(|_| iwa_error(model_part, "Numbers row count is not addressable"))?;
     let column_count = usize::try_from(columns)
         .map_err(|_| iwa_error(model_part, "Numbers column count is not addressable"))?;
+    let default_row = numbers_fixed64(&model.payload, 16, model_part)?
+        .filter(|value| *value > 0.0)
+        .unwrap_or(15.0);
+    let default_column = numbers_fixed64(&model.payload, 17, model_part)?
+        .filter(|value| *value > 0.0)
+        .unwrap_or(72.0);
     let row_heights = iwork_table_header_sizes(messages, &row_references, row_count)?
         .into_iter()
-        .map(|size| size.unwrap_or(15.0) * IWORK_POINT_TO_CSS_PIXEL)
+        .map(|size| size.unwrap_or(default_row) * IWORK_POINT_TO_CSS_PIXEL)
         .collect::<Vec<_>>();
     let column_widths = iwork_table_header_sizes(messages, &column_references, column_count)?
         .into_iter()
-        .map(|size| size.unwrap_or(72.0) * IWORK_POINT_TO_CSS_PIXEL)
+        .map(|size| size.unwrap_or(default_column) * IWORK_POINT_TO_CSS_PIXEL)
         .collect::<Vec<_>>();
     let mut row_offsets = Vec::with_capacity(row_heights.len() + 1);
     row_offsets.push(0.0);
@@ -2623,6 +2899,28 @@ fn numbers_table(
         iwork_table_text_styles(messages, stylesheet_archives, model, model_part, limits)?;
     let borders = iwork_table_borders(messages, model, model_part, rows, columns, &mut diagnostics)
         .unwrap_or_default();
+    let header_rows = numbers_varint(&model.payload, 9, model_part)?.unwrap_or(0);
+    let header_columns = numbers_varint(&model.payload, 10, model_part)?.unwrap_or(0);
+    let footer_rows = numbers_varint(&model.payload, 11, model_part)?.unwrap_or(0);
+    let mut default_fills = Vec::new();
+    for field in 18..=21 {
+        let fill = numbers_references(&model.payload, field, model_part)?
+            .first()
+            .copied()
+            .map(|reference| {
+                keynote_table_cell_fill(
+                    stylesheet_archives,
+                    reference,
+                    model_part,
+                    width / IWORK_POINT_TO_CSS_PIXEL,
+                    height / IWORK_POINT_TO_CSS_PIXEL,
+                    &mut Vec::new(),
+                )
+            })
+            .transpose()?
+            .unwrap_or(Paint::None);
+        default_fills.push(fill);
+    }
     let occupied_cells = cells
         .iter()
         .filter(|cell| cell.text.as_deref().is_some_and(|text| !text.is_empty()))
@@ -2654,7 +2952,20 @@ fn numbers_table(
             .and_then(|index| table_cell_styles.get(index))
             .cloned()
             .unwrap_or_default();
-        let fill = table_cell_style.fill;
+        let fill = if table_cell_style.authored_fill {
+            table_cell_style.fill
+        } else {
+            let index = if u64::from(cell.row) < header_rows {
+                1
+            } else if u64::from(cell.column) < header_columns {
+                2
+            } else if u64::from(cell.row) >= u64::from(rows).saturating_sub(footer_rows) {
+                3
+            } else {
+                0
+            };
+            default_fills[index].clone()
+        };
         let mut visual = if let Some(text) = cell.text.as_ref() {
             let style = cell
                 .text_style_index
@@ -3705,6 +4016,28 @@ fn numbers_varint(bytes: &[u8], field: u64, part: &str) -> Result<Option<u64>, D
             let (value, _) = read_varint(&bytes[cursor..]).map_err(|message| {
                 iwa_error(part, format!("invalid Numbers protobuf varint: {message}"))
             })?;
+            return Ok(Some(value));
+        }
+        skip_protobuf_value(bytes, &mut cursor, key & 7, part)?;
+    }
+    Ok(None)
+}
+
+fn numbers_fixed64(bytes: &[u8], field: u64, part: &str) -> Result<Option<f32>, Diagnostic> {
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let (key, consumed) = read_varint(&bytes[cursor..]).map_err(|message| {
+            iwa_error(part, format!("invalid Numbers protobuf key: {message}"))
+        })?;
+        cursor += consumed;
+        if key >> 3 == field && key & 7 == 1 {
+            let value = numbers_le_f64(bytes, cursor, part)? as f32;
+            if !value.is_finite() {
+                return Err(iwa_error(
+                    part,
+                    "Numbers double exceeds the renderable range",
+                ));
+            }
             return Ok(Some(value));
         }
         skip_protobuf_value(bytes, &mut cursor, key & 7, part)?;
@@ -7042,6 +7375,7 @@ fn keynote_table_cell_style(
     if let Some(properties) = numbers_first_bytes(&style.payload, 11, part)? {
         if let Some(authored_fill) = numbers_first_bytes(properties, 1, part)? {
             result.fill = keynote_fill(authored_fill, part, width, height)?;
+            result.authored_fill = true;
         }
         if let Some(wrap) = numbers_varint(properties, 3, part)? {
             result.wrap = wrap != 0;
@@ -9936,7 +10270,7 @@ fn keynote_push_chart(
         + 5.0;
     // Cartesian TSCH drawable geometry is the plot frame; labels/title extend
     // outside it. Pie layout has a different frame contract and remains separate.
-    let bounds = if cartesian {
+    let bounds = if cartesian || chart.doughnut {
         Rect {
             x: authored.x - left,
             y: authored.y - top,
@@ -9972,7 +10306,7 @@ fn keynote_push_chart(
     let parent_stable_id = objects.last().map(|object| object.stable_id.clone());
     let padding_x = (bounds.width * 0.07).min(28.0);
     let padding_y = (bounds.height * 0.08).min(22.0);
-    let mut plot = if cartesian {
+    let mut plot = if cartesian || chart.doughnut {
         authored
     } else {
         Rect {
@@ -9983,8 +10317,16 @@ fn keynote_push_chart(
         }
     };
     let legend = chart.show_legend.then(|| {
+        if let Some(geometry) = chart.legend_geometry {
+            return Rect {
+                x: authored.x + authored.width / 2.0 + geometry.x,
+                y: authored.y + authored.height / 2.0 + geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+            };
+        }
         let width = (bounds.width * 0.28).clamp(70.0, 120.0);
-        if !cartesian {
+        if !cartesian && !chart.doughnut {
             plot.width = (plot.width - width - 12.0).max(1.0);
         }
         Rect {
@@ -10123,6 +10465,84 @@ fn keynote_push_chart_legend(
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
+    if chart.legend_geometry.is_some() {
+        let names = if chart.kind == KeynoteChartKind::Pie {
+            &chart.categories
+        } else {
+            &chart.series_names
+        };
+        let font_size = chart.legend_style.font_size;
+        let marker = font_size * 0.9;
+        // The authored frame fixes the row count; estimates only distribute
+        // columns inside it, rather than enlarging the legend over other objects.
+        let rows = ((bounds.height / (font_size * 1.2)).round() as usize)
+            .max(1)
+            .min(names.len().max(1));
+        let columns = names.len().div_ceil(rows).max(1);
+        let mut slots = vec![marker + 7.0; columns];
+        for (index, name) in names.iter().enumerate() {
+            let width =
+                keynote_text_natural_width(&[keynote_text_run(name.clone(), &chart.legend_style)])
+                    + marker
+                    + 7.0;
+            slots[index % columns] = slots[index % columns].max(width);
+        }
+        let total: f32 = slots.iter().sum();
+        let row_height = bounds.height / rows as f32;
+        let left = bounds.x + (bounds.width - total).max(0.0) / 2.0;
+        for (index, name) in names.iter().enumerate() {
+            let column = index % columns;
+            let slot = slots[column];
+            let x = left + slots[..column].iter().sum::<f32>();
+            let y = bounds.y + (index / columns) as f32 * row_height;
+            keynote_push_chart_child(
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                Rect {
+                    x,
+                    y: y + (row_height - marker) / 2.0,
+                    width: marker,
+                    height: marker,
+                },
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+                Visual::PaintedShape {
+                    geometry: if chart.kind == KeynoteChartKind::Pie {
+                        Geometry::Ellipse
+                    } else {
+                        Geometry::Rectangle
+                    },
+                    fill: Paint::Solid(keynote_chart_color(chart, index)),
+                    stroke: Paint::None,
+                    stroke_width: 0.0,
+                },
+            )?;
+            keynote_push_chart_child(
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                Rect {
+                    x: x + marker + 4.0,
+                    y,
+                    width: (slot - marker - 4.0).max(1.0),
+                    height: row_height,
+                },
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+                keynote_chart_label_visual(name.clone(), TextAlign::Start, &chart.legend_style),
+            )?;
+        }
+        return Ok(());
+    }
     keynote_push_chart_child(
         identifier,
         unit_index,
@@ -10283,7 +10703,17 @@ fn keynote_push_bar_chart(
         else {
             continue;
         };
-        let bounds = if horizontal {
+        let vertical = !horizontal && chart.category_axis.vertical_labels;
+        let bounds = if vertical {
+            let height = label.chars().count() as f32 * chart.category_axis.text.font_size * 0.56;
+            Rect {
+                x: plot.x + category_span * (category as f32 + 0.5)
+                    - chart.category_axis.text.font_size * 0.6,
+                y: plot.y + plot.height + 3.0,
+                width: chart.category_axis.text.font_size * 1.2,
+                height: height.max(1.0),
+            }
+        } else if horizontal {
             Rect {
                 x: plot.x - 100.0,
                 y: plot.y + category_span * (category as f32 + 0.5) - 6.0,
@@ -10298,6 +10728,18 @@ fn keynote_push_bar_chart(
                 height: chart.category_axis.text.font_size * 1.2 + 2.0,
             }
         };
+        let mut visual = keynote_chart_label_visual(
+            label.clone(),
+            if vertical || horizontal {
+                TextAlign::End
+            } else {
+                TextAlign::Center
+            },
+            &chart.category_axis.text,
+        );
+        if vertical && let Visual::TextLayout { layout, .. } = &mut visual {
+            layout.orientation = TextOrientation::Rotated270;
+        }
         keynote_push_chart_child(
             identifier,
             unit_index,
@@ -10309,15 +10751,7 @@ fn keynote_push_bar_chart(
             parent_numeric_id,
             parent_stable_id,
             serial,
-            keynote_chart_label_visual(
-                label.clone(),
-                if horizontal {
-                    TextAlign::End
-                } else {
-                    TextAlign::Center
-                },
-                &chart.category_axis.text,
-            ),
+            visual,
         )?;
     }
     let series_count = if chart.stacked {
@@ -10584,7 +11018,7 @@ fn keynote_push_pie_chart(
     if total <= f32::EPSILON {
         return Ok(());
     }
-    let size = plot.width.min(plot.height) * 0.58;
+    let size = plot.width.min(plot.height) * if chart.doughnut { 1.0 } else { 0.58 };
     let pie = Rect {
         x: plot.x + (plot.width - size) / 2.0,
         y: plot.y + (plot.height - size) / 2.0,
@@ -10593,7 +11027,7 @@ fn keynote_push_pie_chart(
     };
     let center = size / 2.0;
     let radius = center;
-    let mut start_angle = -std::f32::consts::FRAC_PI_2;
+    let mut start_angle = -std::f32::consts::FRAC_PI_2 - chart.start_rotation.to_radians();
     for (index, value) in values.into_iter().enumerate() {
         if value <= f32::EPSILON {
             continue;
@@ -10614,6 +11048,43 @@ fn keynote_push_pie_chart(
                 y: center + radius * angle.sin(),
             });
         }
+        if chart.hole_ratio > 0.0 {
+            // The shared ellipse primitive is also used by DrawingML charts;
+            // TSCH supplies the inner-radius ratio and start rotation directly.
+            let inner = radius * chart.hole_ratio;
+            commands = vec![PathCommand::MoveTo {
+                x: center + radius * start_angle.cos(),
+                y: center + radius * start_angle.sin(),
+            }];
+            let count = ((end_angle - start_angle).abs() / std::f32::consts::FRAC_PI_2)
+                .ceil()
+                .max(1.0) as usize;
+            for (r, from, to) in [
+                (radius, start_angle, end_angle),
+                (inner, end_angle, start_angle),
+            ] {
+                if r == inner {
+                    commands.push(PathCommand::LineTo {
+                        x: center + r * from.cos(),
+                        y: center + r * from.sin(),
+                    });
+                }
+                for segment in 0..count {
+                    let a = from + (to - from) * segment as f32 / count as f32;
+                    let b = from + (to - from) * (segment + 1) as f32 / count as f32;
+                    let [first, second, last] =
+                        super::ellipse_arc_bezier_points((center, center), (r, r), a, b);
+                    commands.push(PathCommand::BezierCurveTo {
+                        cp1x: first.0,
+                        cp1y: first.1,
+                        cp2x: second.0,
+                        cp2y: second.1,
+                        x: last.0,
+                        y: last.1,
+                    });
+                }
+            }
+        }
         commands.push(PathCommand::ClosePath);
         keynote_push_chart_child(
             identifier,
@@ -10632,8 +11103,12 @@ fn keynote_push_pie_chart(
                     commands,
                 },
                 fill: Paint::Solid(keynote_chart_color(chart, index)),
-                stroke: Paint::Solid(0xffff_ffff),
-                stroke_width: 1.0,
+                stroke: if chart.doughnut {
+                    Paint::None
+                } else {
+                    Paint::Solid(0xffff_ffff)
+                },
+                stroke_width: if chart.doughnut { 0.0 } else { 1.0 },
             },
         )?;
         if let Some(category) = chart
@@ -10641,17 +11116,79 @@ fn keynote_push_pie_chart(
             .get(index)
             .filter(|value| !value.is_empty())
         {
-            let label = format!("{category}\n{:.0}%", value / total * 100.0);
-            let style = KeynoteTextStyle {
-                font_family: "Helvetica".to_owned(),
-                font_size: 9.0,
-                align: TextAlign::Center,
-                ..KeynoteTextStyle::default()
+            let label = if chart.doughnut {
+                format!("{:.0}%", value / total * 100.0)
+            } else {
+                format!("{category}\n{:.0}%", value / total * 100.0)
             };
+            let style = &chart.pie_label_style;
             let midpoint = (start_angle + end_angle) / 2.0;
-            let label_width = plot.width * 0.38;
-            let label_height = 26.0;
-            let label_radius = size * 0.78;
+            let label_width = if chart.doughnut {
+                28.0
+            } else {
+                plot.width * 0.38
+            };
+            let label_height = if chart.doughnut {
+                style.font_size * 1.2
+            } else {
+                26.0
+            };
+            let label_radius = if chart.doughnut {
+                radius + 15.0
+            } else {
+                size * 0.78
+            };
+            let label_y = pie.y + center + label_radius * midpoint.sin() - label_height / 2.0;
+            let right = midpoint.cos() >= 0.0;
+            let label_x = if chart.doughnut {
+                if right {
+                    pie.x + size + 20.0
+                } else {
+                    pie.x - 48.0
+                }
+            } else {
+                pie.x + center + label_radius * midpoint.cos() - label_width / 2.0
+            };
+            if chart.doughnut {
+                keynote_push_chart_child(
+                    identifier,
+                    unit_index,
+                    part,
+                    limits,
+                    objects,
+                    pie,
+                    z,
+                    parent_numeric_id,
+                    parent_stable_id,
+                    serial,
+                    Visual::PaintedShape {
+                        geometry: Geometry::Path {
+                            fill_rule: FillRule::NonZero,
+                            commands: vec![
+                                PathCommand::MoveTo {
+                                    x: center + (radius + 2.0) * midpoint.cos(),
+                                    y: center + (radius + 2.0) * midpoint.sin(),
+                                },
+                                PathCommand::LineTo {
+                                    x: center + (radius + 10.0) * midpoint.cos(),
+                                    y: label_y + label_height / 2.0 - pie.y,
+                                },
+                                PathCommand::LineTo {
+                                    x: if right {
+                                        label_x - 4.0
+                                    } else {
+                                        label_x + label_width + 4.0
+                                    } - pie.x,
+                                    y: label_y + label_height / 2.0 - pie.y,
+                                },
+                            ],
+                        },
+                        fill: Paint::None,
+                        stroke: Paint::Solid(0x0000_00ff),
+                        stroke_width: 0.4,
+                    },
+                )?;
+            }
             keynote_push_chart_child(
                 identifier,
                 unit_index,
@@ -10659,8 +11196,8 @@ fn keynote_push_pie_chart(
                 limits,
                 objects,
                 Rect {
-                    x: pie.x + center + label_radius * midpoint.cos() - label_width / 2.0,
-                    y: pie.y + center + label_radius * midpoint.sin() - label_height / 2.0,
+                    x: label_x,
+                    y: label_y,
                     width: label_width,
                     height: label_height,
                 },
@@ -10668,14 +11205,26 @@ fn keynote_push_pie_chart(
                 parent_numeric_id,
                 parent_stable_id,
                 serial,
-                Visual::RichText {
-                    geometry: Geometry::Rectangle,
-                    fill: Paint::None,
-                    stroke: Paint::None,
-                    stroke_width: 0.0,
-                    align: TextAlign::Center,
-                    line_height: 10.8,
-                    runs: vec![keynote_text_run(label, &style)],
+                if chart.doughnut {
+                    keynote_chart_label_visual(
+                        label,
+                        if right {
+                            TextAlign::Start
+                        } else {
+                            TextAlign::End
+                        },
+                        style,
+                    )
+                } else {
+                    Visual::RichText {
+                        geometry: Geometry::Rectangle,
+                        fill: Paint::None,
+                        stroke: Paint::None,
+                        stroke_width: 0.0,
+                        align: TextAlign::Center,
+                        line_height: 10.8,
+                        runs: vec![keynote_text_run(label, style)],
+                    }
                 },
             )?;
         }
@@ -11124,19 +11673,25 @@ fn keynote_text_bounds(
     let (slide_width, slide_height) = slide_size;
     let anchor_x = offset_x + geometry.x;
     let anchor_y = offset_y + geometry.y;
-    let available_width = match align {
-        TextAlign::Center => 2.0 * anchor_x.min((slide_width - anchor_x).max(0.0)),
-        TextAlign::End => anchor_x,
-        TextAlign::Start
-        | TextAlign::Justify
-        | TextAlign::Distribute
-        | TextAlign::MediumKashida
-        | TextAlign::HighKashida
-        | TextAlign::LowKashida
-        | TextAlign::ThaiDistribute => slide_width - anchor_x,
+    let natural_width = keynote_text_natural_width(runs) * 1.03 + HORIZONTAL_INSETS;
+    // Zero page dimensions denote an unbounded Numbers canvas; fixed Pages
+    // and Keynote frames retain their existing clamping and auto-width rules.
+    let available_width = if slide_width <= 0.0 {
+        geometry.width.max(natural_width)
+    } else {
+        match align {
+            TextAlign::Center => 2.0 * anchor_x.min((slide_width - anchor_x).max(0.0)),
+            TextAlign::End => anchor_x,
+            TextAlign::Start
+            | TextAlign::Justify
+            | TextAlign::Distribute
+            | TextAlign::MediumKashida
+            | TextAlign::HighKashida
+            | TextAlign::LowKashida
+            | TextAlign::ThaiDistribute => slide_width - anchor_x,
+        }
     }
     .max(1.0);
-    let natural_width = keynote_text_natural_width(runs) * 1.03 + HORIZONTAL_INSETS;
     let width = if geometry.width > 0.0 && !auto_width {
         geometry.width
     } else if natural_width > available_width {
@@ -11171,10 +11726,26 @@ fn keynote_text_bounds(
         anchor_y - height / 2.0 + vertical_adjustment
     };
     Rect {
-        x: x.clamp(0.0, slide_width),
-        y: y.clamp(0.0, slide_height),
-        width: width.min(slide_width),
-        height: height.min(slide_height),
+        x: if slide_width > 0.0 {
+            x.clamp(0.0, slide_width)
+        } else {
+            x
+        },
+        y: if slide_height > 0.0 {
+            y.clamp(0.0, slide_height)
+        } else {
+            y
+        },
+        width: if slide_width > 0.0 {
+            width.min(slide_width)
+        } else {
+            width
+        },
+        height: if slide_height > 0.0 {
+            height.min(slide_height)
+        } else {
+            height
+        },
     }
 }
 
@@ -11741,7 +12312,7 @@ fn keynote_chart(
         2 => (KeynoteChartKind::Bar, false, false),
         3 => (KeynoteChartKind::Line, false, false),
         4 => (KeynoteChartKind::Area, false, false),
-        5 => (KeynoteChartKind::Pie, false, false),
+        5 | 25 => (KeynoteChartKind::Pie, false, false),
         6 => (KeynoteChartKind::Column, true, false),
         7 => (KeynoteChartKind::Bar, true, false),
         8 => (KeynoteChartKind::Area, true, false),
@@ -11844,6 +12415,10 @@ fn keynote_chart(
         };
         Ok(IworkChartAxis {
             text,
+            vertical_labels: !value
+                && keynote_fixed32_field(&style, 9, part)?
+                    .or(keynote_fixed32_field(&style, 10, part)?)
+                    .is_some_and(|angle| (angle.abs().rem_euclid(180.0) - 90.0).abs() < 0.01),
             grid,
             show_axis: numbers_varint(&style, if value { 25 } else { 24 }, part)?.unwrap_or(1) != 0,
             show_labels: numbers_varint(&nonstyle, if value { 11 } else { 9 }, part)?.unwrap_or(1)
@@ -11899,9 +12474,68 @@ fn keynote_chart(
         .transpose()?;
     let show_legend = numbers_varint(&chart_nonstyle, 20, part)?
         .map_or(series_names.len() > 1, |value| value != 0);
+    let legend_geometry = numbers_first_bytes(archive, 3, part)?
+        .map(|bytes| keynote_geometry(bytes, part))
+        .transpose()?
+        .filter(|geometry| geometry.width > 0.0 && geometry.height > 0.0);
     Ok(Some(KeynoteChart {
         geometry,
         kind,
+        doughnut: chart_type == 25,
+        hole_ratio: if chart_type == 25 {
+            keynote_fixed32_field(&chart_nonstyle, 27, part)?
+                .unwrap_or(0.5)
+                .clamp(0.0, 0.99)
+        } else {
+            0.0
+        },
+        start_rotation: keynote_fixed32_field(&chart_nonstyle, 19, part)?.unwrap_or(0.0),
+        legend_style: iwork_chart_text_style(
+            &iwork_chart_properties(
+                stylesheet_archives,
+                numbers_references(archive, 11, part)?
+                    .first()
+                    .copied()
+                    .unwrap_or(0),
+                IWORK_CHART_LEGEND_STYLE_TYPE,
+                part,
+            )?,
+            2,
+            &paragraph_styles,
+            stylesheet_archives,
+            part,
+            KeynoteTextStyle {
+                font_family: "Helvetica".to_owned(),
+                font_size: 8.0,
+                ..KeynoteTextStyle::default()
+            },
+        )?,
+        pie_label_style: if chart_type == 25 {
+            iwork_chart_text_style(
+                &iwork_chart_properties(
+                    stylesheet_archives,
+                    style_references.first().copied().unwrap_or(0),
+                    IWORK_CHART_SERIES_STYLE_TYPE,
+                    part,
+                )?,
+                29,
+                &paragraph_styles,
+                stylesheet_archives,
+                part,
+                KeynoteTextStyle {
+                    font_family: "Helvetica".to_owned(),
+                    font_size: 9.0,
+                    ..KeynoteTextStyle::default()
+                },
+            )?
+        } else {
+            KeynoteTextStyle {
+                font_family: "Helvetica".to_owned(),
+                font_size: 9.0,
+                ..KeynoteTextStyle::default()
+            }
+        },
+        legend_geometry,
         stacked,
         title,
         series_names,
@@ -16745,6 +17379,227 @@ mod tests {
     }
 
     #[test]
+    fn supplied_numbers_canvas_preserves_native_sheet_layout() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/numbers-multiple-sheets-charts.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let scale = super::IWORK_POINT_TO_CSS_PIXEL;
+        let budget = document
+            .objects
+            .iter()
+            .filter(|o| o.unit_index == 0)
+            .collect::<Vec<_>>();
+        assert!(
+            budget.iter().any(|o| o
+                .text
+                .as_deref()
+                .is_some_and(|t| t.contains("Monthly Budget"))),
+            "native sheet title missing"
+        );
+        assert!(
+            budget
+                .iter()
+                .any(|o| o.text.as_deref().is_some_and(|t| t.contains("HOW TO USE"))),
+            "native instructions missing"
+        );
+        let title = budget
+            .iter()
+            .find(|o| o.text.as_deref() == Some("Monthly Budget"))
+            .unwrap();
+        assert!(title.bounds.width > 670.0 && title.bounds.height > 50.0);
+        let instructions = budget
+            .iter()
+            .find(|o| {
+                o.text
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with("HOW TO USE"))
+            })
+            .unwrap();
+        assert!((instructions.bounds.y - 44.0 * scale).abs() < 1.0);
+        assert_eq!(
+            budget
+                .iter()
+                .filter(|o| matches!(o.source.locator, SourceLocator::Iwork { kind: "chart", .. }))
+                .count(),
+            2,
+            "both native charts must render"
+        );
+        let slices = budget.iter().filter(|object| {
+            matches!(&object.visual, Visual::PaintedShape { geometry: Geometry::Path { commands, .. }, .. }
+                if commands.iter().any(|command| matches!(command, PathCommand::BezierCurveTo { .. })))
+                && (object.bounds.width - 153.5 * scale).abs() < 0.1
+        }).collect::<Vec<_>>();
+        assert_eq!(
+            slices.len(),
+            9,
+            "all native doughnut slices must remain editable geometry"
+        );
+        assert!((slices[0].bounds.x - 48.0 * scale).abs() < 0.1);
+        assert!((slices[0].bounds.y - 134.0 * scale).abs() < 0.1);
+        for percentage in ["29%", "21%", "17%"] {
+            assert!(
+                budget.iter().any(|object| {
+                    matches!(&object.visual, Visual::TextLayout { layout, visual }
+                    if !layout.wrap && layout.inset_left == 0.0 && layout.inset_right == 0.0
+                    && matches!(visual.as_ref(), Visual::RichText { runs, .. }
+                        if runs.iter().any(|run| run.text == percentage)))
+                }),
+                "doughnut percentage must remain on one line: {percentage}"
+            );
+        }
+        let bars = budget
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.source.locator,
+                    SourceLocator::Iwork {
+                        kind: "chart-series",
+                        ..
+                    }
+                ) && matches!(
+                    object.visual,
+                    Visual::PaintedShape {
+                        geometry: Geometry::Rectangle,
+                        fill: Paint::Solid(_),
+                        ..
+                    }
+                ) && object.bounds.width < 15.0
+                    && object.bounds.height > 12.0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bars.len(), 18);
+        for bar in bars {
+            assert!(bar.bounds.x >= 323.8 * scale - 1.0);
+            assert!(bar.bounds.y >= 135.0 * scale - 1.0);
+            assert!(bar.bounds.x + bar.bounds.width <= 503.0 * scale + 1.0);
+            assert!(bar.bounds.y + bar.bounds.height <= 287.0 * scale + 1.0);
+        }
+        let legend = budget
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.source.locator,
+                    SourceLocator::Iwork {
+                        kind: "chart-series",
+                        ..
+                    }
+                )
+            })
+            .find_map(|object| {
+                if let Visual::TextLayout { visual, .. } = &object.visual
+                    && let Visual::RichText { runs, .. } = visual.as_ref()
+                    && runs.first().is_some_and(|run| run.text == "Budget")
+                {
+                    return runs.first();
+                }
+                None
+            })
+            .expect("native chart legend missing");
+        assert!(
+            (legend.font_size - 10.0 * scale).abs() < 0.01,
+            "legend must not use the dataset-name style: {}",
+            legend.font_size
+        );
+        let table = budget
+            .iter()
+            .find(|o| o.kind == ObjectKind::Table)
+            .expect("native table frame missing");
+        assert!((table.bounds.x - 0.0).abs() < 0.1);
+        assert!(
+            (table.bounds.y - 440.0 * scale).abs() < 1.0,
+            "table must remain below both charts: {:?}",
+            table.bounds
+        );
+        assert!(
+            document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == 1 && o.kind == ObjectKind::Cell)
+                .all(|o| o.bounds.y >= 106.0 * scale)
+        );
+    }
+
+    #[test]
+    fn supplied_numbers_canvas_isolates_a_corrupt_table() {
+        let limits = Limits::default();
+        let package = super::Package::open_iwork(
+            include_bytes!("../../tests/fixtures/numbers-multiple-sheets-charts.numbers"),
+            limits,
+        )
+        .unwrap();
+        let part = "Index/CalculationEngine.iwa";
+        let archives = super::parse_iwa_archives(
+            &package,
+            part,
+            &package.required_part(part).unwrap(),
+            limits,
+        )
+        .unwrap();
+        let records = archives
+            .iter()
+            .flat_map(|archive| {
+                archive.messages.iter().map(|message| {
+                    iwa_archive(
+                        archive.identifier,
+                        message.message_type,
+                        if archive.identifier == 904_744
+                            && message.message_type == super::NUMBERS_TABLE_INFO_TYPE
+                        {
+                            &[0x0f]
+                        } else {
+                            &message.payload
+                        },
+                        &message.data_references,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let replacement = iwa_stream(&records);
+        let parts = package
+            .entry_names()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    if name == part {
+                        replacement.clone()
+                    } else {
+                        package.required_part(name).unwrap().to_vec()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let bytes = stored_zip(
+            &parts
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+                .collect::<Vec<_>>(),
+        );
+        let document = detect_and_parse(&bytes, limits).unwrap().unwrap();
+        assert_eq!(document.units.len(), 2);
+        assert_eq!(
+            document
+                .objects
+                .iter()
+                .filter(|object| object.unit_index == 0
+                    && matches!(
+                        object.source.locator,
+                        SourceLocator::Iwork { kind: "chart", .. }
+                    ))
+                .count(),
+            2
+        );
+        assert!(document.objects.iter().any(|object| object.unit_index == 1 && object.text.as_deref() == Some("Groceries")));
+        assert!(document.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("NUMBERS_DRAWABLE_OMITTED: 904744")
+        }));
+    }
+
+    #[test]
     fn supplied_numbers_multiple_sheets_keep_unique_object_ids() {
         let bytes = include_bytes!("../../tests/fixtures/numbers-multiple-sheets-charts.numbers");
         let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
@@ -19047,6 +19902,25 @@ trailer << /Root 1 0 R >>
             .unwrap(),
             Paint::Solid(0xed7d_31ff)
         );
+
+        let mut no_fill = cell_style(1_994, Some(245), None);
+        no_fill.messages[0]
+            .payload
+            .extend_from_slice(&protobuf_message(11, &protobuf_message(1, &[])));
+        let mut explicit_archives = archives.to_vec();
+        explicit_archives.push(no_fill);
+        let explicit = super::keynote_table_cell_style(
+            &explicit_archives,
+            1_994,
+            "style",
+            100.0,
+            20.0,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(explicit.authored_fill);
+        assert_eq!(explicit.fill, Paint::None);
+        assert!(!super::IworkTableCellStyle::default().authored_fill);
 
         let banded_fill = protobuf_message(1, &keynote_color_message(0xedf0_ebff));
         let mut table_properties = protobuf_varint(1, 1);

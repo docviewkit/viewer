@@ -3114,7 +3114,8 @@ mod tests {
 #[cfg(any(
     feature = "native-formats",
     feature = "odf-formats",
-    feature = "legacy-office-formats"
+    feature = "legacy-office-formats",
+    feature = "iwork-formats"
 ))]
 fn ellipse_arc_bezier_points(
     center: (f32, f32),

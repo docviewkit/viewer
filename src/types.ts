@@ -177,6 +177,10 @@ export type UnitDescriptor =
       readonly height: number;
     };
 
+/** Native drawable source kinds shared by the iWork adapters. */
+export type IworkDrawableKind = "shape" | "image" | "media" | "text-box"
+  | "table" | "table-title" | "table-grid" | "table-cell" | "chart" | "chart-series";
+
 export type SourceRef =
   | {
       readonly format: "pptx";
@@ -308,22 +312,14 @@ export type SourceRef =
         | "preview"
         | "body"
         | "inline-image"
-        | "shape"
-        | "image"
-        | "media"
-        | "text-box"
-        | "table"
-        | "table-grid"
-        | "table-cell"
-        | "chart"
-        | "chart-series";
+        | IworkDrawableKind;
       readonly component: string;
       readonly mapping: MappingQuality;
     }
   | {
       readonly format: "numbers";
       readonly part: string;
-      readonly kind: "preview" | "cell" | "chart" | "chart-series";
+      readonly kind: "preview" | "cell" | IworkDrawableKind;
       readonly component: string;
       readonly mapping: MappingQuality;
     }
@@ -334,15 +330,7 @@ export type SourceRef =
         | "preview"
         | "slide-preview"
         | "slide-background"
-        | "shape"
-        | "image"
-        | "media"
-        | "text-box"
-        | "table"
-        | "table-grid"
-        | "table-cell"
-        | "chart"
-        | "chart-series";
+        | IworkDrawableKind;
       readonly component: string;
       readonly mapping: MappingQuality;
     }

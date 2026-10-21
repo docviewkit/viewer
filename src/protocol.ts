@@ -12,6 +12,7 @@ import type {
   DocumentOutlineItem,
   DocumentObjectType,
   MappingQuality,
+  IworkDrawableKind,
   SheetAxis,
   SheetPrintSettings,
   SpeakerNoteParagraph,
@@ -463,6 +464,12 @@ function readAction(
   };
 }
 
+function isIworkDrawableKind(kind: string): kind is IworkDrawableKind {
+  return kind === "shape" || kind === "image" || kind === "media" || kind === "text-box"
+    || kind === "table" || kind === "table-title" || kind === "table-grid" || kind === "table-cell"
+    || kind === "chart" || kind === "chart-series";
+}
+
 function readSource(
   reader: Reader,
   format: DocumentFormat,
@@ -687,9 +694,7 @@ function readSource(
     }
     case "pages": {
       if (kind !== "preview" && kind !== "body" && kind !== "inline-image"
-        && kind !== "shape" && kind !== "image" && kind !== "media" && kind !== "text-box"
-        && kind !== "table" && kind !== "table-grid" && kind !== "table-cell"
-        && kind !== "chart" && kind !== "chart-series") break;
+        && !isIworkDrawableKind(kind)) break;
       return {
         format,
         part,
@@ -699,7 +704,7 @@ function readSource(
       };
     }
     case "numbers": {
-      if (kind !== "preview" && kind !== "cell" && kind !== "chart" && kind !== "chart-series") break;
+      if (kind !== "preview" && kind !== "cell" && !isIworkDrawableKind(kind)) break;
       return {
         format,
         part,
@@ -710,9 +715,7 @@ function readSource(
     }
     case "keynote": {
       if (kind !== "preview" && kind !== "slide-preview" && kind !== "slide-background"
-        && kind !== "shape" && kind !== "image" && kind !== "media" && kind !== "text-box"
-        && kind !== "table" && kind !== "table-grid" && kind !== "table-cell"
-        && kind !== "chart" && kind !== "chart-series") break;
+        && !isIworkDrawableKind(kind)) break;
       return {
         format,
         part,
