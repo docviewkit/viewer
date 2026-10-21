@@ -1,6 +1,6 @@
 import { DEFAULT_LIMITS } from "./core.js";
 import { createOfficeEngine } from "./engine.js";
-import { sheetAutoFitColumnWidth, sheetAutoFitRowHeight, sheetPrintPages } from "./render.js";
+import { sheetAutoFitColumnWidth, sheetAutoFitRowHeight, sheetContentExtent, sheetPrintPages } from "./render.js";
 import { OPEN_SOURCE_LICENSE, type LicenseOptions, type LicenseState } from "./license.js";
 import { OfficeEngineError, supportsReadingColors } from "./types.js";
 import type {
@@ -2610,12 +2610,13 @@ export class DocViewKitViewerElement extends HTMLElement {
   #sheetLayout(unit: Extract<UnitDescriptor, { type: "sheet" }>): {
     readonly rows: SheetAxisLayout;
     readonly columns: SheetAxisLayout;
+    readonly width: number;
+    readonly height: number;
   } {
     const overrides = this.#sheetOverrides(unit.index);
-    return {
-      rows: new SheetAxisLayout(unit.rowAxis, unit.rows, overrides.rows),
-      columns: new SheetAxisLayout(unit.columnAxis, unit.columns, overrides.columns),
-    };
+    const rows = new SheetAxisLayout(unit.rowAxis, unit.rows, overrides.rows);
+    const columns = new SheetAxisLayout(unit.columnAxis, unit.columns, overrides.columns);
+    return { rows, columns, ...sheetContentExtent(unit, { rows, columns }) };
   }
 
   #sheetSizeRequest(unit: Extract<UnitDescriptor, { type: "sheet" }>): {
@@ -2632,17 +2633,17 @@ export class DocViewKitViewerElement extends HTMLElement {
   #sheetVisibleViewport(unit: Extract<UnitDescriptor, { type: "sheet" }>, scale: number): Rect {
     const workspace = this.#workspace();
     const layout = this.#sheetLayout(unit);
-    const x = Math.min(layout.columns.total, Math.max(0, workspace.scrollLeft / scale));
-    const y = Math.min(layout.rows.total, Math.max(0, workspace.scrollTop / scale));
+    const x = Math.min(layout.width, Math.max(0, workspace.scrollLeft / scale));
+    const y = Math.min(layout.height, Math.max(0, workspace.scrollTop / scale));
     return {
       x,
       y,
       width: Math.min(
-        Math.max(1, layout.columns.total - x),
+        Math.max(1, layout.width - x),
         Math.max(1, (workspace.clientWidth - SHEET_ROW_HEADER_WIDTH) / scale),
       ),
       height: Math.min(
-        Math.max(1, layout.rows.total - y),
+        Math.max(1, layout.height - y),
         Math.max(1, (workspace.clientHeight - SHEET_COLUMN_HEADER_HEIGHT) / scale),
       ),
     };
@@ -2651,12 +2652,12 @@ export class DocViewKitViewerElement extends HTMLElement {
   #sheetRenderViewport(unit: Extract<UnitDescriptor, { type: "sheet" }>, scale: number): Rect {
     const visible = this.#sheetVisibleViewport(unit, scale);
     const layout = this.#sheetLayout(unit);
-    const width = Math.min(layout.columns.total, visible.width * (1 + SHEET_VIEWPORT_OVERSCAN_RATIO));
-    const height = Math.min(layout.rows.total, visible.height * (1 + SHEET_VIEWPORT_OVERSCAN_RATIO));
+    const width = Math.min(layout.width, visible.width * (1 + SHEET_VIEWPORT_OVERSCAN_RATIO));
+    const height = Math.min(layout.height, visible.height * (1 + SHEET_VIEWPORT_OVERSCAN_RATIO));
     const pixels = scale * Math.min(2, Math.max(1, devicePixelRatio || 1));
     const snap = (value: number): number => Math.floor(value * pixels) / pixels;
-    const left = Math.max(0, Math.min(layout.columns.total - width, visible.x - (width - visible.width) / 2));
-    const top = Math.max(0, Math.min(layout.rows.total - height, visible.y - (height - visible.height) / 2));
+    const left = Math.max(0, Math.min(layout.width - width, visible.x - (width - visible.width) / 2));
+    const top = Math.max(0, Math.min(layout.height - height, visible.y - (height - visible.height) / 2));
     const x = snap(left), y = snap(top);
     return {
       x, y,
@@ -2669,8 +2670,8 @@ export class DocViewKitViewerElement extends HTMLElement {
     const layout = this.#sheetLayout(unit);
     const wrap = this.#element<HTMLElement>(".stage-wrap");
     const stage = this.#element<HTMLElement>(".stage");
-    wrap.style.width = `${Math.max(this.#workspace().clientWidth, layout.columns.total * scale + SHEET_ROW_HEADER_WIDTH)}px`;
-    wrap.style.height = `${Math.max(this.#workspace().clientHeight, layout.rows.total * scale + SHEET_COLUMN_HEADER_HEIGHT)}px`;
+    wrap.style.width = `${Math.max(this.#workspace().clientWidth, layout.width * scale + SHEET_ROW_HEADER_WIDTH)}px`;
+    wrap.style.height = `${Math.max(this.#workspace().clientHeight, layout.height * scale + SHEET_COLUMN_HEADER_HEIGHT)}px`;
     stage.style.left = `${SHEET_ROW_HEADER_WIDTH + viewport.x * scale}px`;
     stage.style.top = `${SHEET_COLUMN_HEADER_HEIGHT + viewport.y * scale}px`;
     this.#renderSheetHeaders(unit, viewport, scale);
@@ -2782,9 +2783,9 @@ export class DocViewKitViewerElement extends HTMLElement {
     return visible.x >= frame.x + (frame.x <= 0 ? 0 : marginX)
       && visible.y >= frame.y + (frame.y <= 0 ? 0 : marginY)
       && visible.x + visible.width <= frame.x + frame.width
-        - (frame.x + frame.width >= layout.columns.total ? 0 : marginX)
+        - (frame.x + frame.width >= layout.width ? 0 : marginX)
       && visible.y + visible.height <= frame.y + frame.height
-        - (frame.y + frame.height >= layout.rows.total ? 0 : marginY);
+        - (frame.y + frame.height >= layout.height ? 0 : marginY);
   }
 
   #queueSheetScroll(): void {
@@ -2846,8 +2847,8 @@ export class DocViewKitViewerElement extends HTMLElement {
     const lastX = Math.ceil((visible.x + visible.width) / step) - 1;
     const lastY = Math.ceil((visible.y + visible.height) / step) - 1;
     const candidates = [];
-    for (let y = Math.max(0, firstY - 2); y <= Math.min(lastY + 2, Math.ceil(layout.rows.total / step) - 1); y++) {
-      for (let x = Math.max(0, firstX - 2); x <= Math.min(lastX + 2, Math.ceil(layout.columns.total / step) - 1); x++) {
+    for (let y = Math.max(0, firstY - 2); y <= Math.min(lastY + 2, Math.ceil(layout.height / step) - 1); y++) {
+      for (let x = Math.max(0, firstX - 2); x <= Math.min(lastX + 2, Math.ceil(layout.width / step) - 1); x++) {
         candidates.push({ key: `${x}:${y}`, x, y,
           required: x >= firstX && x <= lastX && y >= firstY && y <= lastY,
           distance: Math.abs(x - (firstX + lastX) / 2) + Math.abs(y - (firstY + lastY) / 2)
@@ -2885,14 +2886,14 @@ export class DocViewKitViewerElement extends HTMLElement {
         continue;
       }
       const viewport = { x: x * step, y: y * step,
-        width: Math.min(step, layout.columns.total - x * step),
-        height: Math.min(step, layout.rows.total - y * step) };
+        width: Math.min(step, layout.width - x * step),
+        height: Math.min(step, layout.height - y * step) };
       // Paint past tile edges before cropping, so glyphs, borders and effects crossing a seam survive.
       const gutter = Math.ceil(16 * ratio) / (scale * ratio);
       const left = Math.max(0, viewport.x - gutter), top = Math.max(0, viewport.y - gutter);
       const padded = { x: left, y: top,
-        width: Math.min(layout.columns.total, viewport.x + viewport.width + gutter) - left,
-        height: Math.min(layout.rows.total, viewport.y + viewport.height + gutter) - top };
+        width: Math.min(layout.width, viewport.x + viewport.width + gutter) - left,
+        height: Math.min(layout.height, viewport.y + viewport.height + gutter) - top };
       const controller = new AbortController();
       const promise = document.render({ ...request, viewport: padded }, {
         priority: required ? "interactive" : "prefetch", signal: controller.signal,
@@ -2951,11 +2952,11 @@ export class DocViewKitViewerElement extends HTMLElement {
     const step = Math.ceil(512 * ratio) / pixels;
     const layout = this.#sheetLayout(unit);
     const x1 = Math.max(0, Math.floor(viewport.x / step) - 1), y1 = Math.max(0, Math.floor(viewport.y / step) - 1);
-    const x2 = Math.min(Math.ceil(layout.columns.total / step), Math.ceil((viewport.x + viewport.width) / step) + 1);
-    const y2 = Math.min(Math.ceil(layout.rows.total / step), Math.ceil((viewport.y + viewport.height) / step) + 1);
+    const x2 = Math.min(Math.ceil(layout.width / step), Math.ceil((viewport.x + viewport.width) / step) + 1);
+    const y2 = Math.min(Math.ceil(layout.height / step), Math.ceil((viewport.y + viewport.height) / step) + 1);
     const aligned = { x: x1 * step, y: y1 * step,
-      width: Math.min(layout.columns.total, x2 * step) - x1 * step,
-      height: Math.min(layout.rows.total, y2 * step) - y1 * step };
+      width: Math.min(layout.width, x2 * step) - x1 * step,
+      height: Math.min(layout.height, y2 * step) - y1 * step };
     if (signature !== this.#sheetTileKey && request.watermark === undefined
       && Math.ceil(aligned.width * pixels) * Math.ceil(aligned.height * pixels) <= Math.min(this.#renderPixelLimit, 16 * 1024 * 1024)) {
       this.#clearSheetTiles();
@@ -2967,7 +2968,7 @@ export class DocViewKitViewerElement extends HTMLElement {
         }
         for (let y = y1; y < y2; y++) for (let x = x1; x < x2; x++) {
           const tile = { viewport: { x: x * step, y: y * step,
-            width: Math.min(step, layout.columns.total - x * step), height: Math.min(step, layout.rows.total - y * step) },
+            width: Math.min(step, layout.width - x * step), height: Math.min(step, layout.height - y * step) },
             used: x * step < viewport.x + viewport.width && (x + 1) * step > viewport.x
               && y * step < viewport.y + viewport.height && (y + 1) * step > viewport.y, controller: new AbortController(), promise: Promise.resolve() };
           this.#paintSheetTile(tile, first, scale, ratio);
@@ -3722,8 +3723,8 @@ export class DocViewKitViewerElement extends HTMLElement {
     const horizontalPadding = workspace.clientWidth <= 720 ? 24 : 64;
     const verticalPadding = workspace.clientWidth <= 720 ? 36 : 64;
     const sheetLayout = unit.type === "sheet" ? this.#sheetLayout(unit) : undefined;
-    const width = sheetLayout?.columns.total ?? unit.width;
-    const height = sheetLayout?.rows.total ?? unit.height;
+    const width = sheetLayout?.width ?? unit.width;
+    const height = sheetLayout?.height ?? unit.height;
     const widthScale = Math.max(.1, (workspace.clientWidth - horizontalPadding) / width);
     const heightScale = Math.max(.1, (workspace.clientHeight - verticalPadding) / height);
     const scale = unit.type === "sheet" ? widthScale : Math.min(widthScale, heightScale, 1.5);
@@ -4107,9 +4108,9 @@ export class DocViewKitViewerElement extends HTMLElement {
       if (unit.type === "sheet") {
         const workspace = this.#workspace();
         const layout = this.#sheetLayout(unit);
-        width = Math.min(layout.columns.total,
+        width = Math.min(layout.width,
           Math.max(1, (workspace.clientWidth - SHEET_ROW_HEADER_WIDTH) / scale));
-        height = Math.min(layout.rows.total,
+        height = Math.min(layout.height,
           Math.max(1, (workspace.clientHeight - SHEET_COLUMN_HEADER_HEIGHT) / scale));
       }
       const pixels = Math.ceil(width * scale * pixelRatio) * Math.ceil(height * scale * pixelRatio);
