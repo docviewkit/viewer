@@ -7,8 +7,11 @@ import { validateBundledFonts } from "./prepare-release.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const packageSizeBudget = Object.freeze({
-  // Linux release output is slightly larger than the macOS build.
-  packed: 8_200_000,
+  // v0.2.81 Linux: 8,241,549 packed / 22,077,903 unpacked; macOS:
+  // 8,182,807 / 22,078,329. Native Numbers/Pages fidelity and DOCX relayout
+  // keep the unpacked and per-Wasm budgets; allow the reviewed ~98 KB
+  // compressed growth from the v0.2.80 SDK (8,143,503 bytes).
+  packed: 8_300_000,
   // Shared XLS chart rendering and XPS compatibility add about 370 KiB of Wasm.
   unpacked: 22_300_000,
 });
