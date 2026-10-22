@@ -132,7 +132,9 @@ const scenes = {
     "ppt-render-values.ppt": "6b7bd9683536ecf3a74fb92b6268fb49194656a3ff7a8bbc1d21eebe6811eb54"
   },
   "pdf": {
-    "word-original.pages": "9ec57779010c6bd3ee7f85f83c5594bacc8464ef281f333dde67e8013219d677",
+    // Removes U+0004 terminators from two stories and one now-empty run.
+    // All other scene fields, including every bound and remaining style, are identical.
+    "word-original.pages": "27ddb4643fb446018a78278dcfd939c5b4c26e59f1f968d85c90eab948681e50",
     "keynote-first-line-indent.key": "d1b2ba39ae4a0356b99a0e043da10e03310aff094cf1ac8d2bf169b0dccf576e",
     // Restores 34 authored default grid strokes and natural numeric right alignment.
     // The added strokes shift numeric IDs; chart geometry, visuals and text are unchanged.

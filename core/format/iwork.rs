@@ -15828,7 +15828,16 @@ fn keynote_utf16_byte_offset(text: &str, target: usize) -> Option<usize> {
 }
 
 fn normalize_keynote_text(text: &str) -> String {
-    text.replace('\u{2028}', "\n").replace('\u{fffc}', "")
+    // TSWP's story terminator is structural, including the otherwise empty
+    // document body retained by Pages page-layout templates. Normalize after
+    // resolving saved UTF-16 ranges so style and attachment offsets stay valid.
+    text.chars()
+        .filter_map(|character| match character {
+            '\u{4}' | '\u{fffc}' => None,
+            '\u{2028}' => Some('\n'),
+            _ => Some(character),
+        })
+        .collect()
 }
 
 fn iwork_visible_table_text(text: &str) -> String {
@@ -18637,6 +18646,123 @@ mod tests {
                 .all(|diagnostic| !diagnostic.message.contains("PREVIEW_ONLY"))
         );
         crate::protocol::encode(&document).expect("native Numbers document should encode");
+    }
+
+    #[test]
+    fn shared_iwork_story_marker_keeps_utf16_style_boundaries() {
+        let storage = super::KeynoteTextStorage {
+            text: "\u{4}😀\u{4}AB".to_owned(),
+            character_styles: vec![
+                super::KeynoteStyleChange {
+                    character_index: 4,
+                    identifier: Some(42),
+                },
+                super::KeynoteStyleChange {
+                    character_index: 5,
+                    identifier: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let archives = vec![super::IwaArchive {
+            identifier: 42,
+            messages: vec![super::IwaMessage {
+                message_type: super::IWORK_CHARACTER_STYLE_TYPE,
+                payload: protobuf_message(11, &protobuf_varint(1, 1)),
+                data_references: Vec::new(),
+            }],
+        }];
+        let pages = super::pages_text_runs_for_range(
+            &storage,
+            &archives,
+            DOCUMENT_COMPONENT,
+            0,
+            6,
+            Limits::default(),
+        )
+        .unwrap();
+        let keynote = super::keynote_text_runs(
+            &storage,
+            &archives,
+            DOCUMENT_COMPONENT,
+            &super::KeynoteTextStyle::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        for runs in [&pages, &keynote] {
+            assert_eq!(
+                runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+                "😀AB"
+            );
+            assert!(runs.iter().any(|r| r.text == "A" && r.bold));
+            assert!(runs.iter().any(|r| r.text == "B" && !r.bold));
+        }
+        assert_eq!(
+            super::normalize_keynote_text("\tA\r\nB\u{2028}\u{4}\u{fffc}"),
+            "\tA\r\nB\n"
+        );
+    }
+
+    #[test]
+    fn supplied_pages_brochure_omits_story_end_marker() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/pages-brochure.pages"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 2);
+        assert!(
+            !document
+                .objects
+                .iter()
+                .any(|o| o.text.as_ref().is_some_and(|text| text.contains('\u{4}'))),
+            "the layout story terminator must not become a visible text object"
+        );
+        assert!(document.objects.iter().any(|o| {
+            o.text
+                .as_ref()
+                .is_some_and(|text| text.starts_with("Subtitle\nTo get started"))
+        }));
+    }
+
+    #[test]
+    fn supplied_pages_brochure_keeps_emphasis_runs() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/pages-brochure.pages"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let object = document
+            .objects
+            .iter()
+            .find(|o| {
+                o.text
+                    .as_ref()
+                    .is_some_and(|text| text.starts_with("Subtitle\nSubheading"))
+            })
+            .unwrap();
+        let Visual::TextLayout { visual, .. } = &object.visual else {
+            panic!("brochure text layout missing")
+        };
+        let Visual::RichText { runs, .. } = visual.as_ref() else {
+            panic!("brochure rich text missing")
+        };
+        let headings = runs
+            .iter()
+            .filter(|run| run.text.contains("Subheading"))
+            .collect::<Vec<_>>();
+        assert_eq!(headings.len(), 2);
+        assert!(headings.iter().all(|run| run.bold));
+        let body = runs
+            .iter()
+            .filter(|run| {
+                run.text.starts_with("To add photos") || run.text.starts_with("You can layer")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(body.len(), 2);
+        assert!(body.iter().all(|run| !run.bold));
     }
 
     #[test]
