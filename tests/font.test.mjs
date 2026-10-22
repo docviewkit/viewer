@@ -1236,6 +1236,48 @@ test("supplied Pages CSS family survives local() requiring a PostScript face nam
   }
 });
 
+test("supplied biology title keeps a loaded PostScript substitute when CSS cannot select its source name", async () => {
+  const core = await Core.create(await readFile(new URL("../dist/office-viewer-pdf.wasm", import.meta.url)), DEFAULT_LIMITS);
+  const document = core.open(await readFile(new URL("./fixtures/pages-biology.pages", import.meta.url)));
+  document.loadAll();
+  const title = document.scene.objects.find(object => object.text === "THE STUDY OF CELL BIOLOGY");
+  const requestedFaces = collectFontRequests([title]);
+  assert.equal(requestedFaces[0].family, "BebasNeue");
+  document.close(); core.close();
+  class PostScriptFace extends LoadedFontFace {
+    async load() {
+      if (this.source !== 'local("DINCondensed-Bold")') throw new Error("font missing");
+      return this;
+    }
+  }
+  class ProbeCanvas {
+    getContext() {
+      return { font: "", measureText(text) {
+        // Firefox loads this face by its PostScript name, but only the loaded
+        // alias (or the separate CSS family DIN Condensed) selects its glyphs.
+        return { width: text.length * (this.font.includes('"OfficeViewer ') ? 6 : 10) };
+      } };
+    }
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "OffscreenCanvas");
+  Object.defineProperty(globalThis, "OffscreenCanvas", { configurable: true, value: ProbeCanvas });
+  const fontSet = new FakeFontSet();
+  try {
+    const registration = await registerFonts([], 50, { FontFace: PostScriptFace, fontSet },
+      undefined, [], [], { policy: "local-first", requestedFaces });
+    assert.equal(registration.resolve("BebasNeue").source, "browser");
+    assert.match(registration.resolve("BebasNeue").family, /^OfficeViewer /);
+    assert.equal(fontSet.faces.size, 1);
+    assert.equal([...fontSet.faces][0].descriptors.weight, "700",
+      "the already-bold local face must not be registered as regular and synthesized bold again");
+    registration.close();
+    assert.equal(fontSet.faces.size, 0);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "OffscreenCanvas", descriptor);
+    else delete globalThis.OffscreenCanvas;
+  }
+});
+
 test("local-first probing rejects a compatible local alias with different glyph metrics", async () => {
   class CompatibleAliasFace extends LoadedFontFace {
     async load() {

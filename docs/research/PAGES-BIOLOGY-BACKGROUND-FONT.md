@@ -46,3 +46,59 @@ Validation:
   Keynote indent and Numbers scene hashes remain unchanged.
 - The optimized PDF/iWork pack is 3,220,624 bytes (+660 from 3,219,964), within the
   existing 3,223,000-byte budget.
+
+## Firefox follow-up: face names, family names and synthetic weight
+
+The same fixture still failed in the user's installed Firefox 158 on macOS after
+`d7936af`. This was reproduced in that browser with the unchanged fixture (the
+Downloads file and fixture hashes match). A local harness used the actual worker
+engine and then opened the same bytes in the real Viewer.
+
+Two shared font-resolution defects were confirmed:
+
+1. `local("DINCondensed-Bold")` loads successfully. A registered alias measures
+   the title probe at 634.33 px (72 px font, weight 400), but CSS selection by the
+   PostScript name `DINCondensed-Bold` measures 1072.20 px in the worker, the
+   missing-name fallback. CSS family `DIN Condensed` measures 634.33 px. The old
+   compatibility check required the face name to also be a measurable CSS family,
+   so it removed the loaded usable alias and selected Calibri. Loaded aliases
+   now survive when the source name is not CSS-selectable. An alias must still
+   pass the existing non-fallback measurement probe; when the source CSS name
+   is measurable, different alias/source metrics are still rejected.
+2. Compatible local faces were registered with weight 400 unconditionally.
+   The named `-Bold` face already has bold outlines. Firefox synthesizes bold
+   again when requesting weight 700 from that registration, changing the probe
+   width from 634.33 to 671.83 px. Fixing only the first defect leaves BIOLOGY
+   split into BIOLOG / Y. Named bold compatibility faces are now registered as
+   weight 700, and validation uses those same descriptors. Other compatibility
+   faces retain weight 400. Exact and document-declared faces retain their
+   authored descriptors. No font assets or browser settings were changed.
+
+Before: THE / STUD / Y OF / CELL / BIOL / OGY; font source=fallback, family=Calibri.
+After: THE / STUDY / OF CELL / BIOLOGY; source=browser, using the loaded DIN alias.
+The title remains a DIN Condensed substitute for the unavailable Bebas Neue.
+
+Evidence is under `output/playwright/pages-biology/firefox-native/`: before/after
+JSON, native rendered page PNGs, `after-viewer.png`, the intermediate one-defect
+result, and before/intermediate/after unit logs. After checks cover the four
+complete lines, three page background colors, Viewer ready state, and no captured
+runtime errors. The regression extracted from the real file fails on the old
+resolver, also fails on the intermediate synthetic-weight defect, and passes on
+the completed fix. Existing loaded-fallback rejection, measured alias/source
+mismatch rejection, exact-font priority, deterministic-policy and teardown tests
+remain passing (94 font/protocol tests total). Biology and brochure scripts pass
+in Chromium and WebKit. This JS-only change does not alter Core scenes or Wasm.
+
+The focused browser script retains Chromium/WebKit as its default. Firefox is
+explicitly opt-in for this user-requested investigation:
+
+```sh
+PAGES_BIOLOGY_FIREFOX=1 node scripts/test-pages-biology.mjs
+```
+
+The cached Playwright Firefox builds could not launch in this desktop execution
+environment (macOS process/sandbox launch errors, before any document test).
+Consequently the successful Firefox proof above comes from the user's running
+Firefox 158, driven through the native UI and the local harness, not a claimed
+successful Playwright Firefox run. It used the same application assets and
+worker engine. The opt-in script is available for hosts where Firefox launches.
