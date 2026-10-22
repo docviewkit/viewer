@@ -563,6 +563,7 @@ test("optional native packs preserve legacy Office and iWork source locators", (
   for (const kind of [
     "body",
     "inline-image",
+    "page-background",
     "table",
     "table-grid",
     "table-cell",

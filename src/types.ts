@@ -312,6 +312,7 @@ export type SourceRef =
         | "preview"
         | "body"
         | "inline-image"
+        | "page-background"
         | IworkDrawableKind;
       readonly component: string;
       readonly mapping: MappingQuality;

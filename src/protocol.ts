@@ -693,7 +693,7 @@ function readSource(
       };
     }
     case "pages": {
-      if (kind !== "preview" && kind !== "body" && kind !== "inline-image"
+      if (kind !== "preview" && kind !== "body" && kind !== "inline-image" && kind !== "page-background"
         && !isIworkDrawableKind(kind)) break;
       return {
         format,

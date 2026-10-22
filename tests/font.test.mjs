@@ -411,6 +411,34 @@ class LoadedFontFace {
   }
 }
 
+test("Bebas Neue keeps a narrow local face, exact faces win and deterministic skips probing", async () => {
+  for (const family of ["BebasNeue", "Bebas Neue"]) {
+    for (const exact of [false, true]) {
+      const fontSet = new FakeFontSet();
+      class NarrowFace extends LoadedFontFace {
+        async load() {
+          if (this.source === 'local("DINCondensed-Bold")'
+            || (exact && this.source === `local(${JSON.stringify(family)})`)) return this;
+          throw new Error("local font unavailable");
+        }
+      }
+      const options = { requestedFaces: [{ family, weight: 700, style: "normal", stretch: "normal", codePoints: [0x41] }] };
+      const fonts = await registerFonts([], 50, { FontFace: NarrowFace, fontSet }, undefined, [], [],
+        { ...options, policy: "local-first" });
+      assert.equal(fonts.resolve(family).source, "browser");
+      const rendered = [...fontSet.faces].find(face => face.family === fonts.resolve(family).family);
+      if (!exact) assert.equal(rendered.source, 'local("DINCondensed-Bold")');
+      else assert.equal(fonts.resolve(family).family, family);
+      fonts.close();
+      const deterministic = await registerFonts([], 50, { FontFace: NarrowFace, fontSet }, undefined, [], [],
+        { ...options, policy: "deterministic" });
+      assert.equal(deterministic.resolve(family).source, "fallback");
+      assert.equal(fontSet.faces.size, 0);
+      deterministic.close();
+    }
+  }
+});
+
 test("local CJK compatibility faces do not capture mixed Yu Gothic UI Latin runs", async () => {
   class CjkOnly extends LoadedFontFace {
     async load() {
