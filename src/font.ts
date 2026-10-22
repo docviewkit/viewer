@@ -2179,6 +2179,8 @@ const LOCAL_FONT_COMPATIBILITY_CANDIDATES: ReadonlyMap<string, readonly string[]
   ["aptos", ["Calibri", "Carlito"]],
   ["arial", ["Helvetica", "Liberation Sans"]],
   ["roboto condensed", ["Arial Narrow"]],
+  ["bebasneue", ["Bebas Neue", "DINCondensed-Bold", "ArialNarrow-Bold"]],
+  ["bebas neue", ["BebasNeue", "DINCondensed-Bold", "ArialNarrow-Bold"]],
   ["times new roman", ["Times", "Liberation Serif"]],
   ["book antiqua", ["Palatino", "Palatino Linotype"]],
   ["palatino linotype", ["Palatino", "Book Antiqua"]],

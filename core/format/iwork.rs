@@ -5443,6 +5443,53 @@ fn pages_header_objects(
     else {
         return Ok(None);
     };
+    // Section fills use the same TSD FillArchive as Keynote slide and Numbers
+    // sheet fills. An absent fill belongs to this section, never its predecessor.
+    let background = numbers_bytes(&section_message.payload, 30, DOCUMENT_COMPONENT).and_then(
+        |fills| match fills.last() {
+            Some(fill) => keynote_background_visual(
+                package,
+                data_files,
+                fill,
+                DOCUMENT_COMPONENT,
+                layout.width,
+                layout.height,
+                limits,
+            ),
+            None => Ok(None),
+        },
+    );
+    match background {
+        Ok(Some(visual)) => pages_push_object(
+            objects,
+            limits,
+            unit_index,
+            section_identifier,
+            ObjectKind::Shape,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: layout.width,
+                height: layout.height,
+            },
+            i32::MIN,
+            None,
+            "page-background",
+            MappingQuality::Exact,
+            visual,
+        )?,
+        Ok(None) => {}
+        Err(error) if error.code == DiagnosticCode::FormatInvalid => diagnostics.push(
+            Diagnostic::warning(
+                DiagnosticCode::FormatInvalid,
+                Phase::Parse,
+                Fidelity::Omitted,
+                format!("PAGES_SECTION_BACKGROUND_INVALID: {error}"),
+            )
+            .in_part(DOCUMENT_COMPONENT),
+        ),
+        Err(error) => return Err(error),
+    }
     let first_page = page.targets.iter().any(|target| {
         target.range_start <= section.character_index && section.character_index < target.range_end
     });
@@ -18701,6 +18748,47 @@ mod tests {
             super::normalize_keynote_text("\tA\r\nB\u{2028}\u{4}\u{fffc}"),
             "\tA\r\nB\n"
         );
+    }
+
+    #[test]
+    fn supplied_pages_biology_preserves_section_backgrounds() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/pages-biology.pages"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 3);
+        let backgrounds = document
+            .objects
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.source.locator,
+                    SourceLocator::Iwork {
+                        kind: "page-background",
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backgrounds.len(), 2);
+        for (index, background) in backgrounds.iter().enumerate() {
+            assert_eq!(background.unit_index, index as u32);
+            assert_eq!(background.bounds.x, 0.0);
+            assert_eq!(background.bounds.y, 0.0);
+            assert_eq!(background.bounds.width, document.units[index].width);
+            assert_eq!(background.bounds.height, document.units[index].height);
+            assert_eq!(background.z, i32::MIN);
+            assert!(matches!(
+                background.visual,
+                Visual::PaintedShape {
+                    geometry: Geometry::Rectangle,
+                    fill: Paint::Solid(0x383e4eff),
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
