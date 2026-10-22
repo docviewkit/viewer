@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "office-viewer-core"
-version = "0.2.80"
+version = "0.2.81"
 dependencies = [
  "brotli-decompressor",
  "encoding_rs",
