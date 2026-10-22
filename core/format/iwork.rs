@@ -10159,10 +10159,11 @@ fn keynote_native_drawable(
                 return Ok(0);
             }
         }
+        // Archive dependency references also include thumbnail data. Only the
+        // image's original/adjusted content fields identify final resources.
         let data_part = image
             .data_identifiers
             .iter()
-            .chain(&image_message.data_references)
             .find_map(|identifier| {
                 data_files.iter().find_map(|(current, data_part)| {
                     (*current == *identifier
@@ -23042,6 +23043,43 @@ trailer << /Root 1 0 R >>
             super::iwork_image_properties("Data/replaced.png", &jpeg, Limits::default()).unwrap(),
             ("image/jpeg", 7.0, 5.0)
         );
+    }
+
+    #[test]
+    fn supplied_pages_external_images_do_not_render_dependency_thumbnails() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/pages-external-template-images.pages"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 2);
+        let images = document
+            .objects
+            .iter()
+            .filter(|object| object.kind == ObjectKind::Image)
+            .collect::<Vec<_>>();
+        assert_eq!(images.len(), 3);
+        assert!(
+            images
+                .iter()
+                .all(|object| matches!(object.visual, Visual::None)),
+            "external originals are absent; the image dependency list includes a thumbnail, never a final resource"
+        );
+        assert_eq!(
+            document
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message.starts_with("IWORK_IMAGE_UNAVAILABLE:"))
+                .count(),
+            3
+        );
+        assert!(document.objects.iter().any(|object| {
+            object
+                .text
+                .as_ref()
+                .is_some_and(|text| text.contains("Celebration Event"))
+        }));
     }
 
     #[test]
