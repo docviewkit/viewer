@@ -2484,6 +2484,7 @@ async function resolveLocalFonts(
     readonly alias: string;
     readonly localFamily: string;
     readonly declared: boolean;
+    readonly localFace: FontFaceDescriptor;
     readonly face: RuntimeFontFace;
   }[] = [];
   for (const requested of requestedFaces) {
@@ -2511,13 +2512,20 @@ async function resolveLocalFonts(
       );
       const localFace = exact || declared
         ? requested
-        : { ...requested, style: "normal" as const, weight: 400, stretch: "normal" as const };
+        : {
+          ...requested,
+          style: "normal" as const,
+          // A named bold face already contains bold outlines. Registering it
+          // as regular makes Firefox synthesize bold a second time.
+          weight: /[- ]bold$/iu.test(localFamily) ? 700 : 400,
+          stretch: "normal" as const,
+        };
       const face = new runtime.FontFace(alias, `local(${JSON.stringify(localFamily)})`, {
         style: localFace.style,
         weight: String(localFace.weight),
         stretch: localFace.stretch,
       });
-      localCandidates.push({ requested, key, alias, localFamily, declared, face });
+      localCandidates.push({ requested, key, alias, localFamily, declared, localFace, face });
     }
   }
   if (localCandidates.length === 0) return;
@@ -2531,7 +2539,7 @@ async function resolveLocalFonts(
   for (let index = 0; index < localCandidates.length; index += 1) {
     const candidate = localCandidates[index];
     if (candidate === undefined) continue;
-    const { requested, key, alias, localFamily, declared, face } = candidate;
+    const { requested, key, alias, localFamily, declared, localFace, face } = candidate;
     if (resolutions.has(key)) continue;
     const registered = resolutions.get(exactFaceKey({ ...requested, family: localFamily }))
       ?? familyDefaults.get(normalizeFamily(localFamily));
@@ -2573,7 +2581,7 @@ async function resolveLocalFonts(
     const compatibleSourceAvailable = exact || declared
       ? undefined
       : probeBrowserFontFace(
-        { ...requested, family: localFamily, style: "normal", weight: 400, stretch: "normal" },
+        { ...localFace, family: localFamily },
         probeContext,
         requestedText,
       );
@@ -2582,15 +2590,18 @@ async function resolveLocalFonts(
       : fontFaceMetricsMatch(
         alias,
         localFamily,
-        { style: "normal", weight: 400 },
+        localFace,
         probeContext,
         requestedText,
       );
     const unavailable = exact || declared
       ? aliasAvailable === false && authoredAvailable === false
       : aliasAvailable === false
-        || compatibleSourceAvailable === false
-        || aliasMatchesCompatibleSource === false;
+        // local() selects a face name; CSS selects a family. Firefox can load
+        // DINCondensed-Bold while CSS needs DIN Condensed. A measured loaded
+        // alias remains usable when that source name has no CSS family. When
+        // both names are measurable, still reject mismatched glyph metrics.
+        || (compatibleSourceAvailable === true && aliasMatchesCompatibleSource === false);
     if (unavailable) {
       removeFace(runtime.fontSet, registeredFaces, face);
       continue;

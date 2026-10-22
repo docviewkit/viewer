@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { chromium, webkit } from 'playwright-core';
+import { chromium, webkit, firefox } from 'playwright-core';
 
 const output = process.env.PAGES_BIOLOGY_OUTPUT ?? 'output/playwright/pages-biology';
 await mkdir(output, { recursive: true });
@@ -17,7 +17,8 @@ try {
     server.once('exit', code => reject(new Error(`Server exited: ${code}`)));
   });
   const failures = [];
-  for (const [name, type] of Object.entries({ chromium, webkit })) {
+  const browsers = process.env.PAGES_BIOLOGY_FIREFOX === '1' ? { firefox } : { chromium, webkit };
+  for (const [name, type] of Object.entries(browsers)) {
     const browser = await type.launch({ headless: true });
     try {
       const page = await browser.newPage({ viewport: { width: 1500, height: 1050 }, reducedMotion: 'reduce' });
