@@ -1759,6 +1759,44 @@ mod tests {
     }
 
     #[test]
+    fn picture_background_composes_before_pixels_without_changing_effects() {
+        let bounds = Rect { x: 12.0, y: 34.0, width: 100.0, height: 80.0 };
+        for fill in [None, Some(Paint::None), Some(Paint::Solid(0xffff_ff80))] {
+            let mut effects = DrawingMlPictureEffects { background_fill: fill.clone(),
+                soft_edge: Some(2.0), ..Default::default() };
+            let visual = effects.paint_picture_background(Visual::None, bounds, Some(Geometry::Ellipse));
+            if matches!(fill, Some(Paint::Solid(_))) {
+                let Visual::Group { children } = &visual else { panic!("picture composition"); };
+                assert_eq!(children.len(), 2);
+                assert_eq!(children[0].bounds, bounds);
+                assert!(matches!(&children[0].visual, Visual::PaintedShape {
+                    geometry: Geometry::Ellipse, fill: Paint::Solid(0xffff_ff80), .. }));
+                assert!(matches!(children[1].visual, Visual::None));
+            } else {
+                assert!(matches!(visual, Visual::None));
+            }
+            assert!(matches!(effects.wrap(visual, None),
+                Visual::AdvancedEffect { soft_edge: Some(2.0), .. }));
+        }
+    }
+
+    #[test]
+    fn picture_background_capture_ignores_outline_fill() {
+        let mut capture = super::DrawingMlPictureEffectsCapture::default();
+        for (local, depth, empty) in [("ln", 1, false), ("solidFill", 2, false),
+            ("srgbClr", 3, true)] {
+            capture.start(local, &[XmlAttribute { name: "val", value: "FF0000" }],
+                empty, depth, "picture.xml", |_, _| Ok(0xff00_00ff)).unwrap();
+        }
+        capture.end(2);
+        capture.end(1);
+        capture.start("solidFill", &[], false, 1, "picture.xml", |_, _| Ok(0xffff_ffff)).unwrap();
+        capture.start("schemeClr", &[XmlAttribute { name: "val", value: "bg1" }],
+            true, 2, "picture.xml", |_, _| Ok(0xffff_ffff)).unwrap();
+        assert_eq!(capture.finish().background_fill, Some(Paint::Solid(0xffff_ffff)));
+    }
+
+    #[test]
     fn picture_outer_shadow_uses_clipping_safe_composition() {
         let visual = DrawingMlPictureEffects {
             outer_shadow: Some(OuterShadow {

@@ -68,6 +68,32 @@ impl DrawingMlPictureEffects {
             && self.three_d.is_none()
     }
 
+    /// A picture's spPr fill is behind its pixels, inside the same clip/effects/transform.
+    pub(super) fn paint_picture_background(
+        &mut self,
+        visual: Visual,
+        bounds: Rect,
+        geometry: Option<Geometry>,
+    ) -> Visual {
+        match self.background_fill.take() {
+            Some(fill) if !matches!(fill, Paint::None) => Visual::Group {
+                children: vec![
+                    crate::model::VisualBrushChild {
+                        bounds,
+                        visual: Visual::PaintedShape {
+                            geometry: geometry.unwrap_or(Geometry::Rectangle),
+                            fill,
+                            stroke: Paint::None,
+                            stroke_width: 0.0,
+                        },
+                    },
+                    crate::model::VisualBrushChild { bounds, visual },
+                ],
+            },
+            _ => visual,
+        }
+    }
+
     pub(super) fn wrap(self, visual: Visual, clip: Option<Geometry>) -> Visual {
         let visual = if clip.is_none() {
             visual
@@ -107,6 +133,7 @@ pub(super) struct DrawingMlPictureEffectsCapture {
     effect: Option<(usize, DrawingMlPictureEffectTarget)>,
     color_depth: Option<usize>,
     fill_depth: Option<usize>,
+    line_depth: Option<usize>,
     fill_color_depth: Option<usize>,
     scene_3d_depth: Option<usize>,
     camera_3d_depth: Option<usize>,
@@ -256,6 +283,13 @@ impl DrawingMlPictureEffectsCapture {
             }
             _ => {}
         }
+        if local == "ln" {
+            self.line_depth = (!empty).then_some(depth);
+            return Ok(false);
+        }
+        if self.line_depth.is_some() {
+            return Ok(false);
+        }
         if self.effect.is_none() && self.effects.background_fill.is_none() && local == "solidFill" {
             self.effects.background_fill = Some(Paint::Solid(0x0000_00ff));
             self.fill_depth = (!empty).then_some(depth);
@@ -332,6 +366,9 @@ impl DrawingMlPictureEffectsCapture {
     }
 
     pub(super) fn end(&mut self, depth: usize) {
+        if self.line_depth == Some(depth) {
+            self.line_depth = None;
+        }
         if self.shape_3d_depth == Some(depth) {
             self.shape_3d_depth = None;
         }

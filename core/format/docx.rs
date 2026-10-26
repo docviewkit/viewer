@@ -22977,12 +22977,20 @@ impl Layout<'_> {
                 visual: Box::new(visual),
             }
         };
-        Ok(drawing.picture_effects.clone().wrap(
+        let mut effects = drawing.picture_effects.clone();
+        let visual = effects.paint_picture_background(
             visual,
-            drawing
-                .picture_clip
-                .clone()
-                .filter(|geometry| *geometry != Geometry::Rectangle),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: drawing.width,
+                height: drawing.height,
+            },
+            drawing.picture_clip.clone(),
+        );
+        Ok(effects.wrap(
+            visual,
+            drawing.picture_clip.clone().filter(|geometry| *geometry != Geometry::Rectangle),
         ))
     }
 
@@ -25669,24 +25677,34 @@ fn drawing_visual_at_bounds(drawing: &Drawing, bounds: Rect, mut visual: Visual)
     if let Some(document) = drawing.embedded_document.as_ref() {
         return embedded_spreadsheet_visual(document, bounds);
     }
-    fn offset_groups(visual: &mut Visual, x: f32, y: f32) {
+    fn offset_groups(visual: &mut Visual, x: f32, y: f32, scale_x: f32, scale_y: f32) {
         match visual {
             Visual::Group { children } => {
                 for child in children {
-                    child.bounds.x += x;
-                    child.bounds.y += y;
-                    offset_groups(&mut child.visual, x, y);
+                    child.bounds.x = x + child.bounds.x * scale_x;
+                    child.bounds.y = y + child.bounds.y * scale_y;
+                    child.bounds.width *= scale_x;
+                    child.bounds.height *= scale_y;
+                    offset_groups(&mut child.visual, x, y, scale_x, scale_y);
                 }
             }
             Visual::Layer { visual, .. }
             | Visual::Effect { visual, .. }
-            | Visual::AdvancedEffect { visual, .. } => offset_groups(visual, x, y),
+            | Visual::AdvancedEffect { visual, .. } => offset_groups(visual, x, y, scale_x, scale_y),
             _ => {}
         }
     }
 
-    if drawing.vml_cube_depth.is_some() {
-        offset_groups(&mut visual, bounds.x, bounds.y);
+    if drawing.vml_cube_depth.is_some() || drawing.picture_effects.background_fill.is_some() {
+        let (scale_x, scale_y) = if drawing.vml_cube_depth.is_some() {
+            (1.0, 1.0)
+        } else {
+            (
+                bounds.width / drawing.width.max(f32::EPSILON),
+                bounds.height / drawing.height.max(f32::EPSILON),
+            )
+        };
+        offset_groups(&mut visual, bounds.x, bounds.y, scale_x, scale_y);
     }
     let (rotation, flip_h, flip_v) = drawing.picture_transform;
     let transform = super::drawingml::drawingml_shape_transform(bounds, rotation, flip_h, flip_v);

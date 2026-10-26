@@ -7358,8 +7358,20 @@ export class SceneRenderer {
           const advancedEffects = advancedEffectsFor(state);
           if (visual.kind === "group" || visual.kind === "opacity-mask") {
             let textOffset = 0;
+            const transform = advancedEffects.length === 0 ? undefined : context.getTransform();
+            const rasterScale = transform === undefined ? 1
+              : Math.max(Math.hypot(transform.a, transform.b), Math.hypot(transform.c, transform.d), 1);
+            const width = Math.max(1, Math.ceil(object.bounds.width * rasterScale));
+            const height = Math.max(1, Math.ceil(object.bounds.height * rasterScale));
+            if (advancedEffects.length > 0 && width * height > this.#limits.imagePixels) {
+              throw new OfficeEngineError("IMAGE_DIMENSION_LIMIT", "Picture composition exceeds the configured pixel limit");
+            }
+            const surface = advancedEffects.length === 0 ? undefined : new OffscreenCanvas(width, height);
+            const target = surface?.getContext("2d") ?? context;
+            if (surface !== undefined) target.setTransform(rasterScale, 0, 0, rasterScale,
+              -object.bounds.x * rasterScale, -object.bounds.y * rasterScale);
             await this.#drawVisualBrushChild(
-              context, object, object.bounds, visual, 0, state.strokeStyle, state.textLayout, state.textEffects,
+              target, object, object.bounds, visual, 0, state.strokeStyle, state.textLayout, state.textEffects,
               collectTextFragment === undefined ? undefined : (fragment, transform) => {
                 // Child layouts use local ranges; selection addresses the owning object's text.
                 const start = textOffset;
@@ -7367,6 +7379,11 @@ export class SceneRenderer {
                 collectTextFragment({ ...fragment, start, end: textOffset }, transform);
               },
             );
+            if (surface !== undefined) {
+              drawWithAdvancedEffects(context, object, advancedEffects, target => {
+                target.drawImage(surface, object.bounds.x, object.bounds.y, object.bounds.width, object.bounds.height);
+              }, "full", prepareAdvancedSurface);
+            }
             renderedObjectCount += 1;
           } else if (visual.kind === "shape") {
             drawWithAdvancedEffects(context, object, advancedEffects, (target) => {
@@ -8730,14 +8747,16 @@ export class SceneRenderer {
       );
       return;
     }
-    if (visual.kind === "image") {
+    const imageState = unwrapVisual(object);
+    const image = imageState.visual;
+    if (image.kind === "image") {
       const bitmap = (await this.#image(
-        visual,
-        [],
-        [],
-        nestedVectorRasterTarget(context, bounds, visual.mediaType, this.#limits.imagePixels, visual),
+        image,
+        imageState.operations.flatMap(({ visual }) => visual.kind === "image-color-change" ? [visual] : []),
+        imageState.operations.flatMap(({ visual }) => visual.kind === "image-adjustment" ? [visual] : []),
+        nestedVectorRasterTarget(context, bounds, image.mediaType, this.#limits.imagePixels, image),
       )).bitmap;
-      const { cropLeft, cropTop, cropRight, cropBottom } = visual;
+      const { cropLeft, cropTop, cropRight, cropBottom } = image;
       drawImageRegion(context,
         bitmap,
         bitmap.width * cropLeft,

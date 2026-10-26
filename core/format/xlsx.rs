@@ -7600,75 +7600,19 @@ fn push_worksheet_image(
     else {
         return Ok(false);
     };
-    let background_fill = effects
-        .background_fill
-        .take()
-        .filter(|fill| !matches!(fill, Paint::None));
-    if state
-        .objects
-        .len()
-        .saturating_add(1 + usize::from(background_fill.is_some()))
-        > package.limits().max_document_objects
-    {
+    if state.objects.len() >= package.limits().max_document_objects {
         return Err(object_limit_error(
             source_part,
             "worksheet images exceed the configured object limit",
         ));
     }
-    let parent = if let Some(fill) = background_fill {
-        let numeric_id = u32::try_from(state.objects.len())
-            .map_err(|_| format_error(source_part, "object count exceeds supported range"))?;
-        let stable_id = format!("object:{numeric_id}");
-        let visual = Visual::PaintedShape {
-            geometry: geometry.clone().unwrap_or(Geometry::Rectangle),
-            fill,
-            stroke: Paint::None,
-            stroke_width: 0.0,
-        };
-        let visual = if let Some(transform) = transform {
-            Visual::Layer {
-                transform,
-                opacity: 1.0,
-                blend_mode: BlendMode::Normal,
-                visual: Box::new(visual),
-            }
-        } else {
-            visual
-        };
-        state.objects.push(Object {
-            numeric_id,
-            parent_numeric_id: None,
-            stable_id: stable_id.clone(),
-            parent_stable_id: None,
-            kind: ObjectKind::Shape,
-            unit_index,
-            bounds,
-            z: i32::try_from(numeric_id).unwrap_or(i32::MAX),
-            text: None,
-            source: SourceRef {
-                part: source_part.to_owned(),
-                mapping: MappingQuality::Exact,
-                locator: SourceLocator::Xlsx {
-                    kind: "drawing",
-                    sheet_name: sheet_name.to_owned(),
-                    address: None,
-                    formula: None,
-                    drawing_id: Some(drawing_id),
-                },
-            },
-            visual,
-        });
-        Some((numeric_id, stable_id))
-    } else {
-        None
-    };
     let numeric_id = u32::try_from(state.objects.len())
         .map_err(|_| format_error(source_part, "object count exceeds supported range"))?;
     state.objects.push(Object {
         numeric_id,
-        parent_numeric_id: parent.as_ref().map(|(numeric_id, _)| *numeric_id),
+        parent_numeric_id: None,
         stable_id: format!("object:{numeric_id}"),
-        parent_stable_id: parent.map(|(_, stable_id)| stable_id),
+        parent_stable_id: None,
         kind: ObjectKind::Image,
         unit_index,
         bounds,
@@ -7699,6 +7643,7 @@ fn push_worksheet_image(
                     visual: Box::new(image),
                 }
             };
+            let image = effects.paint_picture_background(image, bounds, geometry.clone());
             let image = effects.wrap(image, geometry);
             if let Some(transform) = transform {
                 Visual::Layer {
