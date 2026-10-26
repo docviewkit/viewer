@@ -87,3 +87,5 @@ python3 scripts/extract-iwork-chart-geometry.py \
 另外，两份既有 Numbers 文件的原生 PDF 证明圆环标题应与圆环中心对齐，不能受未显示的值轴文字宽度影响。`existing-multiple`、`existing-dice` 保留标题中心金标；`existing-team` 验证原生整数刻度 0、2、5、7、9；`existing-retirement` 验证面积不透明度。Numbers 打印页证据只用于这些固定对象特征，不能升级为全工作表视觉验收。
 
 修改前基线 `3e27032`，修改后 192 项真实文件/原生几何/双浏览器检查通过。具体修改前失败项及哈希见 `iwork-chart-oracles/boundary-regression-evidence.json`。这些修复没有将任何完整类型或完整特性组改成通过，3D 及完整视觉验收继续进行。
+
+原生整页门禁增加了 1280×960 Apple 幻灯片与自身比较的真实回归：修复前在第 53 个区域误报 `OBJECT_REGION_LIMIT`，修复后全部 256 个区域通过。250,000 像素限制作用于单区域工作集，区域数量及 128,000,000 次双向邻域运算预算保持不变；视觉阈值保持不变。共享准确性、协议及原生门禁 61 项测试通过，证据见 `iwork-chart-oracles/static-keynote/region-budget-regression.json`。这个门禁修复不代表任何图表类型已经通过原生视觉验收。

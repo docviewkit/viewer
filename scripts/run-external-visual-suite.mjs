@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { inflateSync } from "node:zlib";
 
 import { evaluateAccuracy } from "../dist/accuracy.js";
 import {
   NATIVE_VISUAL_POLICY,
+  decodePng,
+  nativeVisualRegions,
   changedCandidateFingerprintFields,
   flattenNativeVisualCases,
   resolveSafeRelativePath,
@@ -15,8 +16,6 @@ import {
   validateNativeVisualSuite,
 } from "./native-visual-policy.mjs";
 
-const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-const MAX_PIXELS = 100_000_000;
 const VISUAL_COVERAGE = ["structure-units", "visual-exact", "visual-tolerant", "visual-ssim"];
 const CORPUS_CLASSES = new Set(["minimal", "combination", "enterprise", "large", "malformed", "malicious"]);
 const UNIT_TYPES = new Set(["slide", "sheet", "page"]);
@@ -152,144 +151,6 @@ function changedFingerprintFields(expected, actual) {
   return [...new Set([...Object.keys(expected), ...Object.keys(actual)])]
     .filter((field) => canonical(expected[field]) !== canonical(actual[field]))
     .sort();
-}
-
-function crc32(bytes) {
-  let crc = 0xffff_ffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb8_8320 & -(crc & 1));
-  }
-  return (crc ^ 0xffff_ffff) >>> 0;
-}
-
-function paeth(left, up, upperLeft) {
-  const prediction = left + up - upperLeft;
-  const leftDistance = Math.abs(prediction - left);
-  const upDistance = Math.abs(prediction - up);
-  const upperLeftDistance = Math.abs(prediction - upperLeft);
-  if (leftDistance <= upDistance && leftDistance <= upperLeftDistance) return left;
-  return upDistance <= upperLeftDistance ? up : upperLeft;
-}
-
-function decodePng(bytes, label) {
-  if (bytes.length < PNG_SIGNATURE.length || !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
-    throw new Error(`${label} is not a PNG file`);
-  }
-  let offset = PNG_SIGNATURE.length;
-  let header;
-  let palette;
-  let transparency;
-  let ended = false;
-  const compressed = [];
-  while (offset < bytes.length) {
-    if (offset + 12 > bytes.length) throw new Error(`${label} has a truncated PNG chunk`);
-    const length = bytes.readUInt32BE(offset);
-    const end = offset + 12 + length;
-    if (end > bytes.length) throw new Error(`${label} has an out-of-bounds PNG chunk`);
-    const typeBytes = bytes.subarray(offset + 4, offset + 8);
-    const type = typeBytes.toString("ascii");
-    const data = bytes.subarray(offset + 8, offset + 8 + length);
-    const expectedCrc = bytes.readUInt32BE(offset + 8 + length);
-    const actualCrc = crc32(Buffer.concat([typeBytes, data]));
-    if (expectedCrc !== actualCrc) throw new Error(`${label} PNG chunk ${type} has an invalid CRC`);
-    if (type === "IHDR") {
-      if (header !== undefined || length !== 13) throw new Error(`${label} has an invalid PNG header`);
-      header = {
-        width: data.readUInt32BE(0),
-        height: data.readUInt32BE(4),
-        bitDepth: data[8],
-        colorType: data[9],
-        compression: data[10],
-        filter: data[11],
-        interlace: data[12],
-      };
-    } else if (type === "PLTE") {
-      palette = data;
-    } else if (type === "tRNS") {
-      transparency = data;
-    } else if (type === "IDAT") {
-      compressed.push(data);
-    } else if (type === "IEND") {
-      ended = true;
-      offset = end;
-      break;
-    }
-    offset = end;
-  }
-  if (!ended || header === undefined || compressed.length === 0) throw new Error(`${label} is missing required PNG chunks`);
-  if (offset !== bytes.length) throw new Error(`${label} contains data after the PNG end chunk`);
-  const { width, height, bitDepth, colorType, compression, filter, interlace } = header;
-  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 || width * height > MAX_PIXELS) {
-    throw new Error(`${label} PNG dimensions are invalid or exceed ${MAX_PIXELS} pixels`);
-  }
-  if (bitDepth !== 8 || compression !== 0 || filter !== 0 || interlace !== 0) {
-    throw new Error(`${label} must be a non-interlaced 8-bit PNG`);
-  }
-  const channels = new Map([[0, 1], [2, 3], [3, 1], [4, 2], [6, 4]]).get(colorType);
-  if (channels === undefined) throw new Error(`${label} uses unsupported PNG color type ${colorType}`);
-  if (colorType === 3 && (palette === undefined || palette.length === 0 || palette.length % 3 !== 0)) {
-    throw new Error(`${label} has an invalid indexed-color palette`);
-  }
-  const stride = width * channels;
-  const expectedInflatedLength = height * (stride + 1);
-  const inflated = inflateSync(Buffer.concat(compressed), { maxOutputLength: expectedInflatedLength });
-  if (inflated.length !== expectedInflatedLength) throw new Error(`${label} PNG scanline length is invalid`);
-  const unfiltered = Buffer.alloc(height * stride);
-  for (let y = 0; y < height; y += 1) {
-    const inputRow = y * (stride + 1);
-    const outputRow = y * stride;
-    const filterType = inflated[inputRow];
-    if (filterType > 4) throw new Error(`${label} uses invalid PNG filter ${filterType}`);
-    for (let x = 0; x < stride; x += 1) {
-      const encoded = inflated[inputRow + 1 + x];
-      const left = x >= channels ? unfiltered[outputRow + x - channels] : 0;
-      const up = y > 0 ? unfiltered[outputRow - stride + x] : 0;
-      const upperLeft = y > 0 && x >= channels ? unfiltered[outputRow - stride + x - channels] : 0;
-      const predictor = filterType === 0 ? 0
-        : filterType === 1 ? left
-          : filterType === 2 ? up
-            : filterType === 3 ? Math.floor((left + up) / 2)
-              : paeth(left, up, upperLeft);
-      unfiltered[outputRow + x] = (encoded + predictor) & 0xff;
-    }
-  }
-  const rgba = new Uint8Array(width * height * 4);
-  for (let pixel = 0; pixel < width * height; pixel += 1) {
-    const input = pixel * channels;
-    const output = pixel * 4;
-    if (colorType === 6) {
-      rgba.set(unfiltered.subarray(input, input + 4), output);
-    } else if (colorType === 2) {
-      rgba[output] = unfiltered[input];
-      rgba[output + 1] = unfiltered[input + 1];
-      rgba[output + 2] = unfiltered[input + 2];
-      const transparent = transparency?.length === 6
-        && transparency.readUInt16BE(0) === unfiltered[input]
-        && transparency.readUInt16BE(2) === unfiltered[input + 1]
-        && transparency.readUInt16BE(4) === unfiltered[input + 2];
-      rgba[output + 3] = transparent ? 0 : 255;
-    } else if (colorType === 3) {
-      const index = unfiltered[input];
-      if (index * 3 + 2 >= palette.length) throw new Error(`${label} references an invalid PNG palette index`);
-      rgba[output] = palette[index * 3];
-      rgba[output + 1] = palette[index * 3 + 1];
-      rgba[output + 2] = palette[index * 3 + 2];
-      rgba[output + 3] = transparency?.[index] ?? 255;
-    } else if (colorType === 4) {
-      rgba[output] = unfiltered[input];
-      rgba[output + 1] = unfiltered[input];
-      rgba[output + 2] = unfiltered[input];
-      rgba[output + 3] = unfiltered[input + 1];
-    } else {
-      rgba[output] = unfiltered[input];
-      rgba[output + 1] = unfiltered[input];
-      rgba[output + 2] = unfiltered[input];
-      const transparent = transparency?.length === 2 && transparency.readUInt16BE(0) === unfiltered[input];
-      rgba[output + 3] = transparent ? 0 : 255;
-    }
-  }
-  return { width, height, data: rgba };
 }
 
 function digest(bytes) {
@@ -479,29 +340,6 @@ function validateNativeCapture(capture, testCase, actualBytes, actual) {
   if (capture.width !== actual.width || capture.height !== actual.height) {
     throw new Error(`${testCase.id} candidate capture dimensions do not match the PNG`);
   }
-}
-
-function nativeVisualRegions(unitIndex, width, height) {
-  const columns = Math.min(16, width);
-  const rows = Math.min(16, height);
-  const regions = [];
-  for (let row = 0; row < rows; row += 1) {
-    const top = Math.floor((row * height) / rows);
-    const bottom = Math.floor(((row + 1) * height) / rows);
-    for (let column = 0; column < columns; column += 1) {
-      const left = Math.floor((column * width) / columns);
-      const right = Math.floor(((column + 1) * width) / columns);
-      const sourceKey = `visual-region-${row}-${column}`;
-      regions.push({
-        id: sourceKey,
-        sourceKey,
-        type: "visual-region",
-        unitIndex,
-        bounds: { x: left, y: top, width: right - left, height: bottom - top },
-      });
-    }
-  }
-  return regions;
 }
 
 async function writeJson(path, value) {

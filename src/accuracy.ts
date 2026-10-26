@@ -914,6 +914,9 @@ interface PixelRegion {
 }
 
 const MAX_OBJECT_REGION_COUNT = 256;
+// Bound each region's working set; aggregate work is separately bounded below.
+// Treating this as an aggregate pixel cap rejects a normal native page even
+// when its fixed 16x16 regions and total neighbor work fit their budgets.
 const MAX_OBJECT_REGION_PIXELS = 250_000;
 const MAX_OBJECT_REGION_NEIGHBOR_WORK = 128_000_000;
 
@@ -1234,7 +1237,7 @@ function compareVisuals(
         const diameter = policy.pixelRadius * 2 + 1;
         const neighborWork = pixels * diameter * diameter * 4 * 2;
         if (regionCount === MAX_OBJECT_REGION_COUNT
-          || regionPixels + pixels > MAX_OBJECT_REGION_PIXELS
+          || pixels > MAX_OBJECT_REGION_PIXELS
           || regionNeighborWork + neighborWork > MAX_OBJECT_REGION_NEIGHBOR_WORK) {
           addFailure(
             failures,
@@ -1245,11 +1248,12 @@ function compareVisuals(
               sourceKey: object.sourceKey,
               expected: {
                 maxRegions: MAX_OBJECT_REGION_COUNT,
-                maxPixels: MAX_OBJECT_REGION_PIXELS,
+                maxPixelsPerRegion: MAX_OBJECT_REGION_PIXELS,
                 maxNeighborWork: MAX_OBJECT_REGION_NEIGHBOR_WORK,
               },
               actual: {
                 regions: regionCount + 1,
+                pixelsInRegion: pixels,
                 pixels: regionPixels + pixels,
                 neighborWork: regionNeighborWork + neighborWork,
               },
