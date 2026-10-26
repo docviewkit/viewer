@@ -12,10 +12,11 @@ release-output/
 tmp/
 
 # Local test and tool state
+/tests/
+/test/
 .playwright-cli/
 .cache/
 .worktrees/
-tests/external/pdfjs/
 *.tsbuildinfo
 
 # Local configuration and secrets
