@@ -3216,6 +3216,52 @@ fn append_elliptical_arc(
     }
 }
 
+// Shared polar polygon geometry. Adapters retain their authored inset and rotation.
+#[cfg(any(
+    feature = "native-formats",
+    feature = "legacy-office-formats",
+    feature = "iwork-formats"
+))]
+pub(super) fn radar_polygon(
+    values: &[f32],
+    maximum: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+    rotation: f32,
+) -> Option<Geometry> {
+    if values.len() < 3 || !maximum.is_finite() || maximum <= 0.0 {
+        return None;
+    }
+    let center_x = width / 2.0;
+    let center_y = height / 2.0;
+    let mut commands = Vec::with_capacity(values.len() + 1);
+    for (index, value) in values.iter().copied().enumerate() {
+        let angle = rotation + std::f32::consts::TAU * index as f32 / values.len() as f32;
+        let point_radius = radius * (value / maximum).clamp(0.0, 1.0);
+        let point = (
+            center_x + point_radius * angle.cos(),
+            center_y + point_radius * angle.sin(),
+        );
+        commands.push(if index == 0 {
+            PathCommand::MoveTo {
+                x: point.0,
+                y: point.1,
+            }
+        } else {
+            PathCommand::LineTo {
+                x: point.0,
+                y: point.1,
+            }
+        });
+    }
+    commands.push(PathCommand::ClosePath);
+    Some(Geometry::Path {
+        fill_rule: FillRule::NonZero,
+        commands,
+    })
+}
+
 // Marker geometry is format-independent; adapters retain symbol IDs, sizing and paint.
 #[cfg(any(
     feature = "native-formats",

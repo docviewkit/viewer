@@ -71,6 +71,7 @@
     "test:server": "bash scripts/test-server.sh",
     "test:browsers:install": "node node_modules/playwright-core/cli.js install --with-deps chromium webkit",
     "test:browsers": "node scripts/run-browser-matrix.mjs",
+    "test:iwork-charts": "node scripts/test-iwork-charts.mjs",
     "test:core": "cargo test -p office-viewer-core && cargo test -p office-viewer-core --no-default-features --features calculation-service && cargo test -p office-viewer-core --no-default-features --features odf-formats && cargo test -p office-viewer-core --no-default-features --features iwork-formats && cargo test -p office-viewer-core --no-default-features --features legacy-office-formats && cargo test -p office-viewer-core --no-default-features --features pdf-formats && cargo test -p office-viewer-core --no-default-features --features xps-formats && cargo test -p office-viewer-core --no-default-features --features ofd-formats",
     "test": "npm run build && npm run test:core && node --test tests/*.test.mjs",
     "test:accuracy": "npm run build && node --test tests/accuracy*.test.mjs",

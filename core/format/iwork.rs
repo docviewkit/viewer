@@ -461,12 +461,16 @@ enum KeynoteChartKind {
     Area,
     Pie,
     Scatter,
+    Bubble,
+    Radar,
+    Mixed,
 }
 
 #[derive(Clone, Debug)]
 struct KeynoteChart {
     geometry: KeynoteGeometry,
     kind: KeynoteChartKind,
+    three_d: bool,
     doughnut: bool,
     hole_ratio: f32,
     start_rotation: f32,
@@ -495,6 +499,13 @@ struct KeynoteChart {
     series: Vec<Vec<f32>>,
     scatter_x: Vec<Vec<f32>>,
     point_styles: Vec<IworkPointStyle>,
+    bubble_sizes: Vec<Vec<f32>>,
+    radar_rotation: f32,
+    radar_fills: Vec<Paint>,
+    series_kinds: Vec<KeynoteChartKind>,
+    series_axes: Vec<usize>,
+    secondary_axis: Option<IworkChartAxis>,
+    plot_to_edges: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -520,6 +531,9 @@ struct IworkChartAxis {
     title: Option<String>,
     title_style: KeynoteTextStyle,
     grid: Option<(Paint, f32, StrokeStyle)>,
+    minimum: Option<f32>,
+    maximum: Option<f32>,
+    decimals: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2665,28 +2679,19 @@ fn numbers_document(
             let Some((part, message)) = messages.message(identifier, IWORK_CHART_TYPE)? else {
                 continue;
             };
-            let chart = match keynote_chart(&message.payload, &chart_styles, &chart_styles, part) {
-                Ok(Some(chart)) => chart,
-                result => {
-                    let reason = match result {
-                        Err(error) if error.code != DiagnosticCode::FormatInvalid => {
-                            return Err(error);
-                        }
-                        Err(error) => error.to_string(),
-                        _ => "unsupported chart type or missing cached data".to_owned(),
-                    };
-                    diagnostics.push(
-                        Diagnostic::warning(
-                            DiagnosticCode::UnsupportedFeature,
-                            Phase::Parse,
-                            Fidelity::Omitted,
-                            format!("NUMBERS_CHART_OMITTED: chart {identifier}: {reason}"),
-                        )
-                        .in_part(part),
-                    );
-                    continue;
-                }
+            let Some(chart) = iwork_parse_chart(
+                &message.payload,
+                &chart_styles,
+                &chart_styles,
+                part,
+                identifier,
+                &mut diagnostics,
+                "NUMBERS",
+            )?
+            else {
+                continue;
             };
+            iwork_chart_fidelity(&chart, part, identifier, &mut diagnostics);
             keynote_push_chart(
                 chart,
                 identifier,
@@ -6832,13 +6837,17 @@ fn pages_attachment_objects(
                     }
                 } else if let Some(chart_message) =
                     archive_message(archives, child, IWORK_CHART_TYPE, DOCUMENT_COMPONENT)?
-                    && let Some(chart) = keynote_chart(
+                    && let Some(chart) = iwork_parse_chart(
                         &chart_message.payload,
                         archives,
                         archives,
                         DOCUMENT_COMPONENT,
+                        child,
+                        diagnostics,
+                        "PAGES",
                     )?
                 {
+                    iwork_chart_fidelity(&chart, DOCUMENT_COMPONENT, child, diagnostics);
                     keynote_push_chart(
                         chart,
                         child,
@@ -6852,13 +6861,34 @@ fn pages_attachment_objects(
                     )?;
                 }
             }
-        } else if let Some(image_message) = archive_message(
+        } else if let Some(drawable_message) = archive_message(
             archives,
             drawable_identifier,
             IWORK_IMAGE_TYPE,
             DOCUMENT_COMPONENT,
-        )? {
-            let image = keynote_image(&image_message.payload, DOCUMENT_COMPONENT)?;
+        )?
+        .or(archive_message(
+            archives,
+            drawable_identifier,
+            IWORK_CHART_TYPE,
+            DOCUMENT_COMPONENT,
+        )?) {
+            let is_image = drawable_message.message_type == IWORK_IMAGE_TYPE;
+            let geometry = if is_image {
+                keynote_image(&drawable_message.payload, DOCUMENT_COMPONENT)?.geometry
+            } else if let Some(chart) = iwork_parse_chart(
+                &drawable_message.payload,
+                archives,
+                archives,
+                DOCUMENT_COMPONENT,
+                drawable_identifier,
+                diagnostics,
+                "PAGES",
+            )? {
+                chart.geometry
+            } else {
+                continue;
+            };
             let target = page.targets.iter().find(|target| {
                 target.anchored_start <= character_index && character_index < target.anchored_end
             });
@@ -6936,8 +6966,8 @@ fn pages_attachment_objects(
                 &mut Vec::new(),
                 layout.width,
                 layout.height,
-                x - image.geometry.x,
-                y - image.geometry.y,
+                x - geometry.x,
+                y - geometry.y,
                 50,
                 true,
                 embedded_fonts,
@@ -6946,7 +6976,9 @@ fn pages_attachment_objects(
             )?;
             for object in &mut objects[first_object..] {
                 if let SourceLocator::Iwork { kind, .. } = &mut object.source.locator {
-                    *kind = "inline-image";
+                    if is_image {
+                        *kind = "inline-image";
+                    }
                 }
             }
         } else if let Some((table_part, table)) =
@@ -9875,11 +9907,20 @@ fn keynote_native_drawable(
         keynote_align_group_text_to_shapes(objects, first_object);
         Ok(unsupported)
     } else if let Some(chart) = archive_message(archives, identifier, IWORK_CHART_TYPE, part)? {
-        let Some(chart) = keynote_chart(&chart.payload, archives, stylesheet_archives, part)?
+        let Some(chart) = iwork_parse_chart(
+            &chart.payload,
+            archives,
+            stylesheet_archives,
+            part,
+            identifier,
+            diagnostics,
+            "IWORK",
+        )?
         else {
             path.pop();
             return Ok(1);
         };
+        iwork_chart_fidelity(&chart, part, identifier, diagnostics);
         keynote_push_chart(
             chart, identifier, unit_index, part, limits, objects, offset_x, offset_y, z,
         )?;
@@ -10908,7 +10949,7 @@ fn keynote_push_chart(
     z: i32,
 ) -> Result<(), Diagnostic> {
     let authored = keynote_bounds(chart.geometry, offset_x, offset_y, None);
-    let cartesian = chart.kind != KeynoteChartKind::Pie;
+    let cartesian = !matches!(chart.kind, KeynoteChartKind::Pie | KeynoteChartKind::Radar);
     let horizontal = chart.kind == KeynoteChartKind::Bar;
     let label_width = if horizontal {
         chart
@@ -10949,7 +10990,12 @@ fn keynote_push_chart(
         0.0
     };
     let top = if title_height > 0.0 {
-        title_height + 6.0
+        title_height
+            + if chart.kind == KeynoteChartKind::Radar {
+                chart.category_axis.text.font_size * 2.0 + 6.0
+            } else {
+                6.0
+            }
     } else {
         chart.value_axis.text.font_size * 0.6
     };
@@ -11091,7 +11137,33 @@ fn keynote_push_chart(
             parent_stable_id.as_deref(),
             &mut serial,
         ),
-        KeynoteChartKind::Scatter => iwork_push_scatter_chart(
+        KeynoteChartKind::Scatter | KeynoteChartKind::Bubble => iwork_push_scatter_chart(
+            &chart,
+            identifier,
+            unit_index,
+            part,
+            limits,
+            objects,
+            plot,
+            z,
+            parent_numeric_id,
+            parent_stable_id.as_deref(),
+            &mut serial,
+        ),
+        KeynoteChartKind::Radar => iwork_push_radar_chart(
+            &chart,
+            identifier,
+            unit_index,
+            part,
+            limits,
+            objects,
+            plot,
+            z,
+            parent_numeric_id,
+            parent_stable_id.as_deref(),
+            &mut serial,
+        ),
+        KeynoteChartKind::Mixed => iwork_push_mixed_chart(
             &chart,
             identifier,
             unit_index,
@@ -11514,12 +11586,14 @@ fn keynote_push_bar_chart(
     if categories == 0 {
         return Ok(());
     }
-    let (minimum, maximum) = keynote_chart_range(&chart.series, chart.stacked);
+    let (minimum, maximum) = chart
+        .value_axis
+        .range(keynote_chart_range(&chart.series, chart.stacked));
     let span = (maximum - minimum).max(f32::EPSILON);
     let baseline = if horizontal {
-        plot.x + (0.0 - minimum) / span * plot.width
+        plot.x + (0.0_f32.clamp(minimum, maximum) - minimum) / span * plot.width
     } else {
-        plot.y + (maximum - 0.0) / span * plot.height
+        plot.y + (maximum - 0.0_f32.clamp(minimum, maximum)) / span * plot.height
     };
     keynote_push_chart_axes(
         chart,
@@ -11597,15 +11671,17 @@ fn keynote_push_bar_chart(
                     negative[category] = end;
                 }
             }
+            let visible_start = start.clamp(minimum, maximum);
+            let visible_end = end.clamp(minimum, maximum);
             let (start_position, end_position) = if horizontal {
                 (
-                    plot.x + (start - minimum) / span * plot.width,
-                    plot.x + (end - minimum) / span * plot.width,
+                    plot.x + (visible_start - minimum) / span * plot.width,
+                    plot.x + (visible_end - minimum) / span * plot.width,
                 )
             } else {
                 (
-                    plot.y + (maximum - start) / span * plot.height,
-                    plot.y + (maximum - end) / span * plot.height,
+                    plot.y + (maximum - visible_start) / span * plot.height,
+                    plot.y + (maximum - visible_end) / span * plot.height,
                 )
             };
             let group_offset = if chart.stacked {
@@ -11797,7 +11873,7 @@ fn iwork_push_chart_value_ticks(
             parent_stable_id,
             serial,
             keynote_chart_label_visual(
-                keynote_chart_number(value, false),
+                axis.label(value),
                 if horizontal {
                     TextAlign::Center
                 } else {
@@ -11888,9 +11964,11 @@ fn keynote_push_line_chart(
     if categories == 0 {
         return Ok(());
     }
-    let (minimum, maximum) = keynote_chart_range(&chart.series, chart.stacked);
+    let (minimum, maximum) = chart
+        .value_axis
+        .range(keynote_chart_range(&chart.series, chart.stacked));
     let span = (maximum - minimum).max(f32::EPSILON);
-    let baseline = plot.y + (maximum - 0.0) / span * plot.height;
+    let baseline = plot.y + (maximum - 0.0_f32.clamp(minimum, maximum)) / span * plot.height;
     keynote_push_chart_axes(
         chart,
         identifier,
@@ -11936,7 +12014,9 @@ fn keynote_push_line_chart(
             } else {
                 value
             };
-            let x = if categories == 1 {
+            let x = if !chart.plot_to_edges {
+                (category as f32 + 0.5) * plot.width / categories as f32
+            } else if categories == 1 {
                 plot.width / 2.0
             } else {
                 category as f32 * plot.width / (categories - 1) as f32
@@ -12026,6 +12106,417 @@ fn keynote_push_line_chart(
     Ok(())
 }
 
+impl IworkChartAxis {
+    fn label(&self, value: f32) -> String {
+        if let Some(decimals) = self.decimals {
+            let factor = 10.0_f64.powi(decimals as i32);
+            format!("{:.*}", decimals, (f64::from(value) * factor).round() / factor)
+        } else {
+            keynote_chart_number(value, false)
+        }
+    }
+
+    fn range(&self, automatic: (f32, f32)) -> (f32, f32) {
+        let minimum = self
+            .minimum
+            .filter(|v| v.is_finite())
+            .unwrap_or(automatic.0);
+        let maximum = self
+            .maximum
+            .filter(|v| v.is_finite())
+            .unwrap_or(automatic.1);
+        if maximum > minimum {
+            (minimum, maximum)
+        } else {
+            automatic
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn iwork_push_radar_chart(
+    chart: &KeynoteChart,
+    identifier: u64,
+    unit_index: u32,
+    part: &str,
+    limits: Limits,
+    objects: &mut Vec<Object>,
+    plot: Rect,
+    z: i32,
+    parent_numeric_id: Option<u32>,
+    parent_stable_id: Option<&str>,
+    serial: &mut u32,
+) -> Result<(), Diagnostic> {
+    let count = chart
+        .categories
+        .len()
+        .max(chart.series.iter().map(Vec::len).max().unwrap_or(0));
+    if count < 3 {
+        return Ok(());
+    }
+    let (minimum, maximum) = chart
+        .value_axis
+        .range(keynote_chart_range(&chart.series, false));
+    let rotation = -std::f32::consts::FRAC_PI_2 + chart.radar_rotation.to_radians();
+    let radius = plot.width.min(plot.height) / 2.0;
+    let center = (plot.width / 2.0, plot.height / 2.0);
+    let point = |index: usize, ratio: f32| {
+        let angle = rotation + std::f32::consts::TAU * index as f32 / count as f32;
+        (
+            center.0 + radius * ratio * angle.cos(),
+            center.1 + radius * ratio * angle.sin(),
+        )
+    };
+    let grid = chart.value_axis.grid.clone().unwrap_or((
+        Paint::Solid(0xb0b0_b0ff),
+        0.5,
+        StrokeStyle::default(),
+    ));
+    for tick in 1..=chart.value_axis.major_intervals {
+        let ratio = tick as f32 / chart.value_axis.major_intervals as f32;
+        let values = vec![ratio; count];
+        let geometry =
+            super::radar_polygon(&values, 1.0, plot.width, plot.height, radius, rotation).unwrap();
+        keynote_push_chart_child(
+            identifier,
+            unit_index,
+            part,
+            limits,
+            objects,
+            plot,
+            z,
+            parent_numeric_id,
+            parent_stable_id,
+            serial,
+            Visual::StrokeStyle {
+                style: grid.2.clone(),
+                visual: Box::new(Visual::PaintedShape {
+                    geometry,
+                    fill: Paint::None,
+                    stroke: grid.0.clone(),
+                    stroke_width: grid.1,
+                }),
+            },
+        )?;
+    }
+    for (index, series) in chart.series.iter().enumerate().rev() {
+        let values = series
+            .iter()
+            .map(|v| (*v - minimum) / (maximum - minimum))
+            .collect::<Vec<_>>();
+        let Some(geometry) =
+            super::radar_polygon(&values, 1.0, plot.width, plot.height, radius, rotation)
+        else {
+            continue;
+        };
+        let line = chart.point_styles.get(index).and_then(|s| s.line.as_ref());
+        keynote_push_chart_child(
+            identifier,
+            unit_index,
+            part,
+            limits,
+            objects,
+            plot,
+            z,
+            parent_numeric_id,
+            parent_stable_id,
+            serial,
+            Visual::StrokeStyle {
+                style: line.map(|s| s.2.clone()).unwrap_or_default(),
+                visual: Box::new(Visual::PaintedShape {
+                    geometry,
+                    fill: chart
+                        .radar_fills
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(Paint::Solid(keynote_chart_color(chart, index))),
+                    stroke: line.map(|s| s.0.clone()).unwrap_or(Paint::None),
+                    stroke_width: line.map_or(0.0, |s| s.1),
+                }),
+            },
+        )?;
+        objects
+            .last_mut()
+            .unwrap()
+            .stable_id
+            .push_str(&format!(":radar-series-{index}"));
+        if let Some(style) = chart.point_styles.get(index) {
+            iwork_push_chart_markers(
+                style,
+                values.iter().enumerate().map(|(i, v)| point(i, *v)),
+                "radar",
+                index,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+            )?;
+        }
+    }
+    for (index, label) in chart.categories.iter().enumerate() {
+        let (x, y) = point(index, 1.0);
+        let dx = x - center.0;
+        let width = 100.0;
+        keynote_push_chart_child(
+            identifier,
+            unit_index,
+            part,
+            limits,
+            objects,
+            Rect {
+                x: plot.x
+                    + x
+                    + if dx.abs() < 0.01 {
+                        -width / 2.0
+                    } else if dx > 0.0 {
+                        8.0
+                    } else {
+                        -width - 8.0
+                    },
+                y: plot.y + y
+                    - chart.category_axis.text.font_size * if y < center.1 { 1.7 } else { 0.0 },
+                width,
+                height: chart.category_axis.text.font_size * 1.2,
+            },
+            z,
+            parent_numeric_id,
+            parent_stable_id,
+            serial,
+            keynote_chart_label_visual(
+                label.clone(),
+                if dx.abs() < 0.01 {
+                    TextAlign::Center
+                } else if dx > 0.0 {
+                    TextAlign::Start
+                } else {
+                    TextAlign::End
+                },
+                &chart.category_axis.text,
+            ),
+        )?;
+    }
+    for tick in 0..=chart.value_axis.major_intervals {
+        let ratio = tick as f32 / chart.value_axis.major_intervals as f32;
+        let (x, y) = point(0, ratio);
+        keynote_push_chart_child(
+            identifier,
+            unit_index,
+            part,
+            limits,
+            objects,
+            Rect {
+                x: plot.x + x - 31.0,
+                y: plot.y + y - 6.0,
+                width: 26.0,
+                height: 12.0,
+            },
+            z,
+            parent_numeric_id,
+            parent_stable_id,
+            serial,
+            keynote_chart_label_visual(
+                keynote_chart_number(minimum + ratio * (maximum - minimum), false),
+                TextAlign::End,
+                &chart.value_axis.text,
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn iwork_push_mixed_chart(
+    chart: &KeynoteChart,
+    identifier: u64,
+    unit_index: u32,
+    part: &str,
+    limits: Limits,
+    objects: &mut Vec<Object>,
+    plot: Rect,
+    z: i32,
+    parent_numeric_id: Option<u32>,
+    parent_stable_id: Option<&str>,
+    serial: &mut u32,
+) -> Result<(), Diagnostic> {
+    // TSCH keeps a per-series kind and value-axis ordinal. A ChartML type code
+    // cannot substitute for these adapter-specific assignments.
+    for ordinal in 0..=usize::from(chart.secondary_axis.is_some()) {
+        let axis = if ordinal == 0 {
+            &chart.value_axis
+        } else {
+            chart.secondary_axis.as_ref().unwrap()
+        };
+        let indices = (0..chart.series.len())
+            .filter(|i| chart.series_axes.get(*i).copied().unwrap_or(0) == ordinal)
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            continue;
+        }
+        let values = indices
+            .iter()
+            .map(|i| chart.series[*i].clone())
+            .collect::<Vec<_>>();
+        let (minimum, maximum) = axis.range(keynote_chart_range(&values, false));
+        let mut labels = chart.clone();
+        labels.value_axis = axis.clone();
+        labels.series = values;
+        labels.kind = KeynoteChartKind::Column;
+        if ordinal == 0 {
+            iwork_push_cartesian_labels(
+                &labels,
+                chart.categories.len(),
+                minimum,
+                maximum,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                false,
+                false,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+            )?;
+            keynote_push_chart_axes(
+                &labels,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                false,
+                plot.y + maximum / (maximum - minimum) * plot.height,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+            )?;
+        } else {
+            let label_width = iwork_chart_value_label_width(&labels);
+            let right_plot = Rect {
+                x: plot.x + plot.width + label_width + 16.0,
+                ..plot
+            };
+            iwork_push_chart_value_ticks(
+                axis,
+                minimum,
+                maximum,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                right_plot,
+                false,
+                label_width,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+            )?;
+            labels.category_axis.title = None;
+            iwork_push_chart_axis_titles(
+                &labels,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                Rect {
+                    x: plot.x
+                        + plot.width
+                        + label_width * 2.0
+                        + axis.title_style.font_size * 2.4
+                        + 25.0,
+                    ..plot
+                },
+                false,
+                label_width,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+            )?;
+        }
+        for kind in [
+            KeynoteChartKind::Column,
+            KeynoteChartKind::Area,
+            KeynoteChartKind::Line,
+        ] {
+            let selected = indices
+                .iter()
+                .copied()
+                .filter(|i| chart.series_kinds.get(*i) == Some(&kind))
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                continue;
+            }
+            let mut layer = labels.clone();
+            layer.kind = kind;
+            layer.value_axis.minimum = Some(minimum);
+            layer.value_axis.maximum = Some(maximum);
+            layer.series = selected.iter().map(|i| chart.series[*i].clone()).collect();
+            layer.colors = selected
+                .iter()
+                .map(|i| keynote_chart_color(chart, *i))
+                .collect();
+            layer.point_styles = selected
+                .iter()
+                .filter_map(|i| chart.point_styles.get(*i).cloned())
+                .collect();
+            layer.categories.clear();
+            layer.value_axis.show_labels = false;
+            layer.value_axis.show_axis = false;
+            layer.value_axis.grid = None;
+            layer.value_axis.minor_grid = None;
+            layer.value_axis.title = None;
+            layer.category_axis.show_axis = false;
+            layer.category_axis.title = None;
+            if kind == KeynoteChartKind::Column {
+                keynote_push_bar_chart(
+                    &layer,
+                    false,
+                    identifier,
+                    unit_index,
+                    part,
+                    limits,
+                    objects,
+                    plot,
+                    z,
+                    parent_numeric_id,
+                    parent_stable_id,
+                    serial,
+                )?;
+            } else {
+                keynote_push_line_chart(
+                    &layer,
+                    identifier,
+                    unit_index,
+                    part,
+                    limits,
+                    objects,
+                    plot,
+                    z,
+                    parent_numeric_id,
+                    parent_stable_id,
+                    serial,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn iwork_push_scatter_chart(
     chart: &KeynoteChart,
@@ -12040,8 +12531,29 @@ fn iwork_push_scatter_chart(
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
-    let (x_min, x_max) = keynote_chart_range(&chart.scatter_x, false);
-    let (y_min, y_max) = keynote_chart_range(&chart.series, false);
+    let x_range = if chart.kind == KeynoteChartKind::Bubble {
+        (
+            chart
+                .scatter_x
+                .iter()
+                .flatten()
+                .copied()
+                .fold(0.0_f32, f32::min),
+            chart
+                .scatter_x
+                .iter()
+                .flatten()
+                .copied()
+                .fold(0.0_f32, f32::max)
+                .max(1.0),
+        )
+    } else {
+        keynote_chart_range(&chart.scatter_x, false)
+    };
+    let (x_min, x_max) = chart.category_axis.range(x_range);
+    let (y_min, y_max) = chart
+        .value_axis
+        .range(keynote_chart_range(&chart.series, false));
     let map_x = |x: f32| (x - x_min) / (x_max - x_min) * plot.width;
     let map_y = |y: f32| (y_max - y) / (y_max - y_min) * plot.height;
     let label_width = iwork_chart_value_label_width(chart);
@@ -12179,6 +12691,59 @@ fn iwork_push_scatter_chart(
                 stroke,
                 "trendline",
             )?;
+        }
+        if chart.kind == KeynoteChartKind::Bubble {
+            let maximum = chart
+                .bubble_sizes
+                .iter()
+                .flatten()
+                .copied()
+                .fold(0.0_f32, f32::max);
+            for (point, ((x, y), size)) in xs
+                .iter()
+                .zip(ys)
+                .zip(&chart.bubble_sizes[index])
+                .enumerate()
+            {
+                let maximum_radius = plot.width.min(plot.height) * 0.145;
+                // Native TSCH reserves a visible two-point minimum before scaling area.
+                // ChartML instead clamps after scaling; those boundaries are not equivalent.
+                let radius = (2.0 + (maximum_radius - 2.0).max(0.0) * (size / maximum).sqrt())
+                    .min(maximum_radius);
+                keynote_push_chart_child(
+                    identifier,
+                    unit_index,
+                    part,
+                    limits,
+                    objects,
+                    Rect {
+                        x: plot.x + map_x(*x) - radius,
+                        y: plot.y + map_y(*y) - radius,
+                        width: radius * 2.0,
+                        height: radius * 2.0,
+                    },
+                    z,
+                    parent_numeric_id,
+                    parent_stable_id,
+                    serial,
+                    Visual::PaintedShape {
+                        geometry: Geometry::Ellipse,
+                        fill: if style.fill == Paint::None {
+                            Paint::Solid(keynote_chart_color(chart, index))
+                        } else {
+                            style.fill.clone()
+                        },
+                        stroke: style.marker_stroke.0.clone(),
+                        stroke_width: style.marker_stroke.1,
+                    },
+                )?;
+                objects
+                    .last_mut()
+                    .unwrap()
+                    .stable_id
+                    .push_str(&format!(":bubble-{index}-{point}"));
+            }
+            continue;
         }
         iwork_push_chart_markers(
             style,
@@ -12561,7 +13126,9 @@ fn keynote_chart_label_visual(text: String, align: TextAlign, style: &KeynoteTex
 }
 
 fn iwork_chart_value_label_width(chart: &KeynoteChart) -> f32 {
-    let (minimum, maximum) = keynote_chart_range(&chart.series, chart.stacked);
+    let (minimum, maximum) = chart
+        .value_axis
+        .range(keynote_chart_range(&chart.series, chart.stacked));
     // ponytail: reuse the existing bounded text-width estimate; browser font
     // metrics can replace it when chart label layout receives measured advances.
     (0..=chart.value_axis.major_intervals)
@@ -12573,7 +13140,7 @@ fn iwork_chart_value_label_width(chart: &KeynoteChart) -> f32 {
                 0.0,
                 0.0,
                 Some((
-                    &keynote_chart_number(value, false),
+                    &chart.value_axis.label(value),
                     chart.value_axis.text.font_size,
                 )),
             )
@@ -12603,11 +13170,16 @@ fn keynote_push_chart_axes(
         (&chart.category_axis, true),
     ]
     .into_iter()
-    .take(if chart.kind == KeynoteChartKind::Scatter {
-        2
-    } else {
-        1
-    }) {
+    .take(
+        if matches!(
+            chart.kind,
+            KeynoteChartKind::Scatter | KeynoteChartKind::Bubble
+        ) {
+            2
+        } else {
+            1
+        },
+    ) {
         for (grid, minor) in [(&axis.grid, false), (&axis.minor_grid, true)] {
             let Some((stroke, stroke_width, style)) = grid else {
                 continue;
@@ -12738,11 +13310,16 @@ fn keynote_push_chart_axes(
                 commands,
             },
             fill: Paint::None,
-            stroke: Paint::Solid(if chart.kind == KeynoteChartKind::Scatter {
-                0x0000_00ff
-            } else {
-                0x7777_77ff
-            }),
+            stroke: Paint::Solid(
+                if matches!(
+                    chart.kind,
+                    KeynoteChartKind::Scatter | KeynoteChartKind::Bubble
+                ) {
+                    0x0000_00ff
+                } else {
+                    0x7777_77ff
+                },
+            ),
             stroke_width: 1.0,
         },
     )
@@ -13497,6 +14074,51 @@ fn keynote_shape(
     Ok((geometry, style, shape))
 }
 
+// Resource and structural-read safety failures stay fatal; an isolated chart's
+// unsupported/corrupt payload cannot discard the rest of an iWork document.
+fn iwork_parse_chart(
+    bytes: &[u8],
+    archives: &[IwaArchive],
+    styles: &[IwaArchive],
+    part: &str,
+    identifier: u64,
+    diagnostics: &mut Vec<Diagnostic>,
+    prefix: &str,
+) -> Result<Option<KeynoteChart>, Diagnostic> {
+    match keynote_chart(bytes, archives, styles, part) {
+        Ok(Some(chart)) => Ok(Some(chart)),
+        Err(error) if error.code != DiagnosticCode::FormatInvalid => Err(error),
+        result => {
+            let reason = result.err().map_or_else(
+                || "unsupported chart type or missing cached data".to_owned(),
+                |error| error.to_string(),
+            );
+            diagnostics.push(
+                Diagnostic::warning(
+                    DiagnosticCode::UnsupportedFeature,
+                    Phase::Parse,
+                    Fidelity::Omitted,
+                    format!("{prefix}_CHART_OMITTED: chart {identifier}: {reason}"),
+                )
+                .in_part(part),
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn iwork_chart_fidelity(
+    chart: &KeynoteChart,
+    part: &str,
+    identifier: u64,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if chart.three_d {
+        diagnostics.push(Diagnostic::warning(DiagnosticCode::UnsupportedFeature, Phase::Render,
+            Fidelity::Approximate, format!("IWORK_CHART_3D_APPROXIMATE: chart {identifier}: cached data is rendered in 2D; native perspective, extrusion, materials and lighting are not reproduced")).in_part(part));
+    }
+}
+
 fn keynote_chart(
     bytes: &[u8],
     archives: &[IwaArchive],
@@ -13597,6 +14219,9 @@ fn keynote_chart(
         7 => (KeynoteChartKind::Bar, true, false),
         8 => (KeynoteChartKind::Area, true, false),
         9 => (KeynoteChartKind::Scatter, false, false),
+        10 | 11 => (KeynoteChartKind::Mixed, false, false),
+        22 => (KeynoteChartKind::Bubble, false, false),
+        27 => (KeynoteChartKind::Radar, false, false),
         12 => (KeynoteChartKind::Column, false, true),
         13 => (KeynoteChartKind::Bar, false, true),
         14 => (KeynoteChartKind::Line, false, true),
@@ -13618,20 +14243,41 @@ fn keynote_chart(
         (row_names, column_names)
     };
     let mut scatter_x = Vec::new();
-    if kind == KeynoteChartKind::Scatter {
+    let mut bubble_sizes = Vec::new();
+    if matches!(kind, KeynoteChartKind::Scatter | KeynoteChartKind::Bubble) {
         // TSCH uses one shared X row (format 0) or successive X/Y row pairs (1).
         let shared_x = numbers_varint(archive, 2, part)?.unwrap_or(0) == 0;
         let mut values = Vec::new();
         let mut names = Vec::new();
-        let step = if shared_x { 1 } else { 2 };
+        let bubble = kind == KeynoteChartKind::Bubble;
+        let step = if bubble {
+            if shared_x { 2 } else { 3 }
+        } else if shared_x {
+            1
+        } else {
+            2
+        };
         for y_index in (1..rows.len()).step_by(step) {
             let x_index = if shared_x { 0 } else { y_index - 1 };
-            let (xs, ys): (Vec<_>, Vec<_>) = rows[x_index]
-                .iter()
-                .copied()
-                .zip(rows[y_index].iter().copied())
-                .filter(|(x, y)| x.is_finite() && y.is_finite())
-                .unzip();
+            let mut xs = Vec::new();
+            let mut ys = Vec::new();
+            let mut sizes = Vec::new();
+            for (point, (&x, &y)) in rows[x_index].iter().zip(&rows[y_index]).enumerate() {
+                let size = if bubble {
+                    rows.get(y_index + 1)
+                        .and_then(|r| r.get(point))
+                        .copied()
+                        .unwrap_or(f32::NAN)
+                } else {
+                    1.0
+                };
+                if x.is_finite() && y.is_finite() && size.is_finite() && size > 0.0 {
+                    xs.push(x);
+                    ys.push(y);
+                    sizes.push(size);
+                }
+            }
+            bubble_sizes.push(sizes);
             scatter_x.push(xs);
             values.push(ys);
             names.push(
@@ -13650,7 +14296,7 @@ fn keynote_chart(
             }
         }
     }
-    if kind != KeynoteChartKind::Scatter {
+    if !matches!(kind, KeynoteChartKind::Scatter | KeynoteChartKind::Bubble) {
         rows.retain(|series| !series.is_empty());
     }
     if rows.iter().all(Vec::is_empty) {
@@ -13729,6 +14375,24 @@ fn keynote_chart(
         } else {
             None
         };
+        let minimum = numbers_first_bytes(&nonstyle, 18, part)?
+            .map(|v| numbers_fixed64(v, 1, part))
+            .transpose()?
+            .flatten();
+        let maximum = numbers_first_bytes(&nonstyle, 17, part)?
+            .map(|v| numbers_fixed64(v, 1, part))
+            .transpose()?
+            .flatten();
+        let decimals = if minimum.is_some() || maximum.is_some() {
+            numbers_first_bytes(&nonstyle, 42, part)?
+                .map(|v| numbers_varint(v, 2, part))
+                .transpose()?
+                .flatten()
+                .filter(|v| *v <= 15)
+                .map(|v| v as usize)
+        } else {
+            None
+        };
         Ok(IworkChartAxis {
             text,
             vertical_labels: !value
@@ -13771,6 +14435,9 @@ fn keynote_chart(
             show_axis: numbers_varint(&style, if value { 25 } else { 24 }, part)?.unwrap_or(1) != 0,
             show_labels: numbers_varint(&nonstyle, if value { 11 } else { 9 }, part)?.unwrap_or(1)
                 != 0,
+            minimum,
+            maximum,
+            decimals,
         })
     };
     let series_nonstyles = numbers_first_bytes(archive, 19, part)?
@@ -13791,6 +14458,9 @@ fn keynote_chart(
                 KeynoteChartKind::Line => 42,
                 KeynoteChartKind::Pie => 44,
                 KeynoteChartKind::Scatter => 45,
+                KeynoteChartKind::Bubble => 40,
+                KeynoteChartKind::Radar => 162,
+                KeynoteChartKind::Mixed => 43,
             };
             Ok(numbers_varint(&properties, field, part)?
                 .or(numbers_varint(&properties, 41, part)?)
@@ -13799,7 +14469,17 @@ fn keynote_chart(
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
     let mut point_styles = Vec::new();
-    if matches!(kind, KeynoteChartKind::Scatter | KeynoteChartKind::Line) {
+    let mut radar_fills = Vec::new();
+    let mut series_kinds = Vec::new();
+    let mut series_axes = Vec::new();
+    if matches!(
+        kind,
+        KeynoteChartKind::Scatter
+            | KeynoteChartKind::Line
+            | KeynoteChartKind::Bubble
+            | KeynoteChartKind::Radar
+            | KeynoteChartKind::Mixed
+    ) {
         let scatter = kind == KeynoteChartKind::Scatter;
         let theme_styles = numbers_references(archive, 17, part)?;
         for index in 0..rows.len() {
@@ -13825,17 +14505,108 @@ fn keynote_chart(
                     .transpose()
                     .map(|stroke| stroke.unwrap_or((Paint::None, 0.0, StrokeStyle::default())))
             };
-            let line = stroke(if scatter { 53 } else { 48 })?;
+            let radar = kind == KeynoteChartKind::Radar;
+            let bubble = kind == KeynoteChartKind::Bubble;
+            let mixed = kind == KeynoteChartKind::Mixed;
+            let series_kind = if mixed {
+                match numbers_varint(&nonstyle, 26, part)?.unwrap_or(0) {
+                    0 => KeynoteChartKind::Line,
+                    1 => KeynoteChartKind::Area,
+                    _ => KeynoteChartKind::Column,
+                }
+            } else {
+                kind
+            };
+            series_kinds.push(series_kind);
+            series_axes.push(numbers_varint(&nonstyle, 64, part)?.unwrap_or(0).min(1) as usize);
+            let line_field = if scatter {
+                53
+            } else if radar {
+                172
+            } else if bubble {
+                47
+            } else if mixed {
+                match series_kind {
+                    KeynoteChartKind::Column => 50,
+                    KeynoteChartKind::Area => 49,
+                    _ => 51,
+                }
+            } else {
+                48
+            };
+            let line = stroke(line_field)?;
+            radar_fills.push(
+                numbers_first_bytes(&properties, 165, part)?
+                    .map(|v| keynote_fill(v, part, geometry.width, geometry.height))
+                    .transpose()?
+                    .unwrap_or(Paint::None),
+            );
+            let visibility_field = if scatter {
+                36
+            } else if radar {
+                160
+            } else if mixed {
+                35
+            } else {
+                33
+            };
+            let symbol_field = if scatter {
+                51
+            } else if radar {
+                163
+            } else if mixed {
+                50
+            } else {
+                48
+            };
+            let size_field = if scatter {
+                74
+            } else if radar {
+                181
+            } else if mixed {
+                73
+            } else {
+                71
+            };
+            let symbol_fill_field = if scatter {
+                59
+            } else if radar {
+                175
+            } else if bubble {
+                55
+            } else if mixed {
+                58
+            } else {
+                56
+            };
+            let symbol_stroke_field = if scatter {
+                80
+            } else if radar {
+                183
+            } else if bubble {
+                76
+            } else if mixed {
+                79
+            } else {
+                77
+            };
+            let symbol_use_stroke_field = if scatter {
+                69
+            } else if radar {
+                179
+            } else if bubble {
+                65
+            } else if mixed {
+                68
+            } else {
+                66
+            };
+
             point_styles.push(IworkPointStyle {
-                symbol: if numbers_varint(&nonstyle, if scatter { 36 } else { 33 }, part)?
-                    .unwrap_or(1)
-                    == 0
-                {
+                symbol: if numbers_varint(&nonstyle, visibility_field, part)?.unwrap_or(1) == 0 {
                     None
                 } else {
-                    match numbers_varint(&nonstyle, if scatter { 51 } else { 48 }, part)?
-                        .unwrap_or(1)
-                    {
+                    match numbers_varint(&nonstyle, symbol_field, part)?.unwrap_or(1) {
                         1 => Some("circle"),
                         2 => Some("triangle"),
                         3 => Some("triangleDown"),
@@ -13846,17 +14617,15 @@ fn keynote_chart(
                         _ => None,
                     }
                 },
-                size: keynote_fixed32_field(&properties, if scatter { 74 } else { 71 }, part)?
+                size: keynote_fixed32_field(&properties, size_field, part)?
                     .filter(|v| v.is_finite() && *v > 0.0 && *v < 1000.0)
                     .unwrap_or(8.0),
-                fill: if numbers_varint(&properties, if scatter { 69 } else { 66 }, part)?
-                    == Some(1)
-                {
+                fill: if numbers_varint(&properties, symbol_use_stroke_field, part)? == Some(1) {
                     line.0.clone()
                 } else {
                     // Line symbols can inherit the series fill independently of its stroke.
-                    let field = if scatter {
-                        59
+                    let field = if scatter || radar || bubble || mixed {
+                        symbol_fill_field
                     } else if numbers_varint(&properties, 61, part)? == Some(1) {
                         14
                     } else {
@@ -13867,11 +14636,13 @@ fn keynote_chart(
                         .transpose()?
                         .unwrap_or(Paint::None)
                 },
-                marker_stroke: stroke(if scatter { 80 } else { 77 })?,
-                line: if scatter {
+                marker_stroke: stroke(symbol_stroke_field)?,
+                line: if bubble {
+                    (numbers_varint(&nonstyle, 17, part)?.unwrap_or(0) != 0).then_some(line)
+                } else if scatter {
                     (numbers_varint(&nonstyle, 29, part)? == Some(1)).then_some(line)
                 } else {
-                    numbers_first_bytes(&properties, 48, part)?
+                    numbers_first_bytes(&properties, line_field, part)?
                         .is_some()
                         .then_some(line)
                 },
@@ -13917,6 +14688,7 @@ fn keynote_chart(
     Ok(Some(KeynoteChart {
         geometry,
         kind,
+        three_d,
         doughnut: chart_type == 25,
         hole_ratio: if chart_type == 25 {
             keynote_fixed32_field(&chart_nonstyle, 27, part)?
@@ -14016,13 +14788,27 @@ fn keynote_chart(
         title_style,
         value_axis: axis(true, 0)?,
         category_axis: axis(
-            kind == KeynoteChartKind::Scatter,
-            usize::from(kind == KeynoteChartKind::Scatter),
+            matches!(kind, KeynoteChartKind::Scatter | KeynoteChartKind::Bubble),
+            usize::from(matches!(
+                kind,
+                KeynoteChartKind::Scatter | KeynoteChartKind::Bubble
+            )),
         )?,
         colors,
         series: rows,
         scatter_x,
         point_styles,
+        bubble_sizes,
+        radar_rotation: keynote_fixed32_field(&chart_nonstyle, 29, part)?.unwrap_or(0.0),
+        radar_fills,
+        series_kinds,
+        series_axes,
+        secondary_axis: if chart_type == 11 {
+            Some(axis(true, 1)?)
+        } else {
+            None
+        },
+        plot_to_edges: kind != KeynoteChartKind::Mixed,
     }))
 }
 
@@ -14113,6 +14899,9 @@ fn keynote_chart_series_colors(
         (KeynoteChartKind::Pie, false) => 17,
         (KeynoteChartKind::Line, false) => 14,
         (KeynoteChartKind::Scatter, _) => 16,
+        (KeynoteChartKind::Bubble, _) => 55,
+        (KeynoteChartKind::Radar, _) => 165,
+        (KeynoteChartKind::Mixed, _) => 16,
     };
     let mut colors = Vec::with_capacity(references.len());
     for identifier in references {
@@ -19280,6 +20069,161 @@ mod tests {
                     ..
                 }
             ));
+        }
+    }
+
+    #[test]
+    fn native_chart_fixtures_isolate_one_corrupt_payload_without_losing_other_charts() {
+        for (file, bytes) in [
+            (
+                "iwork-extended-charts.key",
+                include_bytes!("../../tests/fixtures/iwork-extended-charts.key").as_slice(),
+            ),
+            (
+                "iwork-imported-charts.pages",
+                include_bytes!("../../tests/fixtures/iwork-imported-charts.pages").as_slice(),
+            ),
+        ] {
+            let limits = Limits::default();
+            let package = crate::package::Package::open_iwork(bytes, limits).unwrap();
+            let mut replaced = false;
+            let parts = package
+                .entry_names()
+                .map(|part| {
+                    let bytes = package.required_part(part).unwrap();
+                    if !replaced && super::is_iwa_component(part) {
+                        let archives =
+                            super::parse_iwa_archives(&package, part, &bytes, limits).unwrap();
+                        if archives.iter().any(|a| {
+                            a.messages
+                                .iter()
+                                .any(|m| m.message_type == super::IWORK_CHART_TYPE)
+                        }) {
+                            let records = archives
+                                .iter()
+                                .flat_map(|a| {
+                                    a.messages
+                                        .iter()
+                                        .map(|m| {
+                                            let payload = if !replaced
+                                                && m.message_type == super::IWORK_CHART_TYPE
+                                            {
+                                                replaced = true;
+                                                &[0x0f][..]
+                                            } else {
+                                                m.payload.as_slice()
+                                            };
+                                            iwa_archive(
+                                                a.identifier,
+                                                m.message_type,
+                                                payload,
+                                                &m.data_references,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect::<Vec<_>>();
+                            return (part.to_owned(), iwa_stream(&records));
+                        }
+                    }
+                    (part.to_owned(), bytes.to_vec())
+                })
+                .collect::<Vec<_>>();
+            assert!(replaced);
+            let corrupted = stored_zip(
+                &parts
+                    .iter()
+                    .map(|(n, b)| (n.as_str(), b.as_slice()))
+                    .collect::<Vec<_>>(),
+            );
+            if let Ok(folder) = std::env::var("IWORK_CHART_CORRUPT_OUTPUT") {
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(std::path::Path::new(&folder).join(file), &corrupted).unwrap();
+            }
+            let doc = detect_and_parse(&corrupted, limits).unwrap().unwrap();
+            assert_eq!(doc.units.len(), 4);
+            assert_eq!(
+                doc.objects
+                    .iter()
+                    .filter(|o| matches!(
+                        o.source.locator,
+                        SourceLocator::Iwork { kind: "chart", .. }
+                    ))
+                    .count(),
+                3
+            );
+            assert!(
+                doc.diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("CHART_OMITTED:"))
+            );
+        }
+    }
+
+    #[test]
+    fn native_extended_charts_survive_keynote_and_both_pages_attachment_paths() {
+        for (bytes, expected) in [
+            (
+                include_bytes!("../../tests/fixtures/iwork-extended-charts.key").as_slice(),
+                4,
+            ),
+            (
+                include_bytes!("../../tests/fixtures/iwork-imported-charts.pages").as_slice(),
+                4,
+            ),
+            (
+                include_bytes!("../../tests/fixtures/iwork-extended-charts.pages").as_slice(),
+                1,
+            ),
+        ] {
+            let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+            let charts = document
+                .objects
+                .iter()
+                .filter(|o| matches!(o.source.locator, SourceLocator::Iwork { kind: "chart", .. }))
+                .collect::<Vec<_>>();
+            assert_eq!(charts.len(), expected, "native chart attachment omitted");
+            for chart in charts {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .any(|o| o.parent_numeric_id == Some(chart.numeric_id)),
+                    "chart must contain parsed primitives"
+                );
+            }
+            assert!(
+                !document.objects.iter().any(|o| matches!(
+                    o.source.locator,
+                    SourceLocator::Iwork {
+                        kind: "preview" | "slide-preview",
+                        ..
+                    }
+                )),
+                "embedded previews are not native chart evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn native_charting_basics_preserves_radar_bubble_and_two_axis_charts() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-charting-basics.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        for (unit, count) in [(0, 2), (1, 2), (2, 1), (4, 3), (5, 1), (6, 1), (7, 1)] {
+            assert_eq!(
+                document
+                    .objects
+                    .iter()
+                    .filter(|o| o.unit_index == unit
+                        && matches!(o.source.locator, SourceLocator::Iwork { kind: "chart", .. }))
+                    .count(),
+                count,
+                "native charts missing from sheet {unit}"
+            );
         }
     }
 

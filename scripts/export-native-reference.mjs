@@ -62,6 +62,7 @@ const APPLICATIONS = Object.freeze({
     oracleSuite: "apple-iwork",
     expectedBundleId: "com.apple.iWork.Keynote",
     path: "/Applications/Keynote.app",
+    alternatives: [{ path: "/Applications/Keynote Creator Studio.app", expectedBundleId: "com.apple.Keynote" }],
     captureSemantics: {
       unitType: "slide",
       description: "Individual-slide PDF export in source order, including skipped slides, without notes, comments, borders, numbers, dates, or intermediate build stages.",
@@ -72,6 +73,7 @@ const APPLICATIONS = Object.freeze({
     oracleSuite: "apple-iwork",
     expectedBundleId: "com.apple.iWork.Pages",
     path: "/Applications/Pages.app",
+    alternatives: [{ path: "/Applications/Pages Creator Studio.app", expectedBundleId: "com.apple.Pages" }],
     captureSemantics: {
       unitType: "page",
       description: "Paginated PDF export at Best image quality, without comments or smart annotations.",
@@ -82,6 +84,7 @@ const APPLICATIONS = Object.freeze({
     oracleSuite: "apple-iwork",
     expectedBundleId: "com.apple.iWork.Numbers",
     path: "/Applications/Numbers.app",
+    alternatives: [{ path: "/Applications/Numbers Creator Studio.app", expectedBundleId: "com.apple.Numbers" }],
     printPages: true,
     captureSemantics: {
       unitType: "print-page",
@@ -650,6 +653,12 @@ async function plistValue(applicationPath, key) {
 }
 
 async function applicationMetadata(application) {
+  for (const candidate of [application, ...(application.alternatives ?? [])]) {
+    if ((await stat(candidate.path).catch(() => undefined))?.isDirectory()) {
+      application = { ...application, ...candidate };
+      break;
+    }
+  }
   const applicationStat = await stat(application.path).catch(() => undefined);
   if (applicationStat?.isDirectory() !== true) throw new Error(`${application.name} is not installed at ${application.path}`);
   const [bundleId, version, build] = await Promise.all([
@@ -660,7 +669,7 @@ async function applicationMetadata(application) {
   if (bundleId !== application.expectedBundleId) {
     throw new Error(`${application.name} bundle identifier is ${bundleId}; expected ${application.expectedBundleId}`);
   }
-  return { name: application.name, bundleId, version, build };
+  return { name: application.name, bundleId, version, build, path: application.path };
 }
 
 function environmentMetadata() {
@@ -1164,7 +1173,10 @@ async function exportReference({ fixture, output, allowPrintPages, sheetViewport
       ? nativeDirectory
       : resolve(nativeDirectory, "reference.pdf");
     await runCommand("/usr/bin/osascript", ["-", copiedFixture, scriptDestination], {
-      input: APPLE_SCRIPTS[applicationKey],
+      input: APPLE_SCRIPTS[applicationKey].replace(
+        `tell application "${application.name}"`,
+        `tell application ${JSON.stringify(app.path)}`,
+      ),
       timeoutMs: NATIVE_EXPORT_TIMEOUT_MS,
     });
     await rm(copiedFixture);

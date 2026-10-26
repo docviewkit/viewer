@@ -3230,38 +3230,14 @@ pub(super) fn chart_area_3d_axis_labels(
 }
 
 pub(super) fn radar_geometry(values: &[f32], maximum: f32, bounds: Rect) -> Option<Geometry> {
-    if values.len() < 3 || !maximum.is_finite() || maximum <= 0.0 {
-        return None;
-    }
-    let center_x = bounds.width / 2.0;
-    let center_y = bounds.height / 2.0;
-    let radius = bounds.width.min(bounds.height) * 0.42;
-    let mut commands = Vec::with_capacity(values.len() + 1);
-    for (index, value) in values.iter().copied().enumerate() {
-        let angle = -std::f32::consts::FRAC_PI_2
-            + std::f32::consts::TAU * index as f32 / values.len() as f32;
-        let point_radius = radius * (value / maximum).clamp(0.0, 1.0);
-        let point = (
-            center_x + point_radius * angle.cos(),
-            center_y + point_radius * angle.sin(),
-        );
-        commands.push(if index == 0 {
-            PathCommand::MoveTo {
-                x: point.0,
-                y: point.1,
-            }
-        } else {
-            PathCommand::LineTo {
-                x: point.0,
-                y: point.1,
-            }
-        });
-    }
-    commands.push(PathCommand::ClosePath);
-    Some(Geometry::Path {
-        fill_rule: FillRule::NonZero,
-        commands,
-    })
+    super::radar_polygon(
+        values,
+        maximum,
+        bounds.width,
+        bounds.height,
+        bounds.width.min(bounds.height) * 0.42,
+        -std::f32::consts::FRAC_PI_2,
+    )
 }
 
 pub(super) fn chart_bubble_bounds(

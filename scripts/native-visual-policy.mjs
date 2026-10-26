@@ -25,9 +25,9 @@ export const NATIVE_FORMAT_RULES = Object.freeze({
   doc: Object.freeze({ oracleSuite: "microsoft-office", application: "word", applicationName: "Microsoft Word", bundleId: "com.microsoft.Word", extension: ".doc", unitType: "page", capture: "pdf-export" }),
   xlsx: Object.freeze({ oracleSuite: "microsoft-office", application: "excel", applicationName: "Microsoft Excel", bundleId: "com.microsoft.Excel", extension: ".xlsx", unitType: "sheet", capture: "sheet-viewport" }),
   xls: Object.freeze({ oracleSuite: "microsoft-office", application: "excel", applicationName: "Microsoft Excel", bundleId: "com.microsoft.Excel", extension: ".xls", unitType: "sheet", capture: "sheet-viewport" }),
-  keynote: Object.freeze({ oracleSuite: "apple-iwork", application: "keynote", applicationName: "Keynote", bundleId: "com.apple.iWork.Keynote", extension: ".key", unitType: "slide", capture: "pdf-export" }),
-  pages: Object.freeze({ oracleSuite: "apple-iwork", application: "pages", applicationName: "Pages", bundleId: "com.apple.iWork.Pages", extension: ".pages", unitType: "page", capture: "pdf-export" }),
-  numbers: Object.freeze({ oracleSuite: "apple-iwork", application: "numbers", applicationName: "Numbers", bundleId: "com.apple.iWork.Numbers", extension: ".numbers", unitType: "sheet", capture: "sheet-viewport" }),
+  keynote: Object.freeze({ oracleSuite: "apple-iwork", application: "keynote", applicationName: "Keynote", bundleId: "com.apple.iWork.Keynote", alternateBundleId: "com.apple.Keynote", extension: ".key", unitType: "slide", capture: "pdf-export" }),
+  pages: Object.freeze({ oracleSuite: "apple-iwork", application: "pages", applicationName: "Pages", bundleId: "com.apple.iWork.Pages", alternateBundleId: "com.apple.Pages", extension: ".pages", unitType: "page", capture: "pdf-export" }),
+  numbers: Object.freeze({ oracleSuite: "apple-iwork", application: "numbers", applicationName: "Numbers", bundleId: "com.apple.iWork.Numbers", alternateBundleId: "com.apple.Numbers", extension: ".numbers", unitType: "sheet", capture: "sheet-viewport" }),
   odp: Object.freeze({ oracleSuite: "microsoft-office", application: "powerpoint", applicationName: "Microsoft PowerPoint", bundleId: "com.microsoft.Powerpoint", extension: ".odp", unitType: "slide", capture: "pdf-export" }),
   odt: Object.freeze({ oracleSuite: "microsoft-office", application: "word", applicationName: "Microsoft Word", bundleId: "com.microsoft.Word", extension: ".odt", unitType: "page", capture: "pdf-export" }),
   ods: Object.freeze({ oracleSuite: "microsoft-office", application: "excel", applicationName: "Microsoft Excel", bundleId: "com.microsoft.Excel", extension: ".ods", unitType: "sheet", capture: "sheet-viewport" }),
@@ -520,7 +520,7 @@ export async function validateNativeReference(suiteDirectory, suite, testCase, g
   }
   const expectedApplication = suite.oracleFingerprint.applications[rule.application];
   if (reference.referenceApplication?.name !== rule.applicationName
-    || reference.referenceApplication?.bundleId !== rule.bundleId
+    || ![rule.bundleId, rule.alternateBundleId].filter(Boolean).includes(reference.referenceApplication?.bundleId)
     || reference.referenceApplication?.version !== expectedApplication.version
     || reference.referenceApplication?.build !== expectedApplication.build) {
     throw new Error(`${label} application identity does not match oracleFingerprint`);
