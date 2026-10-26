@@ -24,12 +24,17 @@ const fixtures = [
   ['iwork-extended-charts.pages', 1],
   ['iwork-static-charts.key', 17],
   ['iwork-manual-axis.key', 1],
+  ['iwork-chart-boundaries.key', 8],
+  ['numbers-multiple-sheets-charts.numbers', 2],
+  ['numbers-dice-lab.numbers', 2],
+  ['numbers-team-budget.numbers', 2],
+  ['numbers-retirement.numbers', 1],
 ];
 await mkdir(output, { recursive: true });
 for (const fixture of matrix.fixtures) assert.equal(sha256(await readFile(`tests/fixtures/${fixture.file}`)), fixture.sha256, `${fixture.file} changed after coverage review`);
 // The native PDF remains the oracle. This checks its source and artifact chain,
 // then compares extracted native vector geometry, independently of our renderer.
-for (const host of ['numbers', 'keynote', 'pages', 'manual-axis']) {
+for (const host of ['numbers', 'keynote', 'pages', 'manual-axis', 'boundaries', 'existing-multiple', 'existing-dice', 'existing-team', 'existing-retirement']) {
   const folder = `tests/fixtures/iwork-chart-oracles/${host}`;
   const reference = await json(`${folder}/reference.json`);
   assert.equal(reference.oracleSuite, 'apple-iwork');
@@ -61,6 +66,74 @@ try {
         check('Keynote: manual-axis bar geometry matches native PDF', bars.length === 3 && bars.every((o, i) => {
           const b = o.bounds; const [x, y, w, h] = oracle.bars[i]; return [b.x-x, b.y-y, b.x+b.width-x-w, b.y+b.height-y-h].every(v => Math.abs(v) < 1.5);
         }));
+      }
+      if (file === 'numbers-dice-lab.numbers') {
+        const oracle = await json('tests/fixtures/iwork-chart-oracles/existing-dice/geometry.json');
+        const title = scene.objects.find(o => unwrap(o.visual).runs?.some(r => r.text === oracle.title));
+        check('Numbers dice: native donut title center', title !== undefined && Math.abs(title.bounds.x + title.bounds.width/2 - oracle.titleCenterX)<1);
+      }
+      if (file === 'numbers-team-budget.numbers') {
+        const oracle = await json('tests/fixtures/iwork-chart-oracles/existing-team/geometry.json');
+        const labels = scene.objects.filter(o => o.unitIndex === oracle.unit && o.source?.kind === 'chart-series').flatMap(o => unwrap(o.visual).runs?.map(r => r.text) ?? []);
+        check('Numbers team: native integer axis precision', oracle.axisLabels.every(t => labels.includes(t)));
+      }
+      if (file === 'numbers-retirement.numbers') {
+        const oracle = await json('tests/fixtures/iwork-chart-oracles/existing-retirement/geometry.json');
+        const areas = scene.objects.filter(o => o.source?.kind === 'chart-series' && o.unitIndex === oracle.unit && o.bounds.width>200 && o.bounds.height>100).map(o => unwrap(o.visual)).filter(v => v.kind === 'painted-shape' && v.fill.kind === 'solid');
+        check('Numbers retirement: native opaque area fill', areas.length>0 && areas.every(v => (v.fill.color & 255)/255 === oracle.areaOpacity));
+      }
+      if (file === 'numbers-multiple-sheets-charts.numbers') {
+        const oracle = await json('tests/fixtures/iwork-chart-oracles/existing-multiple/geometry.json');
+        const title = scene.objects.find(o => unwrap(o.visual).runs?.some(r => r.text === oracle.title));
+        check('Numbers: donut title is centered on native plot, independent of axis formatting', title !== undefined && Math.abs(title.bounds.x + title.bounds.width/2 - oracle.titleCenterX)<1);
+      }
+      if (file === 'iwork-chart-boundaries.key') {
+        const oracle = await json('tests/fixtures/iwork-chart-oracles/boundaries/geometry.json');
+        for (const unit of oracle.units) {
+          const children = scene.objects.filter(o => o.unitIndex === unit.unit && o.source?.kind === 'chart-series');
+          const labels = children.flatMap(o => unwrap(o.visual).runs?.map(r => r.text) ?? []);
+          check(`Keynote boundary ${unit.unit}: native ticks and categories`, unit.labels.every(t => labels.includes(t)));
+          const shapes = children.map(o => ({ bounds: o.bounds, visual: unwrap(o.visual) })).filter(o => o.visual.kind === 'painted-shape');
+          const points = shapes.flatMap(o => o.visual.geometry.commands?.filter(p => ['moveTo', 'lineTo'].includes(p.kind)).map(p => [p.x + o.bounds.x, p.y + o.bounds.y]) ?? []);
+          check(`Keynote boundary ${unit.unit}: finite paths`, shapes.every(o => (o.visual.geometry.commands ?? []).filter(p => ['moveTo', 'lineTo'].includes(p.kind)).every(p => Number.isFinite(p.x) && Number.isFinite(p.y))));
+          for (const [i, drawing] of unit.drawings.entries()) {
+            const expectedPoints = drawing.points;
+            if (expectedPoints.length) {
+              const matching = shapes.filter(o => {
+                const paint = drawing.filled ? o.visual.fill : o.visual.stroke;
+                if (paint.kind !== 'solid') return false;
+                const rgb = [24, 16, 8].map(shift => ((paint.color >>> shift) & 255) / 255);
+                return rgb.every((v, k) => Math.abs(v - drawing.color[k]) < .04);
+              });
+              check(`Keynote boundary ${unit.unit}: native path ${i}`, matching.some(o => {
+                const actual = o.visual.geometry.commands?.filter(p => ['moveTo', 'lineTo'].includes(p.kind)).map(p => [p.x + o.bounds.x, p.y + o.bounds.y]) ?? [];
+                const distance = (p, a, b) => {
+                  const dx=b[0]-a[0], dy=b[1]-a[1];
+                  const t=Math.max(0,Math.min(1,((p[0]-a[0])*dx+(p[1]-a[1])*dy)/(dx*dx+dy*dy || 1)));
+                  return Math.hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy);
+                };
+                let previous, start;
+                const mids=[];
+                for (const command of o.visual.geometry.commands ?? []) {
+                  const p = command.kind === 'closePath' ? start : [command.x+o.bounds.x,command.y+o.bounds.y];
+                  if (command.kind === 'moveTo') start=p;
+                  else if (previous && p) mids.push([(previous[0]+p[0])/2,(previous[1]+p[1])/2]);
+                  previous=p;
+                }
+                const edges=expectedPoints.filter((_,i) => i%2===0).map((a,i) => [a,expectedPoints[i*2+1]]);
+                if (drawing.filled) edges.push([expectedPoints.at(-1),expectedPoints[0]]);
+                return expectedPoints.every(p => actual.some(a => Math.hypot(a[0]-p[0], a[1]-p[1]) < 1.5))
+                  && mids.every(p => edges.some(([a,b]) => distance(p,a,b)<1.5))
+                  && (!drawing.filled || Math.abs((o.visual.fill.color & 255)/255-drawing.opacity)<.01);
+              }));
+            } else {
+              check(`Keynote boundary ${unit.unit}: native rectangle ${i}`, shapes.some(o => {
+                const [x,y,w,h] = drawing.bounds; const b=o.bounds;
+                return [b.x-x,b.y-y,b.x+b.width-x-w,b.y+b.height-y-h].every(v => Math.abs(v)<1.5);
+              }));
+            }
+          }
+        }
       }
       if (file !== native.fixture) continue;
       for (const radar of native.radar) {

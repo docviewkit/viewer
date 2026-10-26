@@ -534,6 +534,9 @@ struct IworkChartAxis {
     minimum: Option<f32>,
     maximum: Option<f32>,
     decimals: Option<usize>,
+    logarithmic: bool,
+    percent_stacked: bool,
+    percent_format: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11083,9 +11086,9 @@ fn keynote_push_chart(
             limits,
             objects,
             Rect {
-                x: if cartesian { plot.x } else { bounds.x },
+                x: plot.x,
                 y: bounds.y,
-                width: if cartesian { plot.width } else { bounds.width },
+                width: plot.width,
                 height: title_height,
             },
             z,
@@ -11567,6 +11570,42 @@ fn iwork_push_cartesian_labels(
     Ok(())
 }
 
+// TSCH percentage stacks normalize absolute magnitudes, including negatives.
+// ChartML uses independent signed stacks, so its normalization stays separate.
+fn iwork_chart_plot_series(chart: &KeynoteChart) -> std::borrow::Cow<'_, [Vec<f32>]> {
+    if !chart.stacked || !chart.value_axis.percent_stacked {
+        return std::borrow::Cow::Borrowed(&chart.series);
+    }
+    let count = chart.series.iter().map(Vec::len).max().unwrap_or(0);
+    let mut totals = vec![0.0_f64; count];
+    for series in &chart.series {
+        for (category, value) in series.iter().enumerate().filter(|(_, v)| v.is_finite()) {
+            totals[category] += f64::from(*value).abs();
+        }
+    }
+    std::borrow::Cow::Owned(
+        chart
+            .series
+            .iter()
+            .map(|series| {
+                series
+                    .iter()
+                    .enumerate()
+                    .map(|(category, value)| {
+                        if !value.is_finite() {
+                            f32::NAN
+                        } else if totals[category] > 0.0 {
+                            (f64::from(*value).abs() / totals[category]) as f32
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn keynote_push_bar_chart(
     chart: &KeynoteChart,
@@ -11582,13 +11621,12 @@ fn keynote_push_bar_chart(
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
-    let categories = chart.series.iter().map(Vec::len).max().unwrap_or(0);
+    let plot_series = iwork_chart_plot_series(chart);
+    let categories = plot_series.iter().map(Vec::len).max().unwrap_or(0);
     if categories == 0 {
         return Ok(());
     }
-    let (minimum, maximum) = chart
-        .value_axis
-        .range(keynote_chart_range(&chart.series, chart.stacked));
+    let (minimum, maximum) = chart.value_axis.data_range(&chart.series, chart.stacked);
     let span = (maximum - minimum).max(f32::EPSILON);
     let baseline = if horizontal {
         plot.x + (0.0_f32.clamp(minimum, maximum) - minimum) / span * plot.width
@@ -11651,9 +11689,13 @@ fn keynote_push_bar_chart(
     };
     let mut positive = vec![0.0_f32; categories];
     let mut negative = vec![0.0_f32; categories];
-    for (series_index, series) in chart.series.iter().enumerate() {
+    for (series_index, series) in plot_series.iter().enumerate() {
         for category in 0..categories {
-            let value = series.get(category).copied().unwrap_or(0.0);
+            let raw_value = series.get(category).copied().unwrap_or(f32::NAN);
+            if !raw_value.is_finite() {
+                continue;
+            }
+            let value = raw_value;
             let start = if chart.stacked {
                 if value >= 0.0 {
                     positive[category]
@@ -11675,13 +11717,35 @@ fn keynote_push_bar_chart(
             let visible_end = end.clamp(minimum, maximum);
             let (start_position, end_position) = if horizontal {
                 (
-                    plot.x + (visible_start - minimum) / span * plot.width,
-                    plot.x + (visible_end - minimum) / span * plot.width,
+                    plot.x
+                        + chart
+                            .value_axis
+                            .ratio(visible_start, minimum, maximum)
+                            .unwrap_or(0.0)
+                            * plot.width,
+                    plot.x
+                        + chart
+                            .value_axis
+                            .ratio(visible_end, minimum, maximum)
+                            .unwrap_or(0.0)
+                            * plot.width,
                 )
             } else {
                 (
-                    plot.y + (maximum - visible_start) / span * plot.height,
-                    plot.y + (maximum - visible_end) / span * plot.height,
+                    plot.y
+                        + (1.0
+                            - chart
+                                .value_axis
+                                .ratio(visible_start, minimum, maximum)
+                                .unwrap_or(0.0))
+                            * plot.height,
+                    plot.y
+                        + (1.0
+                            - chart
+                                .value_axis
+                                .ratio(visible_end, minimum, maximum)
+                                .unwrap_or(0.0))
+                            * plot.height,
                 )
             };
             let group_offset = if chart.stacked {
@@ -11704,7 +11768,7 @@ fn keynote_push_bar_chart(
                     height: (end_position - start_position).abs().max(0.5),
                 }
             };
-            if value != 0.0 {
+            if value != 0.0 && (!chart.value_axis.logarithmic || value > 0.0) {
                 keynote_push_chart_child(
                     identifier,
                     unit_index,
@@ -11796,11 +11860,7 @@ fn keynote_push_bar_chart(
                         height: 12.0,
                     }
                 };
-                let percent = chart
-                    .series
-                    .iter()
-                    .flatten()
-                    .all(|value| value.abs() <= 1.0 + f32::EPSILON);
+                let percent = chart.value_axis.percent_stacked;
                 keynote_push_chart_child(
                     identifier,
                     unit_index,
@@ -11842,10 +11902,9 @@ fn iwork_push_chart_value_ticks(
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
-    let span = (maximum - minimum).max(f32::EPSILON);
     for tick in (0..=axis.major_intervals).filter(|_| axis.show_labels) {
         let ratio = tick as f32 / axis.major_intervals as f32;
-        let value = minimum + span * ratio;
+        let value = axis.tick_value(minimum, maximum, ratio);
         let bounds = if horizontal {
             Rect {
                 x: plot.x + plot.width * ratio - 20.0,
@@ -11960,13 +12019,12 @@ fn keynote_push_line_chart(
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
-    let categories = chart.series.iter().map(Vec::len).max().unwrap_or(0);
+    let plot_series = iwork_chart_plot_series(chart);
+    let categories = plot_series.iter().map(Vec::len).max().unwrap_or(0);
     if categories == 0 {
         return Ok(());
     }
-    let (minimum, maximum) = chart
-        .value_axis
-        .range(keynote_chart_range(&chart.series, chart.stacked));
+    let (minimum, maximum) = chart.value_axis.data_range(&chart.series, chart.stacked);
     let span = (maximum - minimum).max(f32::EPSILON);
     let baseline = plot.y + (maximum - 0.0_f32.clamp(minimum, maximum)) / span * plot.height;
     keynote_push_chart_axes(
@@ -11996,24 +12054,37 @@ fn keynote_push_line_chart(
         objects,
         plot,
         false,
-        true,
+        chart.plot_to_edges,
         z,
         parent_numeric_id,
         parent_stable_id,
         serial,
     )?;
+    let area = chart.kind == KeynoteChartKind::Area;
     let mut cumulative = vec![0.0_f32; categories];
-    for (series_index, series) in chart.series.iter().enumerate() {
+    if area && chart.stacked {
+        for values in plot_series.iter() {
+            for (category, total) in cumulative.iter_mut().enumerate() {
+                if let Some(value) = values.get(category).filter(|v| v.is_finite()) {
+                    *total += value;
+                }
+            }
+        }
+    }
+    for ordinal in 0..chart.series.len() {
+        // Native area layers paint the first series last; this matters where
+        // signed stacked bands cross. Lines retain their authored paint order.
+        let series_index = if area {
+            chart.series.len() - 1 - ordinal
+        } else {
+            ordinal
+        };
+        let series = &plot_series[series_index];
         let mut commands = Vec::new();
         let mut points = Vec::new();
+        let mut lower = Vec::new();
+        let mut connected = false;
         for (category, cumulative_value) in cumulative.iter_mut().enumerate() {
-            let value = series.get(category).copied().unwrap_or(0.0);
-            let plotted = if chart.stacked {
-                *cumulative_value += value;
-                *cumulative_value
-            } else {
-                value
-            };
             let x = if !chart.plot_to_edges {
                 (category as f32 + 0.5) * plot.width / categories as f32
             } else if categories == 1 {
@@ -12021,28 +12092,55 @@ fn keynote_push_line_chart(
             } else {
                 category as f32 * plot.width / (categories - 1) as f32
             };
-            let y = (maximum - plotted) / span * plot.height;
+            let value = series.get(category).copied().unwrap_or(f32::NAN);
+            let valid = value.is_finite() && (!chart.value_axis.logarithmic || value > 0.0);
+            let (plotted, bottom) = if area && chart.stacked {
+                let top = *cumulative_value;
+                if valid {
+                    *cumulative_value -= value;
+                }
+                (top, *cumulative_value)
+            } else {
+                (value, 0.0_f32.clamp(minimum, maximum))
+            };
+            lower.push((
+                x,
+                (1.0 - chart
+                    .value_axis
+                    .ratio(bottom, minimum, maximum)
+                    .unwrap_or(0.0))
+                    * plot.height,
+            ));
+            if !valid {
+                // TSCH line gaps break the path; area gaps bridge finite values.
+                // Neither representation emits NaN geometry or a zero marker.
+                connected = false;
+                continue;
+            }
+            let y = (1.0
+                - chart
+                    .value_axis
+                    .ratio(plotted, minimum, maximum)
+                    .unwrap_or(0.0))
+                * plot.height;
             points.push((x, y));
-        }
-        if chart.kind == KeynoteChartKind::Area {
-            commands.push(PathCommand::MoveTo {
-                x: points.first().map_or(0.0, |point| point.0),
-                y: (baseline - plot.y).clamp(0.0, plot.height),
-            });
-        }
-        for (index, (x, y)) in points.iter().copied().enumerate() {
-            commands.push(if index == 0 && chart.kind == KeynoteChartKind::Line {
+            commands.push(if !area && !connected {
+                PathCommand::MoveTo { x, y }
+            } else if area && commands.is_empty() {
                 PathCommand::MoveTo { x, y }
             } else {
                 PathCommand::LineTo { x, y }
             });
+            connected = true;
         }
-        if chart.kind == KeynoteChartKind::Area {
-            commands.push(PathCommand::LineTo {
-                x: points.last().map_or(plot.width, |point| point.0),
-                y: (baseline - plot.y).clamp(0.0, plot.height),
-            });
+        if area && !points.is_empty() {
+            for (x, y) in lower.into_iter().rev() {
+                commands.push(PathCommand::LineTo { x, y });
+            }
             commands.push(PathCommand::ClosePath);
+        }
+        if commands.is_empty() {
+            continue;
         }
         let color = keynote_chart_color(chart, series_index);
         let line = chart
@@ -12067,7 +12165,7 @@ fn keynote_push_line_chart(
                         commands,
                     },
                     fill: if chart.kind == KeynoteChartKind::Area {
-                        Paint::Solid(keynote_color_opacity(color, 0.55))
+                        Paint::Solid(color)
                     } else {
                         Paint::None
                     },
@@ -12108,12 +12206,72 @@ fn keynote_push_line_chart(
 
 impl IworkChartAxis {
     fn label(&self, value: f32) -> String {
-        if let Some(decimals) = self.decimals {
+        let value = if self.percent_format {
+            value * 100.0
+        } else {
+            value
+        };
+        let mut label = if let Some(decimals) = self.decimals {
             let factor = 10.0_f64.powi(decimals as i32);
-            format!("{:.*}", decimals, (f64::from(value) * factor).round() / factor)
+            format!(
+                "{:.*}",
+                decimals,
+                (f64::from(value) * factor).round() / factor
+            )
         } else {
             keynote_chart_number(value, false)
+        };
+        if self.percent_format {
+            label.push('%');
         }
+        label
+    }
+
+    fn ratio(&self, value: f32, minimum: f32, maximum: f32) -> Option<f32> {
+        if !value.is_finite() {
+            return None;
+        }
+        if self.logarithmic {
+            super::logarithmic_axis_ratio(value, minimum, maximum)
+        } else {
+            Some((value - minimum) / (maximum - minimum).max(f32::EPSILON))
+        }
+    }
+
+    fn tick_value(&self, minimum: f32, maximum: f32, ratio: f32) -> f32 {
+        if self.logarithmic {
+            10.0_f32.powf(minimum.log10() + (maximum.log10() - minimum.log10()) * ratio)
+        } else {
+            minimum + (maximum - minimum) * ratio
+        }
+    }
+
+    fn data_range(&self, series: &[Vec<f32>], stacked: bool) -> (f32, f32) {
+        if self.percent_stacked && stacked {
+            return self.range((0.0, 1.0));
+        }
+        if self.logarithmic {
+            let (min, max) = series
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .fold((f32::INFINITY, 0.0_f32), |(min, max), v| {
+                    (min.min(v), max.max(v))
+                });
+            let automatic = if min.is_finite() {
+                let low = min.log10().floor();
+                (
+                    10.0_f32.powf(low),
+                    10.0_f32.powf(max.log10().ceil().max(low + 1.0)),
+                )
+            } else {
+                (1.0, 10.0)
+            };
+            let range = self.range(automatic);
+            return if range.0 > 0.0 { range } else { automatic };
+        }
+        self.range(keynote_chart_range(series, stacked))
     }
 
     fn range(&self, automatic: (f32, f32)) -> (f32, f32) {
@@ -12154,9 +12312,7 @@ fn iwork_push_radar_chart(
     if count < 3 {
         return Ok(());
     }
-    let (minimum, maximum) = chart
-        .value_axis
-        .range(keynote_chart_range(&chart.series, false));
+    let (minimum, maximum) = chart.value_axis.data_range(&chart.series, false);
     let rotation = -std::f32::consts::FRAC_PI_2 + chart.radar_rotation.to_radians();
     let radius = plot.width.min(plot.height) / 2.0;
     let center = (plot.width / 2.0, plot.height / 2.0);
@@ -12362,7 +12518,7 @@ fn iwork_push_mixed_chart(
             .iter()
             .map(|i| chart.series[*i].clone())
             .collect::<Vec<_>>();
-        let (minimum, maximum) = axis.range(keynote_chart_range(&values, false));
+        let (minimum, maximum) = axis.data_range(&values, false);
         let mut labels = chart.clone();
         labels.value_axis = axis.clone();
         labels.series = values;
@@ -12551,9 +12707,7 @@ fn iwork_push_scatter_chart(
         keynote_chart_range(&chart.scatter_x, false)
     };
     let (x_min, x_max) = chart.category_axis.range(x_range);
-    let (y_min, y_max) = chart
-        .value_axis
-        .range(keynote_chart_range(&chart.series, false));
+    let (y_min, y_max) = chart.value_axis.data_range(&chart.series, false);
     let map_x = |x: f32| (x - x_min) / (x_max - x_min) * plot.width;
     let map_y = |y: f32| (y_max - y) / (y_max - y_min) * plot.height;
     let label_width = iwork_chart_value_label_width(chart);
@@ -13126,15 +13280,16 @@ fn keynote_chart_label_visual(text: String, align: TextAlign, style: &KeynoteTex
 }
 
 fn iwork_chart_value_label_width(chart: &KeynoteChart) -> f32 {
-    let (minimum, maximum) = chart
-        .value_axis
-        .range(keynote_chart_range(&chart.series, chart.stacked));
+    let (minimum, maximum) = chart.value_axis.data_range(&chart.series, chart.stacked);
     // ponytail: reuse the existing bounded text-width estimate; browser font
     // metrics can replace it when chart label layout receives measured advances.
     (0..=chart.value_axis.major_intervals)
         .map(|tick| {
-            let value = minimum
-                + (maximum - minimum) * tick as f32 / chart.value_axis.major_intervals as f32;
+            let value = chart.value_axis.tick_value(
+                minimum,
+                maximum,
+                tick as f32 / chart.value_axis.major_intervals as f32,
+            );
             keynote_bounds(
                 KeynoteGeometry::default(),
                 0.0,
@@ -14289,7 +14444,7 @@ fn keynote_chart(
         }
         rows = values;
         series_names = names;
-    } else {
+    } else if !matches!(kind, KeynoteChartKind::Line | KeynoteChartKind::Area) {
         for value in rows.iter_mut().flatten() {
             if !value.is_finite() {
                 *value = 0.0;
@@ -14337,6 +14492,7 @@ fn keynote_chart(
             ..KeynoteTextStyle::default()
         },
     )?;
+    let automatic_value_range = keynote_chart_range(&rows, stacked);
     let axis = |value: bool, ordinal: usize| -> Result<IworkChartAxis, Diagnostic> {
         let style = iwork_chart_properties(
             stylesheet_archives,
@@ -14383,17 +14539,23 @@ fn keynote_chart(
             .map(|v| numbers_fixed64(v, 1, part))
             .transpose()?
             .flatten();
-        let decimals = if minimum.is_some() || maximum.is_some() {
-            numbers_first_bytes(&nonstyle, 42, part)?
-                .map(|v| numbers_varint(v, 2, part))
-                .transpose()?
-                .flatten()
-                .filter(|v| *v <= 15)
-                .map(|v| v as usize)
-        } else {
-            None
-        };
-        Ok(IworkChartAxis {
+        let number_format = numbers_first_bytes(&nonstyle, 42, part)?;
+        let decimals = number_format
+            .map(|v| numbers_varint(v, 2, part))
+            .transpose()?
+            .flatten()
+            .filter(|v| *v <= 15)
+            .map(|v| v as usize);
+        let scale = numbers_varint(&nonstyle, 8, part)?.unwrap_or(0);
+        let percent_format = number_format
+            .map(|v| numbers_varint(v, 1, part))
+            .transpose()?
+            .flatten()
+            == Some(258);
+        let mut axis = IworkChartAxis {
+            logarithmic: scale == 2,
+            percent_stacked: scale == 3,
+            percent_format: percent_format || scale == 3,
             text,
             vertical_labels: !value
                 && keynote_fixed32_field(&style, 9, part)?
@@ -14404,7 +14566,14 @@ fn keynote_chart(
             major_intervals: if value {
                 numbers_varint(&nonstyle, 5, part)?
                     .filter(|count| *count > 0)
-                    .unwrap_or(4)
+                    .unwrap_or_else(|| {
+                        let (minimum, maximum) = automatic_value_range;
+                        if minimum < 0.0 && maximum > 0.0 && scale != 3 {
+                            8
+                        } else {
+                            4
+                        }
+                    })
                     .min(64) as u32
             } else {
                 4
@@ -14438,7 +14607,13 @@ fn keynote_chart(
             minimum,
             maximum,
             decimals,
-        })
+        };
+        if axis.logarithmic && numbers_varint(&nonstyle, 5, part)?.is_none() {
+            let (minimum, maximum) = axis.data_range(&rows, stacked);
+            axis.major_intervals =
+                (maximum.log10() - minimum.log10()).round().clamp(1.0, 64.0) as u32;
+        }
+        Ok(axis)
     };
     let series_nonstyles = numbers_first_bytes(archive, 19, part)?
         .map(|bytes| keynote_chart_style_references(bytes, part))
@@ -14685,6 +14860,22 @@ fn keynote_chart(
         .map(|bytes| keynote_geometry(bytes, part))
         .transpose()?
         .filter(|geometry| geometry.width > 0.0 && geometry.height > 0.0);
+    let category_nonstyle = iwork_chart_properties(
+        archives,
+        numbers_references(archive, 16, part)?
+            .first()
+            .copied()
+            .unwrap_or(0),
+        IWORK_CHART_AXIS_NONSTYLE_TYPE,
+        part,
+    )?;
+    let plot_to_edges = numbers_varint(&category_nonstyle, 7, part)?
+        .map_or(kind != KeynoteChartKind::Mixed, |v| v != 0);
+    let secondary_axis = if chart_type == 11 {
+        Some(axis(true, 1)?)
+    } else {
+        None
+    };
     Ok(Some(KeynoteChart {
         geometry,
         kind,
@@ -14803,12 +14994,8 @@ fn keynote_chart(
         radar_fills,
         series_kinds,
         series_axes,
-        secondary_axis: if chart_type == 11 {
-            Some(axis(true, 1)?)
-        } else {
-            None
-        },
-        plot_to_edges: kind != KeynoteChartKind::Mixed,
+        secondary_axis,
+        plot_to_edges,
     }))
 }
 
@@ -20202,6 +20389,60 @@ mod tests {
                 )),
                 "embedded previews are not native chart evidence"
             );
+        }
+    }
+
+    #[test]
+    fn native_chart_boundaries_preserve_log_percent_and_sparse_data() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-boundaries.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 8);
+        for (unit, expected) in [
+            (2, &["0%", "25%", "50%", "75%", "100%"][..]),
+            (3, &["1", "10", "100", "1000", "10000"][..]),
+            (4, &["0.0%", "25.0%", "50.0%", "75.0%", "100.0%"][..]),
+        ] {
+            for label in expected {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .filter(|o| o.unit_index == unit)
+                        .any(|o| matches!(&o.visual, Visual::TextLayout {visual, ..}
+                        if matches!(visual.as_ref(), Visual::RichText {runs,..}
+                            if runs.iter().any(|run| run.text == *label)))),
+                    "unit {unit}: missing {label}"
+                );
+            }
+        }
+        for object in &document.objects {
+            fn check(visual: &Visual) {
+                match visual {
+                    Visual::PaintedShape {
+                        geometry: Geometry::Path { commands, .. },
+                        ..
+                    } => {
+                        for command in commands {
+                            match command {
+                                PathCommand::MoveTo { x, y } | PathCommand::LineTo { x, y } => {
+                                    assert!(
+                                        x.is_finite() && y.is_finite(),
+                                        "blank cache emitted a nonfinite point"
+                                    )
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Visual::StrokeStyle { visual, .. } => check(visual),
+                    _ => {}
+                }
+            }
+            check(&object.visual);
         }
     }
 

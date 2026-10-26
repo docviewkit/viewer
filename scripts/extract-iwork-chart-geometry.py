@@ -13,6 +13,38 @@ import pymupdf
 
 folder = Path(sys.argv[1])
 reference = json.loads((folder / "reference.json").read_text())
+if reference["source"]["file"] == "iwork-chart-boundaries.key":
+    fixture = Path("tests/fixtures/iwork-chart-boundaries.key")
+    pdf = folder / "reference.pdf"
+    assert reference["referenceApplication"]["name"] == "Keynote"
+    assert reference["source"]["sha256"] == hashlib.sha256(fixture.read_bytes()).hexdigest()
+    assert reference["pdfs"][0]["sha256"] == hashlib.sha256(pdf.read_bytes()).hexdigest()
+    result = {"fixture": fixture.name, "fixtureSha256": reference["source"]["sha256"],
+              "pdfSha256": reference["pdfs"][0]["sha256"], "extractorVersion": pymupdf.VersionBind,
+              "method": "Apple Keynote 15.4 PDF get_drawings: colored paths and rectangles; CSS coordinates are PDF points times 4/3; no fitting or alignment", "units": []}
+    with pymupdf.open(pdf) as document:
+        assert len(document) == 8
+        for index, page in enumerate(document):
+            drawings = []
+            for drawing in page.get_drawings():
+                color = drawing["fill"] or drawing["color"]
+                if not color or max(color) - min(color) < .2:
+                    continue
+                points = []
+                for item in drawing["items"]:
+                    if item[0] == "l":
+                        points.extend([[item[1].x*4/3, item[1].y*4/3],
+                                       [item[2].x*4/3, item[2].y*4/3]])
+                rect = drawing["rect"]
+                drawings.append({"color": list(color), "filled": drawing["fill"] is not None,
+                                 "opacity": drawing["fill_opacity"],
+                                 "bounds": [v*4/3 for v in (rect.x0, rect.y0, rect.width, rect.height)],
+                                 "points": points})
+            result["units"].append({"unit": index, "labels": page.get_text().splitlines(),
+                                    "drawings": drawings})
+    print(json.dumps(result, indent=2))
+    sys.exit(0)
+
 fixture = Path("tests/fixtures/iwork-charting-basics.numbers")
 pdf = folder / "reference.pdf"
 assert reference["source"]["file"] == fixture.name

@@ -3467,6 +3467,41 @@ fn chart_linear_regression_preserves_finite_pairs_and_degenerate_cases() {
 
 #[cfg(any(
     feature = "native-formats",
+    feature = "iwork-formats",
+    feature = "legacy-office-formats"
+))]
+// The base cancels when normalizing a logarithmic coordinate. Adapters retain
+// their own tick bases, range policies, clipping and nonpositive-value handling.
+pub(super) fn logarithmic_axis_ratio(value: f32, minimum: f32, maximum: f32) -> Option<f32> {
+    (value > 0.0 && minimum > 0.0 && maximum > minimum)
+        .then(|| (value.ln() - minimum.ln()) / (maximum.ln() - minimum.ln()))
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "native-formats",
+        feature = "iwork-formats",
+        feature = "legacy-office-formats"
+    )
+))]
+#[test]
+fn logarithmic_coordinates_preserve_invalid_values_and_unclipped_positions() {
+    assert_eq!(logarithmic_axis_ratio(10.0, 1.0, 100.0), Some(0.5));
+    assert_eq!(logarithmic_axis_ratio(1000.0, 1.0, 100.0), Some(1.5));
+    for (value, minimum, maximum) in [
+        (0.0, 1.0, 10.0),
+        (-1.0, 1.0, 10.0),
+        (1.0, 0.0, 10.0),
+        (1.0, 10.0, 1.0),
+        (f32::NAN, 1.0, 10.0),
+    ] {
+        assert!(logarithmic_axis_ratio(value, minimum, maximum).is_none());
+    }
+}
+
+#[cfg(any(
+    feature = "native-formats",
     feature = "odf-formats",
     feature = "legacy-office-formats"
 ))]

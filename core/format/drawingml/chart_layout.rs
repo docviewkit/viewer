@@ -2446,9 +2446,8 @@ impl Chart {
 
     pub(super) fn value_axis_ratio(&self, value: f32, minimum: f32, maximum: f32) -> Option<f32> {
         if self.numerical_axis_options().log_base.is_some() {
-            (value > 0.0 && minimum > 0.0 && maximum > minimum).then(|| {
-                ((value.ln() - minimum.ln()) / (maximum.ln() - minimum.ln())).clamp(0.0, 1.0)
-            })
+            crate::format::logarithmic_axis_ratio(value, minimum, maximum)
+                .map(|ratio| ratio.clamp(0.0, 1.0))
         } else {
             (maximum > minimum).then(|| ((value - minimum) / (maximum - minimum)).clamp(0.0, 1.0))
         }
@@ -3338,7 +3337,9 @@ impl ChartValueAxis {
                 for multiplier in 2..(base.ceil() as u32).min(1000) {
                     let value = base.powi(exponent) * multiplier as f32;
                     if value > minimum && value < maximum {
-                        ticks.push((value, (value.ln() - minimum.ln()) / (maximum.ln() - minimum.ln())));
+                        if let Some(ratio) = crate::format::logarithmic_axis_ratio(value, minimum, maximum) {
+                            ticks.push((value, ratio));
+                        }
                         if ticks.len() == 1000 { return ticks; }
                     }
                 }
