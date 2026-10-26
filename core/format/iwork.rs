@@ -494,11 +494,11 @@ struct KeynoteChart {
     colors: Vec<u32>,
     series: Vec<Vec<f32>>,
     scatter_x: Vec<Vec<f32>>,
-    scatter_styles: Vec<IworkScatterStyle>,
+    point_styles: Vec<IworkPointStyle>,
 }
 
 #[derive(Clone, Debug)]
-struct IworkScatterStyle {
+struct IworkPointStyle {
     symbol: Option<&'static str>,
     size: f32,
     fill: Paint,
@@ -11368,52 +11368,31 @@ fn iwork_bar_geometry(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn keynote_push_bar_chart(
+fn iwork_push_cartesian_labels(
     chart: &KeynoteChart,
-    horizontal: bool,
+    categories: usize,
+    minimum: f32,
+    maximum: f32,
     identifier: u64,
     unit_index: u32,
     part: &str,
     limits: Limits,
     objects: &mut Vec<Object>,
     plot: Rect,
+    horizontal: bool,
+    plot_to_edges: bool,
     z: i32,
     parent_numeric_id: Option<u32>,
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
-    let categories = chart.series.iter().map(Vec::len).max().unwrap_or(0);
-    if categories == 0 {
-        return Ok(());
-    }
-    let (minimum, maximum) = keynote_chart_range(&chart.series, chart.stacked);
-    let span = (maximum - minimum).max(f32::EPSILON);
     let value_label_width = iwork_chart_value_label_width(chart);
-    let baseline = if horizontal {
-        plot.x + (0.0 - minimum) / span * plot.width
-    } else {
-        plot.y + (maximum - 0.0) / span * plot.height
-    };
-    keynote_push_chart_axes(
-        chart,
-        identifier,
-        unit_index,
-        part,
-        limits,
-        objects,
-        plot,
-        horizontal,
-        baseline,
-        z,
-        parent_numeric_id,
-        parent_stable_id,
-        serial,
-    )?;
-    let category_span = if horizontal {
-        plot.height / categories as f32
-    } else {
-        plot.width / categories as f32
-    };
+    let category_span = if horizontal { plot.height } else { plot.width }
+        / if plot_to_edges {
+            categories.saturating_sub(1).max(1)
+        } else {
+            categories.max(1)
+        } as f32;
     iwork_push_chart_value_ticks(
         &chart.value_axis,
         minimum,
@@ -11439,12 +11418,20 @@ fn keynote_push_bar_chart(
         else {
             continue;
         };
+        let center = if plot_to_edges {
+            if categories == 1 {
+                plot.width / 2.0
+            } else {
+                category_span * category as f32
+            }
+        } else {
+            category_span * (category as f32 + 0.5)
+        };
         let vertical = !horizontal && chart.category_axis.vertical_labels;
         let bounds = if vertical {
             let height = label.chars().count() as f32 * chart.category_axis.text.font_size * 0.56;
             Rect {
-                x: plot.x + category_span * (category as f32 + 0.5)
-                    - chart.category_axis.text.font_size * 0.6,
+                x: plot.x + center - chart.category_axis.text.font_size * 0.6,
                 y: plot.y + plot.height + 3.0,
                 width: chart.category_axis.text.font_size * 1.2,
                 height: height.max(1.0),
@@ -11458,7 +11445,7 @@ fn keynote_push_bar_chart(
             }
         } else {
             Rect {
-                x: plot.x + category_span * category as f32,
+                x: plot.x + center - category_span / 2.0,
                 y: plot.y + plot.height + 3.0,
                 width: category_span,
                 height: chart.category_axis.text.font_size * 1.2 + 2.0,
@@ -11500,6 +11487,73 @@ fn keynote_push_bar_chart(
         plot,
         horizontal,
         value_label_width,
+        z,
+        parent_numeric_id,
+        parent_stable_id,
+        serial,
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn keynote_push_bar_chart(
+    chart: &KeynoteChart,
+    horizontal: bool,
+    identifier: u64,
+    unit_index: u32,
+    part: &str,
+    limits: Limits,
+    objects: &mut Vec<Object>,
+    plot: Rect,
+    z: i32,
+    parent_numeric_id: Option<u32>,
+    parent_stable_id: Option<&str>,
+    serial: &mut u32,
+) -> Result<(), Diagnostic> {
+    let categories = chart.series.iter().map(Vec::len).max().unwrap_or(0);
+    if categories == 0 {
+        return Ok(());
+    }
+    let (minimum, maximum) = keynote_chart_range(&chart.series, chart.stacked);
+    let span = (maximum - minimum).max(f32::EPSILON);
+    let baseline = if horizontal {
+        plot.x + (0.0 - minimum) / span * plot.width
+    } else {
+        plot.y + (maximum - 0.0) / span * plot.height
+    };
+    keynote_push_chart_axes(
+        chart,
+        identifier,
+        unit_index,
+        part,
+        limits,
+        objects,
+        plot,
+        horizontal,
+        baseline,
+        z,
+        parent_numeric_id,
+        parent_stable_id,
+        serial,
+    )?;
+    let category_span = if horizontal {
+        plot.height / categories as f32
+    } else {
+        plot.width / categories as f32
+    };
+    iwork_push_cartesian_labels(
+        chart,
+        categories,
+        minimum,
+        maximum,
+        identifier,
+        unit_index,
+        part,
+        limits,
+        objects,
+        plot,
+        horizontal,
+        false,
         z,
         parent_numeric_id,
         parent_stable_id,
@@ -11852,6 +11906,24 @@ fn keynote_push_line_chart(
         parent_stable_id,
         serial,
     )?;
+    iwork_push_cartesian_labels(
+        chart,
+        categories,
+        minimum,
+        maximum,
+        identifier,
+        unit_index,
+        part,
+        limits,
+        objects,
+        plot,
+        false,
+        true,
+        z,
+        parent_numeric_id,
+        parent_stable_id,
+        serial,
+    )?;
     let mut cumulative = vec![0.0_f32; categories];
     for (series_index, series) in chart.series.iter().enumerate() {
         let mut commands = Vec::new();
@@ -11893,6 +11965,10 @@ fn keynote_push_line_chart(
             commands.push(PathCommand::ClosePath);
         }
         let color = keynote_chart_color(chart, series_index);
+        let line = chart
+            .point_styles
+            .get(series_index)
+            .and_then(|style| style.line.as_ref());
         keynote_push_chart_child(
             identifier,
             unit_index,
@@ -11904,20 +11980,48 @@ fn keynote_push_line_chart(
             parent_numeric_id,
             parent_stable_id,
             serial,
-            Visual::PaintedShape {
-                geometry: Geometry::Path {
-                    fill_rule: FillRule::NonZero,
-                    commands,
-                },
-                fill: if chart.kind == KeynoteChartKind::Area {
-                    Paint::Solid(keynote_color_opacity(color, 0.55))
+            {
+                let visual = Visual::PaintedShape {
+                    geometry: Geometry::Path {
+                        fill_rule: FillRule::NonZero,
+                        commands,
+                    },
+                    fill: if chart.kind == KeynoteChartKind::Area {
+                        Paint::Solid(keynote_color_opacity(color, 0.55))
+                    } else {
+                        Paint::None
+                    },
+                    stroke: line.map(|s| s.0.clone()).unwrap_or(Paint::Solid(color)),
+                    stroke_width: line.map_or(2.0, |s| s.1),
+                };
+                if let Some(stroke) = line.filter(|s| s.2 != StrokeStyle::default()) {
+                    Visual::StrokeStyle {
+                        style: stroke.2.clone(),
+                        visual: Box::new(visual),
+                    }
                 } else {
-                    Paint::None
-                },
-                stroke: Paint::Solid(color),
-                stroke_width: 2.0,
+                    visual
+                }
             },
         )?;
+        if let Some(style) = chart.point_styles.get(series_index) {
+            iwork_push_chart_markers(
+                style,
+                points.into_iter(),
+                "line",
+                series_index,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+            )?;
+        }
     }
     Ok(())
 }
@@ -11997,7 +12101,7 @@ fn iwork_push_scatter_chart(
         .scatter_x
         .iter()
         .zip(&chart.series)
-        .zip(&chart.scatter_styles)
+        .zip(&chart.point_styles)
         .enumerate()
     {
         let mut paint_path = |commands: Vec<PathCommand>,
@@ -12076,46 +12180,84 @@ fn iwork_push_scatter_chart(
                 "trendline",
             )?;
         }
-        if let Some(symbol) = style.symbol
-            && let Some((geometry, filled)) = super::chart_marker_geometry(symbol, style.size)
-        {
-            for (point, (x, y)) in xs.iter().zip(ys).enumerate() {
-                keynote_push_chart_child(
-                    identifier,
-                    unit_index,
-                    part,
-                    limits,
-                    objects,
-                    Rect {
-                        x: plot.x + map_x(*x) - style.size / 2.0,
-                        y: plot.y + map_y(*y) - style.size / 2.0,
-                        width: style.size,
-                        height: style.size,
-                    },
-                    z,
-                    parent_numeric_id,
-                    parent_stable_id,
-                    serial,
-                    Visual::StrokeStyle {
-                        style: style.marker_stroke.2.clone(),
-                        visual: Box::new(Visual::PaintedShape {
-                            geometry: geometry.clone(),
-                            fill: if filled {
-                                style.fill.clone()
-                            } else {
-                                Paint::None
-                            },
-                            stroke: style.marker_stroke.0.clone(),
-                            stroke_width: style.marker_stroke.1,
-                        }),
-                    },
-                )?;
-                objects
-                    .last_mut()
-                    .unwrap()
-                    .stable_id
-                    .push_str(&format!(":scatter-marker-{index}-{point}"));
-            }
+        iwork_push_chart_markers(
+            style,
+            xs.iter().zip(ys).map(|(x, y)| (map_x(*x), map_y(*y))),
+            "scatter",
+            index,
+            identifier,
+            unit_index,
+            part,
+            limits,
+            objects,
+            plot,
+            z,
+            parent_numeric_id,
+            parent_stable_id,
+            serial,
+        )?;
+    }
+    Ok(())
+}
+
+// Marker geometry and paint semantics are identical once adapter fields and
+// point coordinates have been resolved. All iWork hosts share this emitter.
+#[allow(clippy::too_many_arguments)]
+fn iwork_push_chart_markers(
+    style: &IworkPointStyle,
+    points: impl Iterator<Item = (f32, f32)>,
+    kind: &str,
+    index: usize,
+    identifier: u64,
+    unit_index: u32,
+    part: &str,
+    limits: Limits,
+    objects: &mut Vec<Object>,
+    plot: Rect,
+    z: i32,
+    parent_numeric_id: Option<u32>,
+    parent_stable_id: Option<&str>,
+    serial: &mut u32,
+) -> Result<(), Diagnostic> {
+    if let Some(symbol) = style.symbol
+        && let Some((geometry, filled)) = super::chart_marker_geometry(symbol, style.size)
+    {
+        for (point, (x, y)) in points.enumerate() {
+            keynote_push_chart_child(
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                Rect {
+                    x: plot.x + x - style.size / 2.0,
+                    y: plot.y + y - style.size / 2.0,
+                    width: style.size,
+                    height: style.size,
+                },
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+                Visual::StrokeStyle {
+                    style: style.marker_stroke.2.clone(),
+                    visual: Box::new(Visual::PaintedShape {
+                        geometry: geometry.clone(),
+                        fill: if filled {
+                            style.fill.clone()
+                        } else {
+                            Paint::None
+                        },
+                        stroke: style.marker_stroke.0.clone(),
+                        stroke_width: style.marker_stroke.1,
+                    }),
+                },
+            )?;
+            objects
+                .last_mut()
+                .unwrap()
+                .stable_id
+                .push_str(&format!(":{kind}-marker-{index}-{point}"));
         }
     }
     Ok(())
@@ -13656,8 +13798,9 @@ fn keynote_chart(
                 != 0)
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
-    let mut scatter_styles = Vec::new();
-    if kind == KeynoteChartKind::Scatter {
+    let mut point_styles = Vec::new();
+    if matches!(kind, KeynoteChartKind::Scatter | KeynoteChartKind::Line) {
+        let scatter = kind == KeynoteChartKind::Scatter;
         let theme_styles = numbers_references(archive, 17, part)?;
         for index in 0..rows.len() {
             let properties = iwork_chart_properties(
@@ -13682,12 +13825,17 @@ fn keynote_chart(
                     .transpose()
                     .map(|stroke| stroke.unwrap_or((Paint::None, 0.0, StrokeStyle::default())))
             };
-            let line = stroke(53)?;
-            scatter_styles.push(IworkScatterStyle {
-                symbol: if numbers_varint(&nonstyle, 36, part)?.unwrap_or(1) == 0 {
+            let line = stroke(if scatter { 53 } else { 48 })?;
+            point_styles.push(IworkPointStyle {
+                symbol: if numbers_varint(&nonstyle, if scatter { 36 } else { 33 }, part)?
+                    .unwrap_or(1)
+                    == 0
+                {
                     None
                 } else {
-                    match numbers_varint(&nonstyle, 51, part)?.unwrap_or(1) {
+                    match numbers_varint(&nonstyle, if scatter { 51 } else { 48 }, part)?
+                        .unwrap_or(1)
+                    {
                         1 => Some("circle"),
                         2 => Some("triangle"),
                         3 => Some("triangleDown"),
@@ -13698,19 +13846,35 @@ fn keynote_chart(
                         _ => None,
                     }
                 },
-                size: keynote_fixed32_field(&properties, 74, part)?
+                size: keynote_fixed32_field(&properties, if scatter { 74 } else { 71 }, part)?
                     .filter(|v| v.is_finite() && *v > 0.0 && *v < 1000.0)
                     .unwrap_or(8.0),
-                fill: if numbers_varint(&properties, 69, part)? == Some(1) {
+                fill: if numbers_varint(&properties, if scatter { 69 } else { 66 }, part)?
+                    == Some(1)
+                {
                     line.0.clone()
                 } else {
-                    numbers_first_bytes(&properties, 59, part)?
+                    // Line symbols can inherit the series fill independently of its stroke.
+                    let field = if scatter {
+                        59
+                    } else if numbers_varint(&properties, 61, part)? == Some(1) {
+                        14
+                    } else {
+                        56
+                    };
+                    numbers_first_bytes(&properties, field, part)?
                         .map(|v| keynote_fill(v, part, 8.0, 8.0))
                         .transpose()?
                         .unwrap_or(Paint::None)
                 },
-                marker_stroke: stroke(80)?,
-                line: (numbers_varint(&nonstyle, 29, part)? == Some(1)).then_some(line),
+                marker_stroke: stroke(if scatter { 80 } else { 77 })?,
+                line: if scatter {
+                    (numbers_varint(&nonstyle, 29, part)? == Some(1)).then_some(line)
+                } else {
+                    numbers_first_bytes(&properties, 48, part)?
+                        .is_some()
+                        .then_some(line)
+                },
                 trendline: if numbers_varint(&nonstyle, 37, part)? == Some(1)
                     && numbers_varint(&nonstyle, 62, part)? == Some(1)
                 {
@@ -13858,7 +14022,7 @@ fn keynote_chart(
         colors,
         series: rows,
         scatter_x,
-        scatter_styles,
+        point_styles,
     }))
 }
 
@@ -18942,7 +19106,7 @@ mod tests {
         .unwrap();
         assert_eq!(chart.scatter_x, vec![vec![], vec![3.0]]);
         assert_eq!(chart.series, vec![vec![], vec![5.0]]);
-        assert_eq!(chart.scatter_styles.len(), 2);
+        assert_eq!(chart.point_styles.len(), 2);
         let chart = parse(
             &[
                 &[Some(1.0), Some(4.0)],
@@ -18956,6 +19120,167 @@ mod tests {
         assert_eq!(chart.scatter_x, vec![vec![1.0, 3.0]]);
         assert_eq!(chart.series, vec![vec![4.0, 6.0]]);
         assert!(parse(&[&[Some(f64::MAX)], &[Some(1.0)]], 1, 1).is_none());
+    }
+
+    #[test]
+    fn iwork_line_marker_fields_preserve_explicit_visibility_and_unknown_symbols() {
+        for (visible, symbol, expected) in [
+            (0, 1, None),
+            (1, 0, None),
+            (1, 1, Some("circle")),
+            (1, 4, Some("square")),
+            (1, 99, None),
+        ] {
+            let grid = protobuf_message(3, &protobuf_message(1, &protobuf_fixed64(1, 2.0)));
+            let reference = |id| {
+                protobuf_message(
+                    2,
+                    &[
+                        protobuf_varint(1, 0),
+                        protobuf_message(2, &protobuf_reference(id)),
+                    ]
+                    .concat(),
+                )
+            };
+            let payload = protobuf_message(
+                10_000,
+                &[
+                    protobuf_varint(1, 3),
+                    protobuf_message(7, &grid),
+                    protobuf_message(18, &reference(80)),
+                    protobuf_message(19, &reference(81)),
+                ]
+                .concat(),
+            );
+            let archives = [super::IwaArchive {
+                identifier: 81,
+                messages: vec![super::IwaMessage {
+                    message_type: super::IWORK_CHART_SERIES_NONSTYLE_TYPE,
+                    payload: protobuf_message(
+                        10_000,
+                        &[protobuf_varint(33, visible), protobuf_varint(48, symbol)].concat(),
+                    ),
+                    data_references: vec![],
+                }],
+            }];
+            let styles = [super::IwaArchive {
+                identifier: 80,
+                messages: vec![super::IwaMessage {
+                    message_type: super::IWORK_CHART_SERIES_STYLE_TYPE,
+                    payload: protobuf_message(10_000, &protobuf_fixed32(71, f32::MAX)),
+                    data_references: vec![],
+                }],
+            }];
+            let chart = super::keynote_chart(&payload, &archives, &styles, "chart.iwa")
+                .unwrap()
+                .unwrap();
+            assert_eq!(chart.point_styles[0].symbol, expected);
+            assert_eq!(
+                chart.point_styles[0].size, 8.0,
+                "automatic-size sentinel must stay bounded"
+            );
+            assert!(
+                chart.point_styles[0].line.is_none(),
+                "missing stroke must retain renderer fallback"
+            );
+            let mut objects = Vec::new();
+            super::keynote_push_chart(
+                chart,
+                42,
+                0,
+                "chart.iwa",
+                Limits::default(),
+                &mut objects,
+                0.0,
+                0.0,
+                0,
+            )
+            .unwrap();
+            assert!(
+                objects.iter().any(|o| matches!(
+                    o.visual,
+                    Visual::PaintedShape {
+                        geometry: Geometry::Path { .. },
+                        stroke: Paint::Solid(_),
+                        stroke_width: 2.0,
+                        ..
+                    }
+                )),
+                "unstyled line must remain visible"
+            );
+        }
+    }
+
+    #[test]
+    fn supplied_numbers_gpa_preserves_line_markers_and_axis_labels() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/numbers-gpa.numbers"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let chart = document
+            .objects
+            .iter()
+            .find(|o| matches!(o.source.locator, SourceLocator::Iwork { kind: "chart", .. }))
+            .unwrap();
+        let children = document
+            .objects
+            .iter()
+            .filter(|o| o.parent_numeric_id == Some(chart.numeric_id))
+            .collect::<Vec<_>>();
+        let labels = children
+            .iter()
+            .filter_map(|o| match &o.visual {
+                Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                    Visual::RichText { runs, .. } => {
+                        Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "GPA by Term",
+                "0",
+                "1",
+                "2",
+                "3",
+                "4",
+                "Term 1",
+                "Term 2",
+                "Term 3",
+                "Term 4"
+            ]
+        );
+        let markers = children
+            .iter()
+            .filter(|o| o.stable_id.contains(":line-marker-"))
+            .collect::<Vec<_>>();
+        assert_eq!(markers.len(), 4);
+        for (i, marker) in markers.iter().enumerate() {
+            let expected_x = (317.0 + i as f32 * 206.0 / 3.0) * super::IWORK_POINT_TO_CSS_PIXEL;
+            let value = if i == 0 { 3.678_571_5 } else { 0.0 };
+            let expected_y =
+                (121.0 + (4.0 - value) / 4.0 * 102.0) * super::IWORK_POINT_TO_CSS_PIXEL;
+            assert!((marker.bounds.x + marker.bounds.width / 2.0 - expected_x).abs() < 0.01);
+            assert!((marker.bounds.y + marker.bounds.height / 2.0 - expected_y).abs() < 0.01);
+            let Visual::StrokeStyle { visual, .. } = &marker.visual else {
+                panic!("marker stroke")
+            };
+            assert!(matches!(
+                visual.as_ref(),
+                Visual::PaintedShape {
+                    geometry: Geometry::Ellipse,
+                    fill: Paint::Solid(0xffff_ffff),
+                    stroke: Paint::Solid(0x3b39_e5ff),
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
