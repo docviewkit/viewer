@@ -7109,7 +7109,7 @@ export class SceneRenderer {
     const prepared = this.#prepareUnit(unit, request, mappers);
     const first = firstMaximumBottomAfter(prepared.maximumBottoms, viewport.y);
     const end = firstObjectStartingAtOrAfter(prepared.objects, viewport.y + viewport.height);
-    const visibleObjects: { object: SceneObject; state: VisualState }[] = [];
+    let visibleObjects: { object: SceneObject; state: VisualState }[] = [];
     // A solid TN sheet fill covers its infinite canvas, including tile viewports
     // outside the content extent; the scene keeps the finite content bounds.
     const sheetBackground = prepared.sheetBackground;
@@ -7125,6 +7125,27 @@ export class SceneRenderer {
       });
     }
     visibleObjects.sort(({ object: left }, { object: right }) => comparePaintOrder(left, right));
+    // Layout-only text must not split vector paint batches: even separate
+    // fills of disjoint glyph paths can change Canvas antialiasing.
+    const layoutOnlyText = visibleObjects.filter(({ state }) => {
+      const { visual, textLayout } = state;
+      return visual.kind === "rich-text" && state.operations.length === 0
+        && state.textEffects === undefined && state.groupedTextScale === 1
+        && textLayout?.textFill === false && textLayout.warp === undefined
+        && (textLayout.textStrokeWidth ?? 0) === 0
+        && !visible(textLayout.textStrokeColor ?? 0)
+        && (textLayout.textStrokePaint === undefined || textLayout.textStrokePaint.kind === "none")
+        && transparentPaint(visual.fill) && transparentPaint(visual.stroke)
+        && visual.runs.every(run => !visible(run.color) && !visible(run.highlight)
+          && !run.underline && !run.strikethrough && run.paint === undefined
+          && run.shadow === undefined && run.innerShadow === undefined && run.textEffect === undefined);
+    });
+    const textPaintOrder = layoutOnlyText.length === 0 ? undefined
+      : new Map(visibleObjects.map(({ object }, index) => [object.id, index]));
+    if (layoutOnlyText.length > 0) {
+      const ids = new Set(layoutOnlyText.map(({ object }) => object.id));
+      visibleObjects = visibleObjects.filter(({ object }) => !ids.has(object.id));
+    }
     const backdrops: { bounds: Rect; paint: ScenePaint }[] = [];
     const readingInk = (object: SceneObject, visual: SceneVisual): number | undefined => {
       if (!dark || !supportsReadingColors(object.source.format)
@@ -7178,6 +7199,15 @@ export class SceneRenderer {
     try {
       context.scale(canvasScaleX, canvasScaleY);
       context.translate(-viewport.x, -viewport.y);
+      if (collectTextFragment !== undefined) {
+        for (const { object } of layoutOnlyText) {
+          assertActive();
+          await this.#drawVisualBrushChild(
+            context, object, object.bounds, object.visual, 0,
+            undefined, undefined, undefined, collectTextFragment,
+          );
+        }
+      }
       let gridPending = unit.type === "sheet";
       const drawPendingGrid = () => {
         if (gridPending && unit.type === "sheet" && sheetAxes !== undefined) {
@@ -7791,6 +7821,10 @@ export class SceneRenderer {
     }
     let selectableTextFragments: readonly RenderedTextFragment[] | undefined;
     if (request.includeTextFragments === true) {
+      if (textPaintOrder !== undefined) {
+        textFragments.sort((left, right) => (textPaintOrder.get(left.objectId) ?? 0)
+          - (textPaintOrder.get(right.objectId) ?? 0));
+      }
       const semanticText = new Map((unitObjects ?? []).flatMap((object) =>
         object.text === undefined ? [] : [[object.id, object.text] as const]));
       selectableTextFragments = semanticTextFragments(textFragments, semanticText);

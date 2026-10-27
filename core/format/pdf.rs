@@ -8849,12 +8849,12 @@ fn show_text_decoded(
     } else {
         advance
     };
-    if !font.source_glyph_outlines.is_empty()
+    let source_outlines = !font.source_glyph_outlines.is_empty()
         && state.text_render_mode != 7
         && glyphs
             .iter()
-            .any(|glyph| font.source_glyph_outlines.contains_key(&glyph.code))
-    {
+            .any(|glyph| font.source_glyph_outlines.contains_key(&glyph.code));
+    if source_outlines {
         if !matches!(state.text_render_mode, 3 | 7) {
             paint_source_glyph_outlines(&glyphs, &font, state, context, source_object, offset)?;
         }
@@ -8869,49 +8869,7 @@ fn show_text_decoded(
                 state.clips.push(clip);
             }
         }
-        let combined = state
-            .ctm
-            .concat(text_matrix_with_rise(state.text_matrix, state.text_rise));
-        let horizontal_scale = combined.a.hypot(combined.b).max(f32::EPSILON);
-        let vertical_scale = combined.c.hypot(combined.d).max(f32::EPSILON);
-        let font_size = state.font_size.abs() * vertical_scale;
-        let width = (visual_advance.abs() * horizontal_scale).max(font_size * 0.05);
-        let ascent = if font.ascent > 0.0 {
-            font.ascent
-        } else {
-            800.0
-        };
-        let descent = if font.descent < 0.0 {
-            font.descent
-        } else {
-            -200.0
-        };
-        let height = ((ascent - descent) / 1000.0 * font_size).max(font_size);
-        let center = combined.point(
-            visual_advance / 2.0,
-            (ascent + descent) / 2_000.0 * state.font_size,
-        );
-        context.push_object(
-            ObjectKind::TextBox,
-            Rect {
-                x: center.0 - width / 2.0,
-                y: center.1 - height / 2.0,
-                width,
-                height,
-            },
-            (!text.is_empty()).then_some(text),
-            Visual::None,
-            pdf_source(
-                "text",
-                Some(source_object),
-                Some(offset),
-                MappingQuality::Exact,
-            ),
-        )?;
-        advance_text_matrix(state, advance, font.vertical);
-        return Ok(());
-    }
-    if let Some(font_matrix) = font.type3_font_matrix {
+    } else if let Some(font_matrix) = font.type3_font_matrix {
         if !visual_text.is_empty() && !matches!(state.text_render_mode, 3 | 7) {
             paint_type3_glyphs(
                 &glyphs,
@@ -8924,49 +8882,11 @@ fn show_text_decoded(
                 depth,
             )?;
         }
-        let combined = state
-            .ctm
-            .concat(text_matrix_with_rise(state.text_matrix, state.text_rise));
-        let horizontal_scale = combined.a.hypot(combined.b).max(f32::EPSILON);
-        let vertical_scale = combined.c.hypot(combined.d).max(f32::EPSILON);
-        let font_size = state.font_size.abs() * vertical_scale;
-        let width = (visual_advance.abs() * horizontal_scale).max(font_size * 0.05);
-        let ascent = if font.ascent > 0.0 {
-            font.ascent
-        } else {
-            800.0
-        };
-        let descent = if font.descent < 0.0 {
-            font.descent
-        } else {
-            -200.0
-        };
-        let height = ((ascent - descent) / 1000.0 * font_size).max(font_size);
-        let center = combined.point(
-            visual_advance / 2.0,
-            (ascent + descent) / 2_000.0 * state.font_size,
-        );
-        context.push_object(
-            ObjectKind::TextBox,
-            Rect {
-                x: center.0 - width / 2.0,
-                y: center.1 - height / 2.0,
-                width,
-                height,
-            },
-            (!text.is_empty()).then_some(text),
-            Visual::None,
-            pdf_source(
-                "text",
-                Some(source_object),
-                Some(offset),
-                MappingQuality::Exact,
-            ),
-        )?;
-        advance_text_matrix(state, advance, font.vertical);
-        return Ok(());
     }
-    if visual_text.is_empty() || state.text_render_mode == 3 {
+    // Paths and Type3 procedures paint the ink. Reuse the normal text layout
+    // without painting it again so selection keeps the authored geometry.
+    let path_painted = source_outlines || font.type3_font_matrix.is_some();
+    if !path_painted && (visual_text.is_empty() || state.text_render_mode == 3) {
         advance_text_matrix(state, advance, font.vertical);
         return Ok(());
     }
@@ -9014,7 +8934,9 @@ fn show_text_decoded(
         font_size
     };
     let angle = combined.b.atan2(combined.a).to_degrees();
-    let color = if matches!(state.text_render_mode, 1 | 5) {
+    let color = if path_painted {
+        0
+    } else if matches!(state.text_render_mode, 1 | 5) {
         with_alpha(state.stroke, state.stroke_alpha)
     } else {
         with_alpha(state.fill, state.fill_alpha)
@@ -9041,7 +8963,7 @@ fn show_text_decoded(
         width,
         height,
     };
-    let text_paint = if matches!(state.text_render_mode, 0 | 2 | 4 | 6) {
+    let text_paint = if !path_painted && matches!(state.text_render_mode, 0 | 2 | 4 | 6) {
         if let Some(pattern) = state.fill_pattern.as_deref() {
             pdf_shading_pattern_paint(pattern, resources, state, context, bounds, state.fill_alpha)
                 .or(pdf_tiling_pattern_paint(
@@ -9053,7 +8975,7 @@ fn show_text_decoded(
     } else {
         None
     };
-    let text_stroke_paint = if matches!(state.text_render_mode, 1 | 2 | 5 | 6) {
+    let text_stroke_paint = if !path_painted && matches!(state.text_render_mode, 1 | 2 | 5 | 6) {
         if let Some(pattern) = state.stroke_pattern.as_deref() {
             let mut pattern_state = state.clone();
             pattern_state.fill = state.stroke;
@@ -9085,7 +9007,9 @@ fn show_text_decoded(
     if text_stroke_width < 1.0 {
         text_stroke_width *= 1.25;
     }
-    let visual = if visual_text.chars().all(char::is_whitespace) {
+    let visual = if visual_text.chars().all(char::is_whitespace)
+        || path_painted && matches!(state.text_render_mode, 3 | 7)
+    {
         Visual::None
     } else {
         Visual::TextLayout {
@@ -9101,19 +9025,21 @@ fn show_text_decoded(
                 },
                 rotation_degrees: angle,
                 wrap: false,
-                text_fill: matches!(state.text_render_mode, 0 | 2 | 4 | 6),
+                text_fill: !path_painted && matches!(state.text_render_mode, 0 | 2 | 4 | 6),
                 text_paint: text_paint.unwrap_or(Paint::None),
                 // Character and word spacing change only the advance after a
                 // glyph. Do not infer outline scaling from a collapsed advance.
                 // Embedded browser fonts additionally follow the authored PDF
                 // advance when no separate spacing term would be distorted.
-                text_scale_to_fit: (glyph_horizontal_scale - 1.0).abs() > 0.025
+                text_scale_to_fit: path_painted
+                    || (glyph_horizontal_scale - 1.0).abs() > 0.025
                     || (font.browser_scale_to_pdf_advance
                         && state.char_spacing.abs() < f32::EPSILON
                         && state.word_spacing.abs() < f32::EPSILON),
                 text_matrix_scale_to_fit: (glyph_horizontal_scale - 1.0).abs() > 0.025,
                 low_resolution_supersample: font.browser_low_resolution_supersample,
-                text_stroke_color: if matches!(state.text_render_mode, 1 | 2 | 5 | 6)
+                text_stroke_color: if !path_painted
+                    && matches!(state.text_render_mode, 1 | 2 | 5 | 6)
                     && state.stroke_pattern.is_none()
                 {
                     with_alpha(state.stroke, state.stroke_alpha)
@@ -9121,7 +9047,9 @@ fn show_text_decoded(
                     0
                 },
                 text_stroke_paint: text_stroke_paint.unwrap_or(Paint::None),
-                text_stroke_width: if matches!(state.text_render_mode, 1 | 2 | 5 | 6) {
+                text_stroke_width: if !path_painted
+                    && matches!(state.text_render_mode, 1 | 2 | 5 | 6)
+                {
                     text_stroke_width
                 } else {
                     0.0
@@ -9167,9 +9095,9 @@ fn show_text_decoded(
     let visual = apply_pdf_stroke_style(
         visual,
         state,
-        matches!(state.text_render_mode, 1 | 2 | 5 | 6),
+        !path_painted && matches!(state.text_render_mode, 1 | 2 | 5 | 6),
     );
-    if matches!(state.text_render_mode, 4..=7) {
+    if !path_painted && matches!(state.text_render_mode, 4..=7) {
         state.text_clips.push(PdfTextClip {
             bounds,
             text: text.clone(),
@@ -9194,7 +9122,11 @@ fn show_text_decoded(
             "text",
             Some(source_object),
             Some(offset),
-            MappingQuality::Approximate,
+            if path_painted {
+                MappingQuality::Exact
+            } else {
+                MappingQuality::Approximate
+            },
         ),
     )?;
     advance_text_matrix(state, advance, font.vertical);
@@ -24226,7 +24158,13 @@ trailer << /Root 1 0 R >>
             .find(|object| object.text.as_deref() == Some("A"))
             .unwrap();
         assert!((text.bounds.width - 13.333_333).abs() < 0.01);
-        assert!(matches!(text.visual, Visual::None));
+        let Visual::TextLayout { layout, visual } = &text.visual else {
+            panic!("path-painted glyphs must retain selectable text layout");
+        };
+        assert!(!layout.text_fill);
+        assert!(layout.text_scale_to_fit);
+        assert!(matches!(visual.as_ref(), Visual::RichText { runs, .. }
+            if runs.iter().all(|run| run.color == 0)));
         assert!(document.objects.iter().any(|object| matches!(
             object.visual,
             Visual::PaintedShape {
@@ -24234,6 +24172,23 @@ trailer << /Root 1 0 R >>
                 ..
             }
         )));
+        for mode in [3, 7] {
+            let invisible = std::str::from_utf8(bytes)
+                .unwrap()
+                .replace("BT /F1", &format!("BT {mode} Tr /F1"));
+            let document = detect_and_parse(invisible.as_bytes(), Limits::default())
+                .unwrap()
+                .unwrap();
+            let text = document
+                .objects
+                .iter()
+                .find(|object| object.text.as_deref() == Some("A"))
+                .unwrap();
+            assert!(
+                matches!(text.visual, Visual::None),
+                "invisible Type3 text stays semantic only"
+            );
+        }
     }
 
     #[test]

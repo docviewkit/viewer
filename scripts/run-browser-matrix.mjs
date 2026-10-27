@@ -54,6 +54,68 @@ try {
         }));
         throw new Error(`${name} production-origin load failed: ${JSON.stringify({ ...state, errors })}`, { cause });
       }
+      // A supplied Type3/source-outline PDF can run this focused red/green case.
+      const pdfSelectionFixture = process.env.DOCVIEWKIT_PDF_TEXT_SELECTION_FIXTURE;
+      if (pdfSelectionFixture !== undefined) {
+        const expected = process.env.DOCVIEWKIT_PDF_TEXT_SELECTION_TEXT;
+        if (!expected) throw new Error("DOCVIEWKIT_PDF_TEXT_SELECTION_TEXT is required");
+        await page.locator("#viewer-file-input").setInputFiles(pdfSelectionFixture);
+        await page.waitForFunction(() => {
+          const state = document.querySelector("docviewkit-viewer").state;
+          return state.status === "ready" && state.info?.format === "pdf";
+        });
+        const viewer = page.locator("docviewkit-viewer");
+        await page.waitForFunction(() => document.querySelector("docviewkit-viewer")
+          .shadowRoot.querySelector('.continuous-page[data-unit-index="0"]')?.dataset.rendered === "true");
+        const pixels = () => viewer.evaluate(v => v.shadowRoot
+          .querySelector('.continuous-page[data-unit-index="0"] canvas').toDataURL());
+        const before = await pixels();
+        await viewer.evaluate(v => {
+          v.config = { ...v.config, features: { ...v.config.features, interactionMode: "text" } };
+        });
+        await page.waitForFunction(text => [...document.querySelector("docviewkit-viewer")
+          .shadowRoot.querySelectorAll(".text-layer-fragment")].map(n => n.textContent).join("").includes(text), expected);
+        for (const reverse of [false, true]) {
+          const points = await viewer.evaluate((v, { expected, reverse }) => {
+            const all = [...v.shadowRoot.querySelectorAll(".text-layer-fragment")];
+            const start = all.findIndex((node, index) => {
+              let text = "";
+              for (let i = index; i < all.length && text.length < expected.length; i++) text += all[i].textContent;
+              return text === expected;
+            });
+            if (start < 0) throw new Error("selection text has no complete fragment range");
+            let end = start, text = all[start].textContent;
+            while (text.length < expected.length) text += all[++end].textContent;
+            const point = (node, ratio) => {
+              const b = node.getBoundingClientRect();
+              return { x: b.left + b.width * ratio, y: b.top + b.height / 2 };
+            };
+            return { anchor: point(all[reverse ? end : start], reverse ? .99 : .01),
+              focus: point(all[reverse ? start : end], reverse ? .01 : .99) };
+          }, { expected, reverse });
+          await page.mouse.move(points.anchor.x, points.anchor.y);
+          await page.mouse.down();
+          await page.mouse.move(points.focus.x, points.focus.y, { steps: 20 });
+          await page.mouse.up();
+          await page.waitForFunction(() => document.querySelector("docviewkit-viewer")
+            .shadowRoot.querySelectorAll(".text-selection-highlight").length > 0);
+          const copied = await viewer.evaluate(v => {
+            const e = new ClipboardEvent("copy", { bubbles: true, cancelable: true, composed: true,
+              clipboardData: new DataTransfer() });
+            v.shadowRoot.dispatchEvent(e);
+            return e.clipboardData.getData("text/plain");
+          });
+          if (copied.replace(/\s/gu, "") !== expected.replace(/\s/gu, "")) {
+            throw new Error(`${name} supplied PDF drag/copy mismatch (reverse=${reverse})`);
+          }
+        }
+        if (before !== await pixels()) {
+          throw new Error(`${name} text selection changed the painted PDF pixels`);
+        }
+        if (errors.length > 0) throw new Error(`${name} browser errors: ${errors.join("; ")}`);
+        console.log(`${name}: supplied PDF forward/reverse selection and unchanged pixels passed`);
+        continue;
+      }
       const openSource = await page.locator("docviewkit-viewer").evaluate(async (viewer) => {
         const bytes = await (await fetch("/tests/fixtures/visual-baseline.pptx")).arrayBuffer();
         const { createOfficeEngine } = await import("/dist/index.js");
