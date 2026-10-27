@@ -75,6 +75,9 @@ try {
         });
         await page.waitForFunction(text => [...document.querySelector("docviewkit-viewer")
           .shadowRoot.querySelectorAll(".text-layer-fragment")].map(n => n.textContent).join("").includes(text), expected);
+        // Enter the workspace before measuring: hover can change scrollbar geometry.
+        await page.mouse.move(700, 300);
+        await viewer.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         for (const reverse of [false, true]) {
           const points = await viewer.evaluate((v, { expected, reverse }) => {
             const all = [...v.shadowRoot.querySelectorAll(".text-layer-fragment")];
@@ -90,8 +93,8 @@ try {
               const b = node.getBoundingClientRect();
               return { x: b.left + b.width * ratio, y: b.top + b.height / 2 };
             };
-            return { anchor: point(all[reverse ? end : start], reverse ? .99 : .01),
-              focus: point(all[reverse ? start : end], reverse ? .01 : .99) };
+            return { anchor: point(all[reverse ? end : start], reverse ? .9 : .1),
+              focus: point(all[reverse ? start : end], reverse ? .1 : .9) };
           }, { expected, reverse });
           await page.mouse.move(points.anchor.x, points.anchor.y);
           await page.mouse.down();
@@ -106,7 +109,7 @@ try {
             return e.clipboardData.getData("text/plain");
           });
           if (copied.replace(/\s/gu, "") !== expected.replace(/\s/gu, "")) {
-            throw new Error(`${name} supplied PDF drag/copy mismatch (reverse=${reverse})`);
+            throw new Error(`${name} supplied PDF drag/copy mismatch (reverse=${reverse}): ${JSON.stringify({ copied, expected })}`);
           }
         }
         if (before !== await pixels()) {

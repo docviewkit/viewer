@@ -11765,7 +11765,17 @@ fn borrow_compatible_type0_unicode_map(
     limits: Limits,
     info: &mut FontInfo,
 ) -> Result<(), Diagnostic> {
-    if dict_name(root, "Subtype") != Some("Type0") || !info.to_unicode.is_empty() {
+    // A predefined encoding already defines the source-code semantics. A
+    // same-family subset can use unrelated codes; borrowing its ToUnicode
+    // would override the native decoder (for example GBK bytes as Hangul).
+    if dict_name(root, "Subtype") != Some("Type0")
+        || !info.to_unicode.is_empty()
+        || info.predefined_ucs2
+        || info.predefined_utf16
+        || info.predefined_gbk
+        || info.predefined_shift_jis
+        || info.predefined_japan1
+    {
         return Ok(());
     }
     let Some(target_family) = pdf_font_name(root, "BaseFont")
@@ -21054,6 +21064,49 @@ mod tests {
         assert_eq!(super::glyph_name_text("Eacute").as_deref(), Some("É"));
         assert_eq!(super::glyph_name_text("Agrave").as_deref(), Some("À"));
         assert_eq!(super::glyph_name_text("ydieresis").as_deref(), Some("ÿ"));
+    }
+
+    #[test]
+    fn predefined_cmaps_do_not_borrow_same_family_subset_unicode_maps() {
+        let bytes = b"%PDF-1.7
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 100] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R >> >> /Contents 4 0 R >> endobj
+4 0 obj << >> stream
+BT /F2 12 Tf 10 50 Td <424cd7a8d2b5> Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+MicrosoftYaHei /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >> endobj
+6 0 obj << /Type /Font /Subtype /CIDFontType2 /BaseFont /ABCDEF+MicrosoftYaHei /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >> endobj
+7 0 obj << >> stream
+1 begincodespacerange <0000> <ffff> endcodespacerange
+1 beginbfchar <0001> <4e00> endbfchar
+endstream endobj
+8 0 obj << /Type /Font /Subtype /Type0 /BaseFont /MicrosoftYaHei /Encoding /GBK-EUC-H /DescendantFonts [9 0 R] >> endobj
+9 0 obj << /Type /Font /Subtype /CIDFontType2 /BaseFont /MicrosoftYaHei /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >> /DW 1000 >> endobj
+trailer << /Root 1 0 R >>
+%%EOF";
+        for (encoding, encoded, expected) in [
+            ("GBK-EUC-H", "424cd7a8d2b5", "BL专业"),
+            ("GBK-EUC-V", "424cd7a8d2b5", "BL专业"),
+            ("UniGB-UCS2-H", "0042004c4e134e1a", "BL专业"),
+            ("UniGB-UTF16-H", "0042004c4e134e1a", "BL专业"),
+            ("90ms-RKSJ-H", "424c93fa967b", "BL日本"),
+            ("UniJIS-UCS2-H", "0042004c65e5672c", "BL日本"),
+        ] {
+            let input = std::str::from_utf8(bytes)
+                .unwrap()
+                .replace("/GBK-EUC-H", &format!("/{encoding}"))
+                .replace("424cd7a8d2b5", encoded);
+            let document = detect_and_parse(input.as_bytes(), Limits::default())
+                .unwrap()
+                .unwrap();
+            let text = document
+                .objects
+                .iter()
+                .filter_map(|object| object.text.as_deref())
+                .collect::<String>();
+            assert_eq!(text, expected, "native decoding must win for {encoding}");
+        }
     }
 
     #[test]
