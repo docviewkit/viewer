@@ -46,6 +46,16 @@ The optional pack seam has a closed seven-family vocabulary (`odf`, `iwork`, `le
 
 Every limited path emits structured approximate/omitted diagnostics. Encrypted legacy Office payloads and unsupported PDF security handlers are rejected; macros, links, embedded OLE objects, PDF actions, and attachments never execute or activate.
 
+iWork static charts render from native TSCH data in Numbers, Keynote, and Pages
+(inline and floating objects). The implemented subset includes radar, bubble,
+mixed and dual-axis charts, cached series, manual/logarithmic axes and stacked
+data. Eight 3D chart types have approximate perspective, extrusion and diffuse
+lighting; they emit `IWORK_CHART_3D_APPROXIMATE`. Camera fitting, materials,
+specular lighting and complete native visual fidelity remain unfinished.
+Version 0.2.83 does not pass the iWork chart completeness gate or certify full
+support. See the [coverage matrix](research/IWORK-CHART-COVERAGE.md) for the
+retained Apple references, regressions and remaining gaps.
+
 ## Implemented P0/P1/P2 scope
 
 The priority labels describe the implemented engineering scope, not a compatibility certification.

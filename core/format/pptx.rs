@@ -15776,6 +15776,7 @@ fn push_picture(
             alignment: picture.line_alignment,
             miter_limit: picture.miter_limit.max(1.0),
             dash_offset: 0.0,
+            stroke_adjust: false,
             dash: drawingml_dash_lengths(picture.dash_pattern.lengths(), picture.stroke_width),
         };
         if style == StrokeStyle::default() {
@@ -16892,6 +16893,7 @@ fn push_shape(
         alignment: shape.line_alignment,
         miter_limit: shape.miter_limit.max(1.0),
         dash_offset: 0.0,
+        stroke_adjust: false,
         dash: drawingml_dash_lengths(shape.dash_pattern.lengths(), stroke_width),
     };
     let visual = if stroke_style == StrokeStyle::default() || separate_shape_and_text {
@@ -21031,19 +21033,33 @@ mod tests {
         let document = crate::format::detect_and_parse(
             include_bytes!("../../tests/fixtures/snowball-vw-picture-background.pptx"),
             Limits::default(),
-        ).unwrap().unwrap();
-        let picture = document.objects.iter().find(|object| {
-            object.kind == ObjectKind::Image && matches!(object.source.locator,
-                SourceLocator::PptxShape { shape_id: 9, .. })
-        }).unwrap();
+        )
+        .unwrap()
+        .unwrap();
+        let picture = document
+            .objects
+            .iter()
+            .find(|object| {
+                object.kind == ObjectKind::Image
+                    && matches!(
+                        object.source.locator,
+                        SourceLocator::PptxShape { shape_id: 9, .. }
+                    )
+            })
+            .unwrap();
         let Visual::Group { children } = &picture.visual else {
             panic!("authored white background must precede the transparent image");
         };
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].bounds, picture.bounds);
-        assert!(matches!(&children[0].visual, Visual::PaintedShape {
-            geometry: Geometry::Rectangle, fill: Paint::Solid(0xffff_ffff), ..
-        }));
+        assert!(matches!(
+            &children[0].visual,
+            Visual::PaintedShape {
+                geometry: Geometry::Rectangle,
+                fill: Paint::Solid(0xffff_ffff),
+                ..
+            }
+        ));
         assert!(matches!(&children[1].visual, Visual::Image { .. }));
     }
 

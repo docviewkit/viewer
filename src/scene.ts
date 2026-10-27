@@ -219,6 +219,8 @@ export interface SceneStrokeStyle {
   readonly alignment: "center" | "inset";
   readonly miterLimit: number;
   readonly dashOffset?: number;
+  /** Snap orthogonal stroke boundaries at the current raster scale. */
+  readonly strokeAdjust?: boolean;
   readonly dash: readonly number[];
 }
 

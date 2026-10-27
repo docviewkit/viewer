@@ -9,7 +9,7 @@ use crate::model::{
 };
 
 const MAGIC: u32 = 0x3144_564f;
-const VERSION: u16 = 78;
+const VERSION: u16 = 79;
 const NONE: u32 = u32::MAX;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_VISUAL_DEPTH: usize = 64;
@@ -2424,7 +2424,7 @@ fn write_visual_at_depth<'a>(
             writer.u8(style.cap.code());
             writer.u8(style.join.code());
             writer.u8(style.compound.code());
-            writer.u8(style.alignment.code());
+            writer.u8(style.alignment.code() | if style.stroke_adjust { 0x80 } else { 0 });
             writer.f32(style.miter_limit);
             writer.f32(style.dash_offset);
             writer.u32(

@@ -1938,11 +1938,7 @@ fn parse_color(value: &str) -> Option<u32> {
         };
         let encode = |channel: f32| {
             let channel = channel.clamp(0.0, 1.0);
-            let srgb = if channel <= 0.003_130_8 {
-                channel * 12.92
-            } else {
-                1.055 * channel.powf(1.0 / 2.4) - 0.055
-            };
+            let srgb = super::linear_to_srgb(channel);
             (srgb * 255.0).round() as u32
         };
         return Some(

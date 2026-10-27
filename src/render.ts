@@ -2883,6 +2883,8 @@ function pixelSnappedStrokePath(
   transform: CanvasAffineTransform,
   lineWidth: number,
   closed: boolean,
+  strokeAdjust = false,
+  squareCap = false,
 ): PixelSnappedStrokePath | undefined {
   if (points.length < 2) return undefined;
   const devicePoints = points.map(({ x, y }) => ({
@@ -2913,20 +2915,35 @@ function pixelSnappedStrokePath(
     const widthTolerance = Math.max(1, deviceLineWidth) * 1e-3;
     if (normalScale <= Number.EPSILON
       || deviceLineWidth <= 0
-      || deviceLineWidth >= 1 - widthTolerance) return undefined;
-    const segmentLineWidth = 1 / normalScale;
+      || (!strokeAdjust && deviceLineWidth >= 1 - widthTolerance)) return undefined;
+    const authoredCoordinate = horizontal ? (start.y + end.y)/2 : (start.x + end.x)/2;
+    const lower = Math.round(authoredCoordinate-deviceLineWidth/2);
+    const upper = Math.round(authoredCoordinate+deviceLineWidth/2);
+    const segmentLineWidth = (strokeAdjust ? Math.max(1, upper-lower) : 1) / normalScale;
     const lineWidthTolerance = Math.max(1, segmentLineWidth) * 1e-3;
     if (snappedLineWidth !== undefined
       && Math.abs(segmentLineWidth - snappedLineWidth) > lineWidthTolerance) return undefined;
     snappedLineWidth ??= segmentLineWidth;
 
+    const adjustedCoordinate = upper > lower ? (lower+upper)/2 : Math.floor(authoredCoordinate)+0.5;
+    if (strokeAdjust && squareCap && !closed && points.length === 2) {
+      // Adjust the square outline in both device axes. Changing the normal
+      // width alone would also change the cap length, shifting tick endpoints.
+      const axis = horizontal ? "x" : "y";
+      const direction = end[axis] > start[axis] ? 1 : -1;
+      const adjustedWidth = segmentLineWidth * normalScale;
+      snapped[index]![axis] = Math.round(start[axis] - direction * deviceLineWidth / 2)
+        + direction * adjustedWidth / 2;
+      snapped[nextIndex]![axis] = Math.round(end[axis] + direction * deviceLineWidth / 2)
+        - direction * adjustedWidth / 2;
+    }
     const pixelCenter = 0.5;
     if (horizontal) {
-      const coordinate = Math.round((start.y + end.y) / 2 - pixelCenter) + pixelCenter;
+      const coordinate = strokeAdjust ? adjustedCoordinate : Math.round((start.y + end.y) / 2 - pixelCenter) + pixelCenter;
       snapped[index]!.y = coordinate;
       snapped[nextIndex]!.y = coordinate;
     } else {
-      const coordinate = Math.round((start.x + end.x) / 2 - pixelCenter) + pixelCenter;
+      const coordinate = strokeAdjust ? adjustedCoordinate : Math.round((start.x + end.x) / 2 - pixelCenter) + pixelCenter;
       snapped[index]!.x = coordinate;
       snapped[nextIndex]!.x = coordinate;
     }
@@ -2963,6 +2980,50 @@ function linearStrokePathPoints(
     points.push({ x: command.x, y: command.y });
   }
   return points.length >= 2 ? points : undefined;
+}
+
+// Native stroke adjustment is a raster semantic, independent of source format.
+// Resolve every disjoint segment before painting so an unsupported diagonal or
+// curve falls back atomically to the normal Canvas stroke.
+function drawAdjustedStroke(
+  context: OffscreenCanvasRenderingContext2D,
+  object: SceneObject,
+  geometry: SceneGeometry,
+): boolean {
+  const transform = currentCanvasTransform(context);
+  if (transform === undefined) return false;
+  const {x,y,width,height}=object.bounds;
+  const paths = geometry === "line" ? [[{x,y},{x:x+width,y:y+height}]]
+    : typeof geometry === "object" && geometry.kind === "path"
+      ? geometrySubpaths(geometry.commands).map(commands => linearStrokePathPoints(commands)?.map(p => ({x:p.x+x,y:p.y+y}))) : [];
+  if (paths.length === 0 || paths.some(points => points?.length !== 2)) return false;
+  // A contentless square/butt segment has no ink. It must not disable stroke
+  // adjustment for the other subpaths (native axes can contain such ticks).
+  // Round caps retain their ordinary Canvas behavior.
+  const visiblePaths = context.lineCap === "round" ? paths : paths.filter(points =>
+    points![0]!.x !== points![1]!.x || points![0]!.y !== points![1]!.y);
+  const snapped = visiblePaths.map(points => pixelSnappedStrokePath(points!,transform,context.lineWidth,false,true,context.lineCap === "square"));
+  if (snapped.some(path => path === undefined)) return false;
+  for (const path of snapped) {
+    context.lineWidth=path!.lineWidth;
+    context.beginPath();
+    if (context.lineCap === "square"
+      && Math.hypot(path!.points[1]!.x-path!.points[0]!.x,
+        path!.points[1]!.y-path!.points[0]!.y) < 1e-7) {
+      // A short adjusted square stroke can collapse to its cap rectangle.
+      // WebKit drops a zero-length stroke whereas Chromium paints that cap.
+      const point = path!.points[0]!;
+      const fill = context.fillStyle;
+      context.fillStyle = context.strokeStyle;
+      context.fillRect(point.x-path!.lineWidth/2,point.y-path!.lineWidth/2,
+        path!.lineWidth,path!.lineWidth);
+      context.fillStyle = fill;
+      continue;
+    }
+    traceStrokePoints(context,path!.points,false);
+    context.stroke();
+  }
+  return true;
 }
 
 function retraceStrokeGeometry(
@@ -3986,6 +4047,47 @@ function applyStrokeStyle(
   if (typeof context.setLineDash === "function") context.setLineDash([...style.dash]);
 }
 
+// Integrate pixel coverage for an axis-aligned solid rectangle. Canvas path
+// antialiasing quantizes these edges differently across browser backends.
+// At most nine disjoint integer rectangles reproduce the exact area coverage.
+function fillRectangleCoverage(
+  context: OffscreenCanvasRenderingContext2D,
+  bounds: SceneObject["bounds"],
+): boolean {
+  const m = context.getTransform?.();
+  if (m === undefined || m.b !== 0 || m.c !== 0 || m.a === 0 || m.d === 0
+    || context.globalCompositeOperation !== "source-over"
+    || context.shadowBlur !== 0 || context.shadowOffsetX !== 0 || context.shadowOffsetY !== 0
+    || context.shadowColor !== "rgba(0, 0, 0, 0)"
+    || (context.filter !== undefined && context.filter !== "none")) return false;
+  const xs = [bounds.x*m.a+m.e,(bounds.x+bounds.width)*m.a+m.e].sort((a,b)=>a-b);
+  const ys = [bounds.y*m.d+m.f,(bounds.y+bounds.height)*m.d+m.f].sort((a,b)=>a-b);
+  if (![...xs,...ys].every(Number.isFinite) || xs[1]! <= xs[0]! || ys[1]! <= ys[0]!) return false;
+  if ([...xs,...ys].every(Number.isInteger)) return false;
+  const bands = (lo: number, hi: number): readonly [number,number,number][] => {
+    if (Math.floor(lo) === Math.ceil(hi)-1) return [[Math.floor(lo),1,hi-lo]];
+    const result: [number,number,number][] = [];
+    const first = Math.ceil(lo), last = Math.floor(hi);
+    if (first > lo) result.push([Math.floor(lo),1,first-lo]);
+    if (last > first) result.push([first,last-first,1]);
+    if (hi > last) result.push([last,1,hi-last]);
+    return result;
+  };
+  const alpha = context.globalAlpha;
+  const horizontalBands = bands(xs[0]!,xs[1]!), verticalBands = bands(ys[0]!,ys[1]!);
+  context.save();
+  try {
+    context.setTransform(1,0,0,1,0,0);
+    for (const [x,width,horizontal] of horizontalBands) {
+      for (const [y,height,vertical] of verticalBands) {
+        context.globalAlpha = alpha*horizontal*vertical;
+        context.fillRect(x,y,width,height);
+      }
+    }
+  } finally { context.restore(); }
+  return true;
+}
+
 function strokePaintedGeometry(
   context: OffscreenCanvasRenderingContext2D,
   object: SceneObject,
@@ -4003,6 +4105,8 @@ function strokePaintedGeometry(
   ) => {
     context.strokeStyle = strokeStyle;
     context.lineWidth = lineWidth;
+    if (style?.strokeAdjust === true && (style.compound ?? "single") === "single"
+      && drawAdjustedStroke(context,object,geometry)) return;
     if (object.source.format === "pdf" || object.source.format === "xps") {
       traceGeometry(context, object, geometry);
     } else {
@@ -4129,7 +4233,8 @@ function drawPaintedGeometry(
         }
       }
       context.fillStyle = fill;
-      context.fill(fillRule);
+      if (visual.geometry !== "rectangle" || visual.fill.kind !== "solid"
+        || !fillRectangleCoverage(context,object.bounds)) context.fill(fillRule);
     }
   }
   const stroke = visual.stroke.kind === "pattern"
@@ -7015,8 +7120,11 @@ export class SceneRenderer {
       width: extent.width,
       height: extent.height,
     };
-    validateNumber(viewport.x, "viewport.x", true);
-    validateNumber(viewport.y, "viewport.y", true);
+    for (const coordinate of ["x", "y"] as const) {
+      if (!Number.isFinite(viewport[coordinate])) {
+        throw new OfficeEngineError("INVALID_RENDER_REQUEST", `viewport.${coordinate} must be a finite number`);
+      }
+    }
     validateNumber(viewport.width, "viewport.width");
     validateNumber(viewport.height, "viewport.height");
     const pixelWidth = Math.ceil(viewport.width * scale * pixelRatio);

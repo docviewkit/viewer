@@ -1494,6 +1494,8 @@ pub struct StrokeStyle {
     pub miter_limit: f32,
     pub dash: Vec<f32>,
     pub dash_offset: f32,
+    /// Adjust orthogonal stroke boundaries to device pixels at rasterization.
+    pub stroke_adjust: bool,
 }
 
 impl Default for StrokeStyle {
@@ -1506,6 +1508,7 @@ impl Default for StrokeStyle {
             miter_limit: 10.0,
             dash: Vec::new(),
             dash_offset: 0.0,
+            stroke_adjust: false,
         }
     }
 }

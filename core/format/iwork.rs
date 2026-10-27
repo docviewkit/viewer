@@ -2,9 +2,11 @@
 //!
 //! Pages decodes its saved pagination, native text, and bounded inline images.
 //! Numbers decodes native sheets, tables, tile storage, and cell values. Keynote
-//! decodes a bounded static text/image subset and falls back per slide to an
-//! embedded preview.
+//! decodes native slide objects. Optional object failures are isolated without
+//! substituting embedded document previews.
 //! The adapter never converts to another office format.
+
+mod chart_3d;
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -471,6 +473,7 @@ struct KeynoteChart {
     geometry: KeynoteGeometry,
     kind: KeynoteChartKind,
     three_d: bool,
+    view_3d: Option<chart_3d::View>,
     doughnut: bool,
     hole_ratio: f32,
     start_rotation: f32,
@@ -501,6 +504,7 @@ struct KeynoteChart {
     point_styles: Vec<IworkPointStyle>,
     bubble_sizes: Vec<Vec<f32>>,
     radar_rotation: f32,
+    radar_curved_grid: bool,
     radar_fills: Vec<Paint>,
     series_kinds: Vec<KeynoteChartKind>,
     series_axes: Vec<usize>,
@@ -516,6 +520,8 @@ struct IworkPointStyle {
     marker_stroke: (Paint, f32, StrokeStyle),
     line: Option<(Paint, f32, StrokeStyle)>,
     trendline: Option<(Paint, f32, StrokeStyle)>,
+    bubble_scale: f32,
+    bubble_diameter: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -523,7 +529,12 @@ struct IworkChartAxis {
     text: KeynoteTextStyle,
     vertical_labels: bool,
     show_axis: bool,
+    major_ticks: bool,
+    minor_ticks: bool,
+    tick_location: u64,
     show_labels: bool,
+    show_minimum: bool,
+    line: Option<(Paint, f32, StrokeStyle)>,
     show_series_labels: bool,
     major_intervals: u32,
     minor_count: u32,
@@ -533,10 +544,12 @@ struct IworkChartAxis {
     grid: Option<(Paint, f32, StrokeStyle)>,
     minimum: Option<f32>,
     maximum: Option<f32>,
-    decimals: Option<usize>,
+    number_format: IworkNumberFormat,
     logarithmic: bool,
+    logarithmic_decades: Option<u32>,
     percent_stacked: bool,
-    percent_format: bool,
+    iterated_ticks: bool,
+    automatic_range: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -545,9 +558,8 @@ enum SharedDocumentKind {
     Keynote,
 }
 
-/// Detects a modern, single-file iWork package from its contents and renders
-/// its verified root preview. Filenames and caller-supplied MIME types are not
-/// consulted.
+/// Detects a modern, single-file iWork package and parses its native contents.
+/// Filenames and caller-supplied MIME types are not consulted.
 pub fn detect_and_parse(bytes: &[u8], limits: Limits) -> Result<Option<Document>, Diagnostic> {
     detect_and_parse_with_font_metrics(bytes, limits, &FontMetricTable::default())
 }
@@ -2857,6 +2869,7 @@ fn numbers_canvas_drawable(
             // A zero name height requests automatic text height. Native
             // TST captions reserve eight points above/below the font box.
             title_height = numbers_fixed64(&model.payload, 33, model_part)?
+                .map(|value| value as f32)
                 .filter(|height| *height > 0.0)
                 .unwrap_or(style.font_size + 16.0);
             let mut visual = keynote_chart_label_visual(title.to_owned(), style.align, &style);
@@ -3062,9 +3075,11 @@ fn numbers_table(
     let column_count = usize::try_from(columns)
         .map_err(|_| iwa_error(model_part, "Numbers column count is not addressable"))?;
     let default_row = numbers_fixed64(&model.payload, 16, model_part)?
+        .map(|value| value as f32)
         .filter(|value| *value > 0.0)
         .unwrap_or(15.0);
     let default_column = numbers_fixed64(&model.payload, 17, model_part)?
+        .map(|value| value as f32)
         .filter(|value| *value > 0.0)
         .unwrap_or(72.0);
     let row_heights = iwork_table_header_sizes(messages, &row_references, row_count)?
@@ -4386,39 +4401,123 @@ fn iwork_formatted_cell_text(
     if kind == 258 {
         value *= 100.0;
     }
-    let mut rendered = if kind == 259 {
+    let rendered = if kind == 259 {
         format!("{:.*E}", decimals as usize, value)
     } else {
         format!("{:.*}", decimals as usize, value.abs())
     };
-    if numbers_varint(format, 5, part)? == Some(1) && kind != 259 {
-        rendered = super::group_decimal_digits(&rendered);
-    }
-    if kind == 257 {
-        let code = numbers_first_bytes(format, 3, part)?
-            .and_then(|code| std::str::from_utf8(code).ok())
-            .unwrap_or("");
-        let symbol = match code {
-            "CNY" | "JPY" => "¥",
-            "USD" => "$",
-            "EUR" => "€",
-            "GBP" => "£",
-            "KRW" => "₩",
-            other => other,
+    Ok(Some(
+        IworkNumberFormat::parse(Some(format), part)?.decorate(rendered, value),
+    ))
+}
+
+// TSK numeric decorations are shared by cells and chart axes. Their rounding
+// stays at the caller: chart ticks round halfway away from zero, while cached
+// cell text retains the existing fixed-point formatter's rounding semantics.
+#[derive(Clone, Debug)]
+struct IworkNumberFormat {
+    kind: u64,
+    decimals: Option<usize>,
+    currency: String,
+    grouping: bool,
+    parentheses: bool,
+    prefix: String,
+    suffix: String,
+    fraction_accuracy: i32,
+}
+
+impl IworkNumberFormat {
+    fn parse(bytes: Option<&[u8]>, part: &str) -> Result<Self, Diagnostic> {
+        let bytes = bytes.unwrap_or_default();
+        let string = |field| -> Result<String, Diagnostic> {
+            Ok(numbers_first_bytes(bytes, field, part)?
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .unwrap_or_default()
+                .to_owned())
         };
-        rendered.insert_str(0, symbol);
+        let currency = string(3)?;
+        Ok(Self {
+            kind: numbers_varint(bytes, 1, part)?.unwrap_or(256),
+            decimals: numbers_varint(bytes, 2, part)?
+                .filter(|v| *v <= 15)
+                .map(|v| v as usize),
+            currency: match currency.as_str() {
+                "CNY" | "JPY" => "¥".to_owned(),
+                "USD" => "$".to_owned(),
+                "EUR" => "€".to_owned(),
+                "GBP" => "£".to_owned(),
+                "KRW" => "₩".to_owned(),
+                _ => currency,
+            },
+            grouping: numbers_varint(bytes, 5, part)? == Some(1),
+            parentheses: matches!(numbers_varint(bytes, 4, part)?, Some(2 | 3)),
+            prefix: string(10000)?,
+            suffix: string(10001)?,
+            fraction_accuracy: numbers_varint(bytes, 11, part)?
+                .filter(|v| *v <= u64::from(u32::MAX))
+                .map(|v| v as u32 as i32)
+                .filter(|v| (-3..=-1).contains(v) || (1..=1_000_000).contains(v))
+                .unwrap_or(-1),
+        })
     }
-    if kind == 258 {
-        rendered.push('%');
-    }
-    if value < 0.0 && kind != 259 {
-        if matches!(numbers_varint(format, 4, part)?, Some(2 | 3)) {
-            rendered = format!("({rendered})");
+
+    fn fraction(&self, value: f64) -> String {
+        let mut whole = value.floor();
+        let fractional = value - whole;
+        let (mut numerator, mut denominator) = (0_u32, 1_u32);
+        if self.fraction_accuracy > 0 {
+            denominator = self.fraction_accuracy as u32;
+            numerator = (fractional * f64::from(denominator)).round() as u32;
         } else {
-            rendered.insert(0, '-');
+            // TSK stores a negative digit count, or a fixed positive denominator.
+            // Enumerating at most 999 denominators also keeps ties canonical:
+            // equal rational values retain their smallest denominator.
+            let maximum = 10_u32.pow(self.fraction_accuracy.unsigned_abs()) - 1;
+            let mut error = f64::INFINITY;
+            for candidate in 1..=maximum {
+                let n = (fractional * f64::from(candidate)).round() as u32;
+                let difference = (fractional - f64::from(n) / f64::from(candidate)).abs();
+                if difference < error {
+                    error = difference;
+                    (numerator, denominator) = (n, candidate);
+                    if difference == 0.0 {
+                        break;
+                    }
+                }
+            }
+        }
+        if numerator == denominator {
+            whole += 1.0;
+            numerator = 0;
+        }
+        if numerator == 0 {
+            format!("{whole:.0}")
+        } else if whole == 0.0 {
+            format!("{numerator}/{denominator}")
+        } else {
+            format!("{whole:.0} {numerator}/{denominator}")
         }
     }
-    Ok(Some(rendered))
+
+    fn decorate(&self, mut rendered: String, value: f64) -> String {
+        if self.grouping && !matches!(self.kind, 259 | 262) {
+            rendered = super::group_decimal_digits(&rendered);
+        }
+        if self.kind == 257 {
+            rendered.insert_str(0, &self.currency);
+        }
+        if self.kind == 258 {
+            rendered.push('%');
+        }
+        if value < 0.0 && self.kind != 259 && !(self.kind == 262 && rendered == "0") {
+            if self.parentheses {
+                rendered = format!("({rendered})");
+            } else {
+                rendered.insert(0, '-');
+            }
+        }
+        format!("{}{rendered}{}", self.prefix, self.suffix)
+    }
 }
 
 // TSK date patterns use ICU tokens (M = month, m = minute), unlike Excel formats.
@@ -4631,7 +4730,7 @@ fn numbers_varint(bytes: &[u8], field: u64, part: &str) -> Result<Option<u64>, D
     Ok(None)
 }
 
-fn numbers_fixed64(bytes: &[u8], field: u64, part: &str) -> Result<Option<f32>, Diagnostic> {
+fn numbers_fixed64(bytes: &[u8], field: u64, part: &str) -> Result<Option<f64>, Diagnostic> {
     let mut cursor = 0;
     while cursor < bytes.len() {
         let (key, consumed) = read_varint(&bytes[cursor..]).map_err(|message| {
@@ -4639,8 +4738,8 @@ fn numbers_fixed64(bytes: &[u8], field: u64, part: &str) -> Result<Option<f32>, 
         })?;
         cursor += consumed;
         if key >> 3 == field && key & 7 == 1 {
-            let value = numbers_le_f64(bytes, cursor, part)? as f32;
-            if !value.is_finite() {
+            let value = numbers_le_f64(bytes, cursor, part)?;
+            if !(value as f32).is_finite() {
                 return Err(iwa_error(
                     part,
                     "Numbers double exceeds the renderable range",
@@ -6892,6 +6991,20 @@ fn pages_attachment_objects(
             } else {
                 continue;
             };
+            // Wrap type 5 is Move with Text / None in the native inspector.
+            // Its chart geometry is already relative to the body origin; image
+            // and Inline with Text attachments instead place an inline box.
+            let anchored_chart = !is_image
+                && keynote_nested_message(&drawable_message.payload, 1, DOCUMENT_COMPONENT)?
+                    .map(|drawable| -> Result<bool, Diagnostic> {
+                        Ok(keynote_nested_message(drawable, 3, DOCUMENT_COMPONENT)?
+                            .map(|wrap| numbers_varint(wrap, 1, DOCUMENT_COMPONENT))
+                            .transpose()?
+                            .flatten()
+                            == Some(5))
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
             let target = page.targets.iter().find(|target| {
                 target.anchored_start <= character_index && character_index < target.anchored_end
             });
@@ -6969,8 +7082,12 @@ fn pages_attachment_objects(
                 &mut Vec::new(),
                 layout.width,
                 layout.height,
-                x - geometry.x,
-                y - geometry.y,
+                if anchored_chart {
+                    x - attachment.horizontal_offset
+                } else {
+                    x - geometry.x
+                },
+                if anchored_chart { y } else { y - geometry.y },
                 50,
                 true,
                 embedded_fonts,
@@ -11098,36 +11215,8 @@ fn keynote_push_chart(
             keynote_chart_label_visual(title.clone(), TextAlign::Center, &chart.title_style),
         )?;
     }
-    match chart.kind {
-        KeynoteChartKind::Column => keynote_push_bar_chart(
-            &chart,
-            false,
-            identifier,
-            unit_index,
-            part,
-            limits,
-            objects,
-            plot,
-            z,
-            parent_numeric_id,
-            parent_stable_id.as_deref(),
-            &mut serial,
-        ),
-        KeynoteChartKind::Bar => keynote_push_bar_chart(
-            &chart,
-            true,
-            identifier,
-            unit_index,
-            part,
-            limits,
-            objects,
-            plot,
-            z,
-            parent_numeric_id,
-            parent_stable_id.as_deref(),
-            &mut serial,
-        ),
-        KeynoteChartKind::Line | KeynoteChartKind::Area => keynote_push_line_chart(
+    if chart.three_d {
+        chart_3d::push(
             &chart,
             identifier,
             unit_index,
@@ -11139,60 +11228,104 @@ fn keynote_push_chart(
             parent_numeric_id,
             parent_stable_id.as_deref(),
             &mut serial,
-        ),
-        KeynoteChartKind::Scatter | KeynoteChartKind::Bubble => iwork_push_scatter_chart(
-            &chart,
-            identifier,
-            unit_index,
-            part,
-            limits,
-            objects,
-            plot,
-            z,
-            parent_numeric_id,
-            parent_stable_id.as_deref(),
-            &mut serial,
-        ),
-        KeynoteChartKind::Radar => iwork_push_radar_chart(
-            &chart,
-            identifier,
-            unit_index,
-            part,
-            limits,
-            objects,
-            plot,
-            z,
-            parent_numeric_id,
-            parent_stable_id.as_deref(),
-            &mut serial,
-        ),
-        KeynoteChartKind::Mixed => iwork_push_mixed_chart(
-            &chart,
-            identifier,
-            unit_index,
-            part,
-            limits,
-            objects,
-            plot,
-            z,
-            parent_numeric_id,
-            parent_stable_id.as_deref(),
-            &mut serial,
-        ),
-        KeynoteChartKind::Pie => keynote_push_pie_chart(
-            &chart,
-            identifier,
-            unit_index,
-            part,
-            limits,
-            objects,
-            plot,
-            z,
-            parent_numeric_id,
-            parent_stable_id.as_deref(),
-            &mut serial,
-        ),
-    }?;
+        )?;
+    } else {
+        match chart.kind {
+            KeynoteChartKind::Column => keynote_push_bar_chart(
+                &chart,
+                false,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id.as_deref(),
+                &mut serial,
+            ),
+            KeynoteChartKind::Bar => keynote_push_bar_chart(
+                &chart,
+                true,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id.as_deref(),
+                &mut serial,
+            ),
+            KeynoteChartKind::Line | KeynoteChartKind::Area => keynote_push_line_chart(
+                &chart,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id.as_deref(),
+                &mut serial,
+            ),
+            KeynoteChartKind::Scatter | KeynoteChartKind::Bubble => iwork_push_scatter_chart(
+                &chart,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id.as_deref(),
+                &mut serial,
+            ),
+            KeynoteChartKind::Radar => iwork_push_radar_chart(
+                &chart,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id.as_deref(),
+                &mut serial,
+            ),
+            KeynoteChartKind::Mixed => iwork_push_mixed_chart(
+                &chart,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id.as_deref(),
+                &mut serial,
+            ),
+            KeynoteChartKind::Pie => keynote_push_pie_chart(
+                &chart,
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id.as_deref(),
+                &mut serial,
+            ),
+        }?;
+    }
     if let Some(legend) = legend {
         keynote_push_chart_legend(
             &chart,
@@ -11507,21 +11640,22 @@ fn iwork_push_cartesian_labels(
             let height = label.chars().count() as f32 * chart.category_axis.text.font_size * 0.56;
             Rect {
                 x: plot.x + center - chart.category_axis.text.font_size * 0.6,
-                y: plot.y + plot.height + 3.0,
+                y: plot.y + plot.height + chart.category_axis.text.font_size * 0.525,
                 width: chart.category_axis.text.font_size * 1.2,
                 height: height.max(1.0),
             }
         } else if horizontal {
             Rect {
-                x: plot.x - 100.0,
-                y: plot.y + category_span * (category as f32 + 0.5) - 6.0,
+                x: plot.x - 100.0 - chart.category_axis.text.font_size + 8.0,
+                y: plot.y + category_span * (category as f32 + 0.5)
+                    - chart.category_axis.text.font_size * 0.6,
                 width: 94.0,
                 height: 12.0,
             }
         } else {
             Rect {
                 x: plot.x + center - category_span / 2.0,
-                y: plot.y + plot.height + 3.0,
+                y: plot.y + plot.height + chart.category_axis.text.font_size * 0.525,
                 width: category_span,
                 height: chart.category_axis.text.font_size * 1.2 + 2.0,
             }
@@ -11568,6 +11702,16 @@ fn iwork_push_cartesian_labels(
         serial,
     )?;
     Ok(())
+}
+
+// Native 3D area and 2D stacked area keep a zero-valued category for a
+// missing cell. Unstacked 2D area instead bridges finite points.
+fn iwork_chart_area_value(values: &[f32], category: usize) -> f32 {
+    values
+        .get(category)
+        .copied()
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0)
 }
 
 // TSCH percentage stacks normalize absolute magnitudes, including negatives.
@@ -11649,7 +11793,7 @@ fn keynote_push_bar_chart(
         serial,
     )?;
     let category_span = if horizontal {
-        plot.height / categories as f32
+        (plot.height - 2.0).max(0.0) / categories as f32
     } else {
         plot.width / categories as f32
     };
@@ -11715,7 +11859,7 @@ fn keynote_push_bar_chart(
             }
             let visible_start = start.clamp(minimum, maximum);
             let visible_end = end.clamp(minimum, maximum);
-            let (start_position, end_position) = if horizontal {
+            let (mut start_position, end_position) = if horizontal {
                 (
                     plot.x
                         + chart
@@ -11748,27 +11892,56 @@ fn keynote_push_bar_chart(
                             * plot.height,
                 )
             };
+            // Native TSCH keeps the bars clear of the one-point baseline, then
+            // snaps rectangle edges in document points (before CSS scaling).
+            if start == 0.0 {
+                start_position = if end_position > start_position {
+                    start_position.floor() + 1.0
+                } else {
+                    start_position.ceil() - 1.0
+                };
+            }
             let group_offset = if chart.stacked {
                 group_margin
             } else {
                 group_margin + series_step * series_index as f32
             };
-            let bar_bounds = if horizontal {
+            let group_start = if horizontal { plot.y + 1.0 } else { plot.x }
+                + category as f32 * category_span
+                + group_offset;
+            // Rounded TSCH bars quantize their slot size independently of its
+            // position. Plain bars quantize both absolute rectangle edges.
+            let group_span = if chart.bar_corner_radius > 0.0 {
+                grouped_span.max(0.5).round()
+            } else {
+                (group_start + grouped_span.max(0.5)).round() - group_start.round()
+            };
+            let group_start = group_start.round();
+            let mut bar_bounds = if horizontal {
                 Rect {
                     x: start_position.min(end_position),
-                    y: plot.y + category as f32 * category_span + group_offset,
+                    y: group_start,
                     width: (end_position - start_position).abs().max(0.5),
-                    height: grouped_span.max(0.5),
+                    height: group_span,
                 }
             } else {
                 Rect {
-                    x: plot.x + category as f32 * category_span + group_offset,
+                    x: group_start,
                     y: start_position.min(end_position),
-                    width: grouped_span.max(0.5),
+                    width: group_span,
                     height: (end_position - start_position).abs().max(0.5),
                 }
             };
-            if value != 0.0 && (!chart.value_axis.logarithmic || value > 0.0) {
+            let right = (bar_bounds.x + bar_bounds.width).round();
+            let bottom = (bar_bounds.y + bar_bounds.height).round();
+            bar_bounds.x = bar_bounds.x.round();
+            bar_bounds.y = bar_bounds.y.round();
+            bar_bounds.width = (right - bar_bounds.x).max(0.0);
+            bar_bounds.height = (bottom - bar_bounds.y).max(0.0);
+            if value != 0.0
+                && visible_start != visible_end
+                && (!chart.value_axis.logarithmic || value > 0.0)
+            {
                 keynote_push_chart_child(
                     identifier,
                     unit_index,
@@ -11802,7 +11975,7 @@ fn keynote_push_bar_chart(
                 {
                     let bounds = if horizontal {
                         Rect {
-                            x: plot.x - 100.0,
+                            x: plot.x - 100.0 - chart.category_axis.text.font_size + 8.0,
                             y: bar_bounds.y + bar_bounds.height / 2.0
                                 - chart.category_axis.text.font_size * 0.6,
                             width: 94.0,
@@ -11811,7 +11984,7 @@ fn keynote_push_bar_chart(
                     } else {
                         Rect {
                             x: bar_bounds.x + bar_bounds.width / 2.0 - series_step / 2.0,
-                            y: plot.y + plot.height + 3.0,
+                            y: plot.y + plot.height + chart.category_axis.text.font_size * 0.525,
                             width: series_step,
                             height: chart.category_axis.text.font_size * 1.2 + 2.0,
                         }
@@ -11902,19 +12075,19 @@ fn iwork_push_chart_value_ticks(
     parent_stable_id: Option<&str>,
     serial: &mut u32,
 ) -> Result<(), Diagnostic> {
-    for tick in (0..=axis.major_intervals).filter(|_| axis.show_labels) {
-        let ratio = tick as f32 / axis.major_intervals as f32;
-        let value = axis.tick_value(minimum, maximum, ratio);
+    for tick in (0..=axis.major_intervals).filter(|tick| axis.tick_label_visible(*tick)) {
+        let value = axis.tick_value(minimum, maximum, tick as f32 / axis.major_intervals as f32);
+        let ratio = axis.major_tick_ratio(tick, minimum, maximum);
         let bounds = if horizontal {
             Rect {
                 x: plot.x + plot.width * ratio - 20.0,
-                y: plot.y + plot.height + 2.0,
+                y: plot.y + plot.height + axis.text.font_size * 0.525,
                 width: 40.0,
                 height: 12.0,
             }
         } else {
             Rect {
-                x: plot.x - value_label_width - 8.0,
+                x: plot.x - value_label_width - axis.text.font_size,
                 y: plot.y + plot.height * (1.0 - ratio) - axis.text.font_size * 0.6,
                 width: value_label_width + 2.0,
                 height: axis.text.font_size * 1.2,
@@ -12073,12 +12246,8 @@ fn keynote_push_line_chart(
     }
     for ordinal in 0..chart.series.len() {
         // Native area layers paint the first series last; this matters where
-        // signed stacked bands cross. Lines retain their authored paint order.
-        let series_index = if area {
-            chart.series.len() - 1 - ordinal
-        } else {
-            ordinal
-        };
+        // signed stacked bands cross. The same reverse series order applies to lines.
+        let series_index = chart.series.len() - 1 - ordinal;
         let series = &plot_series[series_index];
         let mut commands = Vec::new();
         let mut points = Vec::new();
@@ -12092,7 +12261,11 @@ fn keynote_push_line_chart(
             } else {
                 category as f32 * plot.width / (categories - 1) as f32
             };
-            let value = series.get(category).copied().unwrap_or(f32::NAN);
+            let value = if area && chart.stacked {
+                iwork_chart_area_value(series, category)
+            } else {
+                series.get(category).copied().unwrap_or(f32::NAN)
+            };
             let valid = value.is_finite() && (!chart.value_axis.logarithmic || value > 0.0);
             let (plotted, bottom) = if area && chart.stacked {
                 let top = *cumulative_value;
@@ -12169,8 +12342,12 @@ fn keynote_push_line_chart(
                     } else {
                         Paint::None
                     },
-                    stroke: line.map(|s| s.0.clone()).unwrap_or(Paint::Solid(color)),
-                    stroke_width: line.map_or(2.0, |s| s.1),
+                    stroke: line.map(|s| s.0.clone()).unwrap_or(if area {
+                        Paint::None
+                    } else {
+                        Paint::Solid(color)
+                    }),
+                    stroke_width: line.map_or(if area { 0.0 } else { 2.0 }, |s| s.1),
                 };
                 if let Some(stroke) = line.filter(|s| s.2 != StrokeStyle::default()) {
                     Visual::StrokeStyle {
@@ -12205,26 +12382,92 @@ fn keynote_push_line_chart(
 }
 
 impl IworkChartAxis {
-    fn label(&self, value: f32) -> String {
-        let value = if self.percent_format {
-            value * 100.0
+    fn tick_label_visible(&self, tick: u32) -> bool {
+        self.show_labels && self.tick_present(tick) && (tick != 0 || self.show_minimum)
+    }
+
+    fn tick_present(&self, tick: u32) -> bool {
+        tick != 0
+            || !(self.logarithmic
+                && self.logarithmic_decades.is_some()
+                && self.maximum.is_some()
+                && self.minimum.is_none())
+    }
+
+    fn major_tick_ratio(&self, tick: u32, minimum: f32, maximum: f32) -> f32 {
+        let ratio = tick as f32 / self.major_intervals as f32;
+        if self.logarithmic && self.maximum.is_some() && self.logarithmic_decades.is_some() {
+            self.ratio(self.tick_value(minimum, maximum, ratio), minimum, maximum)
+                .unwrap_or(ratio)
         } else {
-            value
-        };
-        let mut label = if let Some(decimals) = self.decimals {
-            let factor = 10.0_f64.powi(decimals as i32);
-            format!(
-                "{:.*}",
-                decimals,
-                (f64::from(value) * factor).round() / factor
-            )
-        } else {
-            keynote_chart_number(value, false)
-        };
-        if self.percent_format {
-            label.push('%');
+            ratio
         }
-        label
+    }
+
+    fn minor_tick_ratios(&self, minimum: f32, maximum: f32, intervals: u32) -> Vec<f32> {
+        if self.logarithmic {
+            let end = self
+                .logarithmic_decades
+                .map_or(maximum, |decades| minimum * 10.0_f32.powi(decades as i32));
+            let start = if self.tick_present(0) {
+                minimum
+            } else {
+                minimum * 10.0
+            };
+            super::logarithmic_axis_minor_ticks(start, end, 10.0)
+                .into_iter()
+                .filter_map(|(value, _)| self.ratio(value, minimum, maximum))
+                .collect()
+        } else {
+            let divisions = self.minor_count + 1;
+            let count = intervals * divisions;
+            (0..=count)
+                .filter(|tick| tick % divisions != 0)
+                .map(|tick| tick as f32 / count as f32)
+                .collect()
+        }
+    }
+
+    fn label(&self, value: f32) -> String {
+        let format = &self.number_format;
+        let value = f64::from(value) * if format.kind == 258 { 100.0 } else { 1.0 };
+        let label = if format.kind == 262 {
+            format.fraction(value.abs())
+        } else if format.kind == 259 {
+            let rendered = format!("{:.*E}", format.decimals.unwrap_or(0), value);
+            let (mantissa, exponent) = rendered.split_once('E').unwrap_or((&rendered, "0"));
+            let exponent = exponent.parse::<i32>().unwrap_or(0);
+            format!("{mantissa}E{exponent:+03}")
+        } else if let Some(decimals) = format.decimals {
+            let factor = 10.0_f64.powi(decimals as i32);
+            let scaled = value.abs() * factor;
+            // Both native two-decimal Number and Currency round 0.145 to
+            // 0.15. Keep the decimal half step stable across the f32 cache
+            // boundary before widening; f64 multiplication alone gives
+            // 14.4999996 for that cached value.
+            let scaled = if decimals == 2 && matches!(format.kind, 256 | 257) {
+                let cached = value.abs() as f32 * factor as f32;
+                if cached.is_finite() {
+                    f64::from(cached)
+                } else {
+                    scaled
+                }
+            } else {
+                scaled
+            };
+            format!("{:.*}", decimals, scaled.round() / factor)
+        } else {
+            let scaled = value.abs() as f32 * 1000.0;
+            let rounded = if scaled.is_finite() {
+                f64::from(scaled.round()) / 1000.0
+            } else {
+                value.abs()
+            };
+            let mut label = format!("{rounded:.3}");
+            label.truncate(label.trim_end_matches('0').trim_end_matches('.').len());
+            label
+        };
+        format.decorate(label, value)
     }
 
     fn ratio(&self, value: f32, minimum: f32, maximum: f32) -> Option<f32> {
@@ -12239,8 +12482,29 @@ impl IworkChartAxis {
     }
 
     fn tick_value(&self, minimum: f32, maximum: f32, ratio: f32) -> f32 {
+        if self.iterated_ticks {
+            // Native symmetric authored and Auto-major scales iterate in
+            // double precision; preserve their signed near-zero labels.
+            let (minimum, maximum) = self
+                .automatic_range
+                .unwrap_or((f64::from(minimum), f64::from(maximum)));
+            let index = (ratio * self.major_intervals as f32).round() as u32;
+            let step = (maximum - minimum) / f64::from(self.major_intervals);
+            return (0..index).fold(minimum, |value, _| value + step) as f32;
+        }
+        if let Some((minimum, maximum)) = self.automatic_range {
+            let index = (ratio * self.major_intervals as f32).round();
+            let step = (maximum - minimum) / f64::from(self.major_intervals);
+            let zero_index = (-minimum / step).round();
+            return ((f64::from(index) - zero_index) * step) as f32;
+        }
         if self.logarithmic {
-            10.0_f32.powf(minimum.log10() + (maximum.log10() - minimum.log10()) * ratio)
+            let span = if self.maximum.is_some() && self.logarithmic_decades.is_some() {
+                self.major_intervals as f32
+            } else {
+                maximum.log10() - minimum.log10()
+            };
+            10.0_f32.powf(minimum.log10() + span * ratio)
         } else {
             minimum + (maximum - minimum) * ratio
         }
@@ -12260,18 +12524,36 @@ impl IworkChartAxis {
                     (min.min(v), max.max(v))
                 });
             let automatic = if min.is_finite() {
-                let low = min.log10().floor();
-                (
-                    10.0_f32.powf(low),
-                    10.0_f32.powf(max.log10().ceil().max(low + 1.0)),
-                )
+                let data_low = min.log10().floor();
+                let (low, high) = if let Some(decades) = self.logarithmic_decades {
+                    let low = self
+                        .minimum
+                        .filter(|value| *value > 0.0)
+                        .map_or(data_low.min(0.0), |value| value.log10());
+                    (low, max.log10().ceil().max(low + decades as f32))
+                } else {
+                    (data_low, max.log10().ceil().max(data_low + 1.0))
+                };
+                (10.0_f32.powf(low), 10.0_f32.powf(high))
             } else {
                 (1.0, 10.0)
             };
             let range = self.range(automatic);
             return if range.0 > 0.0 { range } else { automatic };
         }
-        self.range(keynote_chart_range(series, stacked))
+        if let Some(range) = self.automatic_range {
+            return self.range((range.0 as f32, range.1 as f32));
+        }
+        self.range(keynote_chart_range(
+            series,
+            stacked,
+            self.major_intervals == 4
+                && self.minimum.is_none()
+                && self.maximum.is_none()
+                && ((self.number_format.kind == 256
+                    && matches!(self.number_format.decimals, None | Some(2)))
+                    || (self.number_format.kind == 257 && self.number_format.decimals == Some(2))),
+        ))
     }
 
     fn range(&self, automatic: (f32, f32)) -> (f32, f32) {
@@ -12323,37 +12605,92 @@ fn iwork_push_radar_chart(
             center.1 + radius * ratio * angle.sin(),
         )
     };
-    let grid = chart.value_axis.grid.clone().unwrap_or((
-        Paint::Solid(0xb0b0_b0ff),
-        0.5,
-        StrokeStyle::default(),
-    ));
-    for tick in 1..=chart.value_axis.major_intervals {
-        let ratio = tick as f32 / chart.value_axis.major_intervals as f32;
-        let values = vec![ratio; count];
-        let geometry =
-            super::radar_polygon(&values, 1.0, plot.width, plot.height, radius, rotation).unwrap();
-        keynote_push_chart_child(
-            identifier,
-            unit_index,
-            part,
-            limits,
-            objects,
-            plot,
-            z,
-            parent_numeric_id,
-            parent_stable_id,
-            serial,
-            Visual::StrokeStyle {
-                style: grid.2.clone(),
-                visual: Box::new(Visual::PaintedShape {
-                    geometry,
-                    fill: Paint::None,
-                    stroke: grid.0.clone(),
-                    stroke_width: grid.1,
-                }),
-            },
-        )?;
+    if let Some(grid) = &chart.value_axis.grid {
+        for tick in 1..=chart.value_axis.major_intervals {
+            let ratio = tick as f32 / chart.value_axis.major_intervals as f32;
+            let (bounds, geometry) = if chart.radar_curved_grid {
+                let r = radius * ratio;
+                (
+                    Rect {
+                        x: plot.x + center.0 - r,
+                        y: plot.y + center.1 - r,
+                        width: r * 2.0,
+                        height: r * 2.0,
+                    },
+                    Geometry::Ellipse,
+                )
+            } else {
+                (
+                    plot,
+                    super::radar_polygon(
+                        &vec![ratio; count],
+                        1.0,
+                        plot.width,
+                        plot.height,
+                        radius,
+                        rotation,
+                    )
+                    .unwrap(),
+                )
+            };
+            keynote_push_chart_child(
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                bounds,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+                Visual::StrokeStyle {
+                    style: grid.2.clone(),
+                    visual: Box::new(Visual::PaintedShape {
+                        geometry,
+                        fill: Paint::None,
+                        stroke: grid.0.clone(),
+                        stroke_width: grid.1,
+                    }),
+                },
+            )?;
+        }
+    }
+    if let Some((stroke, width, style)) = &chart.category_axis.grid {
+        // A visible value axis replaces the first spoke with its own style.
+        for index in usize::from(chart.value_axis.show_axis)..count {
+            let (x, y) = point(index, 1.0);
+            keynote_push_chart_child(
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+                Visual::StrokeStyle {
+                    style: style.clone(),
+                    visual: Box::new(Visual::PaintedShape {
+                        geometry: Geometry::Path {
+                            fill_rule: FillRule::NonZero,
+                            commands: vec![
+                                PathCommand::MoveTo {
+                                    x: center.0,
+                                    y: center.1,
+                                },
+                                PathCommand::LineTo { x, y },
+                            ],
+                        },
+                        fill: Paint::None,
+                        stroke: stroke.clone(),
+                        stroke_width: *width,
+                    }),
+                },
+            )?;
+        }
     }
     for (index, series) in chart.series.iter().enumerate().rev() {
         let values = series
@@ -12415,7 +12752,47 @@ fn iwork_push_radar_chart(
             )?;
         }
     }
-    for (index, label) in chart.categories.iter().enumerate() {
+    if chart.value_axis.show_axis {
+        if let Some((stroke, width, style)) = &chart.value_axis.line {
+            let (x, y) = point(0, 1.0);
+            keynote_push_chart_child(
+                identifier,
+                unit_index,
+                part,
+                limits,
+                objects,
+                plot,
+                z,
+                parent_numeric_id,
+                parent_stable_id,
+                serial,
+                Visual::StrokeStyle {
+                    style: style.clone(),
+                    visual: Box::new(Visual::PaintedShape {
+                        geometry: Geometry::Path {
+                            fill_rule: FillRule::NonZero,
+                            commands: vec![
+                                PathCommand::MoveTo {
+                                    x: center.0,
+                                    y: center.1,
+                                },
+                                PathCommand::LineTo { x, y },
+                            ],
+                        },
+                        fill: Paint::None,
+                        stroke: stroke.clone(),
+                        stroke_width: *width,
+                    }),
+                },
+            )?;
+        }
+    }
+    for (index, label) in chart
+        .categories
+        .iter()
+        .enumerate()
+        .filter(|_| chart.category_axis.show_labels)
+    {
         let (x, y) = point(index, 1.0);
         let dx = x - center.0;
         let width = 100.0;
@@ -12457,7 +12834,9 @@ fn iwork_push_radar_chart(
             ),
         )?;
     }
-    for tick in 0..=chart.value_axis.major_intervals {
+    for tick in (0..=chart.value_axis.major_intervals)
+        .filter(|tick| chart.value_axis.tick_label_visible(*tick))
+    {
         let ratio = tick as f32 / chart.value_axis.major_intervals as f32;
         let (x, y) = point(0, ratio);
         keynote_push_chart_child(
@@ -12477,7 +12856,9 @@ fn iwork_push_radar_chart(
             parent_stable_id,
             serial,
             keynote_chart_label_visual(
-                keynote_chart_number(minimum + ratio * (maximum - minimum), false),
+                chart
+                    .value_axis
+                    .label(chart.value_axis.tick_value(minimum, maximum, ratio)),
                 TextAlign::End,
                 &chart.value_axis.text,
             ),
@@ -12633,10 +13014,14 @@ fn iwork_push_mixed_chart(
             layer.categories.clear();
             layer.value_axis.show_labels = false;
             layer.value_axis.show_axis = false;
+            layer.value_axis.major_ticks = false;
+            layer.value_axis.minor_ticks = false;
             layer.value_axis.grid = None;
             layer.value_axis.minor_grid = None;
             layer.value_axis.title = None;
             layer.category_axis.show_axis = false;
+            layer.category_axis.major_ticks = false;
+            layer.category_axis.minor_ticks = false;
             layer.category_axis.title = None;
             if kind == KeynoteChartKind::Column {
                 keynote_push_bar_chart(
@@ -12704,7 +13089,7 @@ fn iwork_push_scatter_chart(
                 .max(1.0),
         )
     } else {
-        keynote_chart_range(&chart.scatter_x, false)
+        keynote_chart_range(&chart.scatter_x, false, false)
     };
     let (x_min, x_max) = chart.category_axis.range(x_range);
     let (y_min, y_max) = chart.value_axis.data_range(&chart.series, false);
@@ -12851,7 +13236,7 @@ fn iwork_push_scatter_chart(
                 .bubble_sizes
                 .iter()
                 .flatten()
-                .copied()
+                .map(|v| v.abs())
                 .fold(0.0_f32, f32::max);
             for (point, ((x, y), size)) in xs
                 .iter()
@@ -12859,11 +13244,18 @@ fn iwork_push_scatter_chart(
                 .zip(&chart.bubble_sizes[index])
                 .enumerate()
             {
-                let maximum_radius = plot.width.min(plot.height) * 0.145;
-                // Native TSCH reserves a visible two-point minimum before scaling area.
-                // ChartML instead clamps after scaling; those boundaries are not equivalent.
-                let radius = (2.0 + (maximum_radius - 2.0).max(0.0) * (size / maximum).sqrt())
-                    .min(maximum_radius);
+                // TSCH adds a five-point diameter inset to the proportional
+                // size, with a seven-point minimum. Native frame-size and data-
+                // scale cases distinguish this from a proportional-only radius.
+                // ChartML's post-scaling clamp has a different boundary.
+                let proportional_radius = plot.width.min(plot.height) * 0.135 * style.bubble_scale;
+                let ratio = size.abs() / maximum.max(f32::MIN_POSITIVE);
+                let proportion = if style.bubble_diameter {
+                    ratio
+                } else {
+                    ratio.sqrt()
+                };
+                let radius = (2.5 + proportional_radius * proportion).max(3.5);
                 keynote_push_chart_child(
                     identifier,
                     unit_index,
@@ -12999,9 +13391,8 @@ fn keynote_push_pie_chart(
     let Some(series) = chart.series.first() else {
         return Ok(());
     };
-    let values: Vec<f32> = series.iter().map(|value| value.max(0.0)).collect();
-    let total: f32 = values.iter().sum();
-    if total <= f32::EPSILON {
+    let values = iwork_chart_pie_ratios(series);
+    if !values.iter().any(|value| *value > 0.0) {
         return Ok(());
     }
     let size = plot.width.min(plot.height);
@@ -13018,7 +13409,7 @@ fn keynote_push_pie_chart(
         if value <= f32::EPSILON {
             continue;
         }
-        let end_angle = start_angle + std::f32::consts::TAU * value / total;
+        let end_angle = start_angle + std::f32::consts::TAU * value;
         let mut commands = vec![PathCommand::MoveTo {
             x: center + radius * start_angle.cos(),
             y: center + radius * start_angle.sin(),
@@ -13091,16 +13482,8 @@ fn keynote_push_pie_chart(
                 }
             },
         )?;
-        if let Some(category) = chart
-            .categories
-            .get(index)
-            .filter(|value| !value.is_empty())
-        {
-            let label = if !chart.pie_show_category {
-                format!("{:.0}%", value / total * 100.0)
-            } else {
-                format!("{category}\n{:.0}%", value / total * 100.0)
-            };
+        if let Some(label) = iwork_chart_pie_label(chart, index, value) {
+            let show_value = chart.show_data_labels.first() == Some(&true);
             let style = &chart.pie_label_style;
             let midpoint = (start_angle + end_angle) / 2.0;
             let label_width = if chart.doughnut {
@@ -13108,7 +13491,12 @@ fn keynote_push_pie_chart(
             } else {
                 plot.width * 0.38
             };
-            let label_height = style.font_size * if chart.pie_show_category { 2.4 } else { 1.2 };
+            let label_height = style.font_size
+                * if chart.pie_show_category && show_value {
+                    2.4
+                } else {
+                    1.2
+                };
             let label_radius = if chart.doughnut {
                 radius + 15.0
             } else {
@@ -13201,38 +13589,184 @@ fn keynote_push_pie_chart(
     Ok(())
 }
 
-fn keynote_chart_range(series: &[Vec<f32>], stacked: bool) -> (f32, f32) {
-    if stacked {
-        let categories = series.iter().map(Vec::len).max().unwrap_or(0);
-        let mut minimum = 0.0_f32;
-        let mut maximum = 0.0_f32;
-        for category in 0..categories {
-            let mut positive = 0.0_f32;
-            let mut negative = 0.0_f32;
-            for values in series {
-                let value = values.get(category).copied().unwrap_or(0.0);
-                if value >= 0.0 {
-                    positive += value;
-                } else {
-                    negative += value;
-                }
+// TSCH uses slice magnitudes, including negative data, in both 2D and 3D.
+// Keep indices for category/style selection and accumulate in f64 so finite
+// f32 input cannot overflow the total and erase the entire pie.
+fn iwork_chart_pie_ratios(values: &[f32]) -> Vec<f32> {
+    let total: f64 = values
+        .iter()
+        .filter(|v| v.is_finite())
+        .map(|v| f64::from(v.abs()))
+        .sum();
+    values
+        .iter()
+        .map(|v| {
+            if total > 0.0 && v.is_finite() {
+                (f64::from(v.abs()) / total) as f32
+            } else {
+                0.0
             }
-            minimum = minimum.min(negative);
-            maximum = maximum.max(positive);
-        }
-        keynote_chart_nice_range(minimum, maximum)
+        })
+        .collect()
+}
+
+// Keep raw extents separate from axis quantization. Both the legacy range
+// policy and the native mixed-sign rule consume these same signed totals.
+fn iwork_chart_data_extent(series: &[Vec<f32>], stacked: bool) -> (f32, f32) {
+    if stacked {
+        super::chart_stacked_data_extent(series.iter().map(Vec::as_slice))
     } else {
-        let mut minimum = 0.0_f32;
-        let mut maximum = 0.0_f32;
-        for value in series.iter().flatten().copied() {
-            minimum = minimum.min(value);
-            maximum = maximum.max(value);
-        }
-        keynote_chart_nice_range(minimum, maximum)
+        series.iter().flatten().copied().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(minimum, maximum), value| (minimum.min(value), maximum.max(value)),
+        )
     }
 }
 
+fn keynote_chart_range(series: &[Vec<f32>], stacked: bool, refine_one_sided: bool) -> (f32, f32) {
+    let (minimum, maximum) = iwork_chart_data_extent(series, stacked);
+    if stacked {
+        return keynote_chart_nice_range(minimum, maximum);
+    }
+    if minimum == f32::INFINITY && maximum == f32::NEG_INFINITY {
+        return (0.0, 4.0);
+    }
+    if refine_one_sided {
+        if let Some(range) = iwork_chart_one_sided_range(minimum, maximum) {
+            return range;
+        }
+    }
+    keynote_chart_nice_range(minimum.min(0.0), maximum.max(0.0))
+}
+
+// Native automatic Number precision and two-decimal Number/Currency, default-four-step single-sided axes
+// quantize the data spread while
+// retaining a decimal quantum for the dominant magnitude. This is a floor
+// 1/2/5 quantum, unlike the common nearest-step policy used by other formats.
+// Other explicit display precision, nondefault step counts, stacking and authored
+// limits retain separate TSCH policies. Mixed signs use the independent
+// dominant-side rule below when its adapter boundary is verified.
+fn iwork_chart_one_sided_range(minimum: f32, maximum: f32) -> Option<(f32, f32)> {
+    if minimum < 0.0 && maximum > 0.0 {
+        return None;
+    }
+    let dominant = f64::from(minimum.abs().max(maximum.abs()));
+    if dominant == 0.0 {
+        return None;
+    }
+    let span = f64::from(maximum) - f64::from(minimum);
+    let raw_step = if span > 0.0 { span / 4.0 } else { 0.25 };
+    let power = 10.0_f64.powf(raw_step.log10().floor());
+    let mantissa = raw_step / power;
+    let spread_quantum = power
+        * if mantissa >= 5.0 {
+            5.0
+        } else if mantissa >= 2.0 {
+            2.0
+        } else {
+            1.0
+        };
+    let quantum = spread_quantum.max(10.0_f64.powf((dominant / 4.0).log10().floor()));
+    let units = dominant / quantum;
+    // Cached data is f32: do not add an entire quantum for one input ULP
+    // above a decimal boundary, such as the stored representation of 0.3.
+    let upper = (units - units * f64::from(f32::EPSILON)).ceil() * quantum;
+    if !upper.is_finite() || upper <= 0.0 || upper > f64::from(f32::MAX) {
+        return None;
+    }
+    Some(if minimum >= 0.0 {
+        (0.0, upper as f32)
+    } else {
+        (-(upper as f32), 0.0)
+    })
+}
+
+// TSCH Number/Currency scales allocate four intervals to the dominant side,
+// rounds each side to its native decimal bound, then aligns the shorter side
+// to that step. This differs from both shared nearest-step axes and TSCH
+// one-sided spread quantization. Extents retain their adapter semantics:
+// bar signed sums and area cumulative boundaries differ. Single-sided stacks
+// and authored limits retain their separate policies.
+fn iwork_chart_cross_zero_range((minimum, maximum): (f32, f32)) -> Option<(f64, f64, u32)> {
+    if !minimum.is_finite() || !maximum.is_finite() || minimum >= 0.0 || maximum <= 0.0 {
+        return None;
+    }
+    let bound = |value: f64| {
+        let power = 10.0_f64.powf(value.log10().floor());
+        let quantum = power * if value / power < 2.0 { 0.2 } else { 1.0 };
+        let units = value / quantum;
+        (units - units * f64::from(f32::EPSILON) * 0.5).ceil() * quantum
+    };
+    let negative = f64::from(-minimum);
+    let positive = f64::from(maximum);
+    let dominant = bound(negative.max(positive));
+    let step = dominant / 4.0;
+    let short_steps = (bound(negative.min(positive)) / step - f64::from(f32::EPSILON)).ceil();
+    let short = short_steps * step;
+    if !dominant.is_finite()
+        || dominant > f64::from(f32::MAX)
+        || !(1.0..=4.0).contains(&short_steps)
+    {
+        return None;
+    }
+    let (low, high) = if positive >= negative {
+        (-short, dominant)
+    } else {
+        (-dominant, short)
+    };
+    Some((low, high, 4 + short_steps as u32))
+}
+
+// Explicit Auto-major (TSCH count zero) pads the zero-inclusive range by
+// five percent, then takes the ceiling 1/2/5 step targeting ten intervals.
+// Native constant data instead retains its value as the lower limit and adds
+// one. Neither rule is equivalent to shared nearest-step chart scales.
+fn iwork_chart_auto_range((minimum, maximum): (f32, f32)) -> Option<(f64, f64, u32)> {
+    if !minimum.is_finite() || !maximum.is_finite() {
+        return None;
+    }
+    let minimum = f64::from(minimum);
+    let maximum = f64::from(maximum);
+    if minimum == maximum {
+        let high = minimum + 1.0;
+        return (high as f32 > minimum as f32).then_some((minimum, high, 1));
+    }
+    let minimum = minimum.min(0.0);
+    let maximum = maximum.max(0.0);
+    let span = maximum - minimum;
+    let raw_step = span * 1.1 / 10.0;
+    let power = 10.0_f64.powf(raw_step.log10().floor());
+    let step = [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|v| v * power)
+        .find(|v| *v >= raw_step - raw_step * f64::from(f32::EPSILON) * 0.5)?;
+    let low = if minimum < 0.0 {
+        ((minimum - span * 0.05) / step).floor() * step
+    } else {
+        0.0
+    };
+    let high = if maximum > 0.0 {
+        ((maximum + span * 0.05) / step).ceil() * step
+    } else {
+        0.0
+    };
+    let intervals = ((high - low) / step).round();
+    if !low.is_finite()
+        || !high.is_finite()
+        || low < -f64::from(f32::MAX)
+        || high > f64::from(f32::MAX)
+        || high as f32 <= low as f32
+        || !(1.0..=64.0).contains(&intervals)
+    {
+        return None;
+    }
+    Some((low, high, intervals as u32))
+}
+
 fn keynote_chart_nice_range(minimum: f32, maximum: f32) -> (f32, f32) {
+    if minimum == 0.0 && maximum == 0.0 {
+        return (0.0, 4.0);
+    }
     if maximum - minimum <= f32::EPSILON {
         return (minimum, minimum + 1.0);
     }
@@ -13255,6 +13789,25 @@ fn keynote_chart_number(value: f32, percent: bool) -> String {
         text.pop();
     }
     text
+}
+
+// The label content is shared by 2D and 3D TSCH pies; their placement differs.
+fn iwork_chart_pie_label(chart: &KeynoteChart, index: usize, fraction: f32) -> Option<String> {
+    let category = chart
+        .categories
+        .get(index)
+        .filter(|value| !value.is_empty())?;
+    let show_value = chart.show_data_labels.first() == Some(&true);
+    if !show_value && !chart.pie_show_category {
+        return None;
+    }
+    Some(if !show_value {
+        category.clone()
+    } else if !chart.pie_show_category {
+        format!("{:.0}%", fraction * 100.0)
+    } else {
+        format!("{category}\n{:.0}%", fraction * 100.0)
+    })
 }
 
 fn keynote_chart_label_visual(text: String, align: TextAlign, style: &KeynoteTextStyle) -> Visual {
@@ -13284,6 +13837,7 @@ fn iwork_chart_value_label_width(chart: &KeynoteChart) -> f32 {
     // ponytail: reuse the existing bounded text-width estimate; browser font
     // metrics can replace it when chart label layout receives measured advances.
     (0..=chart.value_axis.major_intervals)
+        .filter(|tick| *tick != 0 || chart.value_axis.show_minimum)
         .map(|tick| {
             let value = chart.value_axis.tick_value(
                 minimum,
@@ -13302,6 +13856,17 @@ fn iwork_chart_value_label_width(chart: &KeynoteChart) -> f32 {
             .width
         })
         .fold(0.0_f32, f32::max)
+}
+
+// TSCH point-grid alignment is distinct from DrawingML device geometry.
+fn iwork_chart_tick_position(plot: Rect, vertical: bool, ratio: f32) -> f32 {
+    if vertical {
+        (plot.y + plot.height * (1.0 - ratio)).ceil() - 0.5 - plot.y
+    } else {
+        // Native preserves positions in the last hundredth of a point.
+        // Fifteen independent native widths (70..7000 points) cover this edge.
+        (plot.x + plot.width * ratio + 0.01).floor() + 0.5 - plot.x
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13339,24 +13904,48 @@ fn keynote_push_chart_axes(
             let Some((stroke, stroke_width, style)) = grid else {
                 continue;
             };
-            if minor && axis.minor_count == 0 {
+            if minor && !axis.logarithmic && axis.minor_count == 0 {
                 continue;
             }
             let step = if minor { axis.minor_count + 1 } else { 1 };
             let intervals = axis.major_intervals * step;
-            let mut commands = Vec::new();
-            for tick in 0..=intervals {
-                if minor && tick % step == 0 {
-                    continue;
-                }
-                let ratio = tick as f32 / intervals as f32;
-                let (start, end) = if horizontal {
-                    ((plot.width * ratio, 0.0), (plot.width * ratio, plot.height))
+            let range = if std::ptr::eq(axis, &chart.value_axis) {
+                axis.data_range(&chart.series, chart.stacked)
+            } else {
+                axis.data_range(&chart.scatter_x, false)
+            };
+            let ratios: Vec<_> = if axis.logarithmic {
+                if minor {
+                    axis.minor_tick_ratios(range.0, range.1, axis.major_intervals)
                 } else {
-                    (
-                        (0.0, plot.height * ratio),
-                        (plot.width, plot.height * ratio),
-                    )
+                    (0..=axis.major_intervals)
+                        .filter(|tick| axis.tick_present(*tick))
+                        .skip(1)
+                        .map(|tick| axis.major_tick_ratio(tick, range.0, range.1))
+                        .collect()
+                }
+            } else {
+                (0..=intervals)
+                    .filter(|tick| !minor || tick % step != 0)
+                    .map(|tick| tick as f32 / intervals as f32)
+                    .collect()
+            };
+            let mut commands = Vec::new();
+            for ratio in ratios {
+                let (start, end) = if horizontal {
+                    let along = if axis.logarithmic {
+                        iwork_chart_tick_position(plot, false, ratio)
+                    } else {
+                        plot.width * ratio + 0.5
+                    };
+                    ((along, 0.0), (along, plot.height))
+                } else {
+                    let along = if axis.logarithmic {
+                        iwork_chart_tick_position(plot, true, ratio)
+                    } else {
+                        plot.height * ratio - 0.5
+                    };
+                    ((0.0, along), (plot.width, along))
                 };
                 commands.push(PathCommand::MoveTo {
                     x: start.0,
@@ -13376,7 +13965,10 @@ fn keynote_push_chart_axes(
                 parent_stable_id,
                 serial,
                 Visual::StrokeStyle {
-                    style: style.clone(),
+                    style: StrokeStyle {
+                        stroke_adjust: true,
+                        ..style.clone()
+                    },
                     visual: Box::new(Visual::PaintedShape {
                         geometry: Geometry::Path {
                             fill_rule: FillRule::NonZero,
@@ -13430,21 +14022,102 @@ fn keynote_push_chart_axes(
     if !chart.value_axis.show_axis {
         commands.truncate(2);
     }
-    if !chart.category_axis.show_axis
-        || (chart.kind != KeynoteChartKind::Scatter
-            && !chart.category_axis.show_series_labels
-            && chart.value_axis.grid.is_some()
-            && (baseline
-                - if horizontal {
-                    plot.x
-                } else {
-                    plot.y + plot.height
-                })
-            .abs()
-                < 0.001)
-    {
+    if !chart.category_axis.show_axis {
         commands.drain(..2);
     }
+    for command in &mut commands {
+        if let PathCommand::MoveTo { x, y } | PathCommand::LineTo { x, y } = command {
+            *x += 0.5;
+            *y -= 0.5;
+        }
+    }
+    // TSCH uses a two-point half-span for major ticks, one for minor
+    // ticks, and trims the outside span by one point. DrawingML's full
+    // fixed-length ticks do not have this trim or this point-grid rounding.
+    // Keep this adapter geometry separate and reuse shared stroke rasterization.
+    let mut ticks = |axis: &IworkChartAxis,
+                     vertical: bool,
+                     position: f32,
+                     intervals: u32,
+                     range: (f32, f32)| {
+        if intervals == 0 {
+            return;
+        }
+        for minor in [false, true] {
+            if !(if minor {
+                axis.minor_ticks && (axis.logarithmic || axis.minor_count > 0)
+            } else {
+                axis.major_ticks
+            }) {
+                continue;
+            }
+            let size = if minor { 1.0 } else { 2.0 };
+            let (near, far) = match axis.tick_location {
+                1 => (0.0, size),
+                2 => (-size, size),
+                3 => (-size, -1.0),
+                _ => continue,
+            };
+            let ratios: Vec<_> = if minor {
+                axis.minor_tick_ratios(range.0, range.1, intervals)
+            } else {
+                (0..=intervals)
+                    .filter(|tick| axis.tick_present(*tick))
+                    .map(|tick| {
+                        if axis.logarithmic {
+                            axis.major_tick_ratio(tick, range.0, range.1)
+                        } else {
+                            tick as f32 / intervals as f32
+                        }
+                    })
+                    .collect()
+            };
+            for ratio in ratios {
+                let along = iwork_chart_tick_position(plot, vertical, ratio);
+                let point = |offset| {
+                    if vertical {
+                        (position + offset, along)
+                    } else {
+                        (along, position - offset)
+                    }
+                };
+                let (x, y) = point(near);
+                commands.push(PathCommand::MoveTo { x, y });
+                let (x, y) = point(far);
+                commands.push(PathCommand::LineTo { x, y });
+            }
+        }
+    };
+    ticks(
+        &chart.value_axis,
+        !horizontal,
+        if horizontal { plot.height - 0.5 } else { 0.5 },
+        chart.value_axis.major_intervals,
+        chart.value_axis.data_range(&chart.series, chart.stacked),
+    );
+    let category_intervals = if matches!(
+        chart.kind,
+        KeynoteChartKind::Scatter | KeynoteChartKind::Bubble
+    ) {
+        chart.category_axis.major_intervals
+    } else if matches!(chart.kind, KeynoteChartKind::Column | KeynoteChartKind::Bar)
+        || !chart.plot_to_edges
+    {
+        chart.categories.len() as u32
+    } else {
+        chart.categories.len().saturating_sub(1) as u32
+    };
+    ticks(
+        &chart.category_axis,
+        horizontal,
+        if horizontal {
+            baseline - plot.x + 0.5
+        } else {
+            baseline - plot.y - 0.5
+        },
+        category_intervals,
+        chart.category_axis.data_range(&chart.scatter_x, false),
+    );
     if commands.is_empty() {
         return Ok(());
     }
@@ -13459,23 +14132,21 @@ fn keynote_push_chart_axes(
         parent_numeric_id,
         parent_stable_id,
         serial,
-        Visual::PaintedShape {
-            geometry: Geometry::Path {
-                fill_rule: FillRule::NonZero,
-                commands,
+        Visual::StrokeStyle {
+            style: StrokeStyle {
+                cap: LineCap::Square,
+                stroke_adjust: true,
+                ..StrokeStyle::default()
             },
-            fill: Paint::None,
-            stroke: Paint::Solid(
-                if matches!(
-                    chart.kind,
-                    KeynoteChartKind::Scatter | KeynoteChartKind::Bubble
-                ) {
-                    0x0000_00ff
-                } else {
-                    0x7777_77ff
+            visual: Box::new(Visual::PaintedShape {
+                geometry: Geometry::Path {
+                    fill_rule: FillRule::NonZero,
+                    commands,
                 },
-            ),
-            stroke_width: 1.0,
+                fill: Paint::None,
+                stroke: Paint::Solid(0x0000_00ff),
+                stroke_width: 1.0,
+            }),
         },
     )
 }
@@ -14270,7 +14941,7 @@ fn iwork_chart_fidelity(
 ) {
     if chart.three_d {
         diagnostics.push(Diagnostic::warning(DiagnosticCode::UnsupportedFeature, Phase::Render,
-            Fidelity::Approximate, format!("IWORK_CHART_3D_APPROXIMATE: chart {identifier}: cached data is rendered in 2D; native perspective, extrusion, materials and lighting are not reproduced")).in_part(part));
+            Fidelity::Approximate, format!("IWORK_CHART_3D_APPROXIMATE: chart {identifier}: 3D scene projection and extrusion are approximate; native camera fitting, bevels, materials and lighting are not yet validated")).in_part(part));
     }
 }
 
@@ -14387,16 +15058,23 @@ fn keynote_chart(
         19 => (KeynoteChartKind::Area, true, true),
         _ => return Ok(None),
     };
-    let by_column = direction == 2
-        || (kind == KeynoteChartKind::Pie
-            && rows.len() > 1
-            && rows.iter().all(|series| series.len() == 1));
+    // TSCH pie datasets run perpendicular to Cartesian series: a row-oriented
+    // cache selects a column of slices. Multiple columns select datasets.
+    let by_column = if kind == KeynoteChartKind::Pie {
+        direction != 2
+    } else {
+        direction == 2
+    };
     let (mut series_names, categories) = if by_column {
         rows = keynote_transpose_chart_series(rows);
         (column_names, row_names)
     } else {
         (row_names, column_names)
     };
+    let series_nonstyles = numbers_first_bytes(archive, 19, part)?
+        .map(|bytes| keynote_chart_style_references(bytes, part))
+        .transpose()?
+        .unwrap_or_default();
     let mut scatter_x = Vec::new();
     let mut bubble_sizes = Vec::new();
     if matches!(kind, KeynoteChartKind::Scatter | KeynoteChartKind::Bubble) {
@@ -14414,6 +15092,13 @@ fn keynote_chart(
         };
         for y_index in (1..rows.len()).step_by(step) {
             let x_index = if shared_x { 0 } else { y_index - 1 };
+            let properties = iwork_chart_properties(
+                archives,
+                series_nonstyles.get(values.len()).copied().unwrap_or(0),
+                IWORK_CHART_SERIES_NONSTYLE_TYPE,
+                part,
+            )?;
+            let show_negative = numbers_varint(&properties, 30, part)? == Some(1);
             let mut xs = Vec::new();
             let mut ys = Vec::new();
             let mut sizes = Vec::new();
@@ -14426,7 +15111,11 @@ fn keynote_chart(
                 } else {
                     1.0
                 };
-                if x.is_finite() && y.is_finite() && size.is_finite() && size > 0.0 {
+                if x.is_finite()
+                    && y.is_finite()
+                    && size.is_finite()
+                    && (size >= 0.0 || show_negative)
+                {
                     xs.push(x);
                     ys.push(y);
                     sizes.push(size);
@@ -14461,8 +15150,20 @@ fn keynote_chart(
         .map(|identifier| keynote_chart_title(archives, identifier, part))
         .transpose()?
         .flatten();
-    let colors =
-        keynote_chart_series_colors(stylesheet_archives, &style_references, kind, three_d, part)?;
+    let theme_styles = numbers_references(archive, 17, part)?;
+    let colors = keynote_chart_series_colors(
+        stylesheet_archives,
+        &style_references,
+        &theme_styles,
+        if kind == KeynoteChartKind::Pie {
+            categories.len()
+        } else {
+            rows.len()
+        },
+        kind,
+        three_d,
+        part,
+    )?;
     let chart_style = iwork_chart_properties(
         stylesheet_archives,
         numbers_references(archive, 9, part)?
@@ -14492,7 +15193,7 @@ fn keynote_chart(
             ..KeynoteTextStyle::default()
         },
     )?;
-    let automatic_value_range = keynote_chart_range(&rows, stacked);
+    let automatic_value_range = keynote_chart_range(&rows, stacked, false);
     let axis = |value: bool, ordinal: usize| -> Result<IworkChartAxis, Diagnostic> {
         let style = iwork_chart_properties(
             stylesheet_archives,
@@ -14524,10 +15225,29 @@ fn keynote_chart(
                 ..KeynoteTextStyle::default()
             },
         )?;
-        let grid = if numbers_varint(&style, if value { 28 } else { 27 }, part)? == Some(1) {
+        // Polar category spokes have their own TSCH switch and a black
+        // one-point default; Cartesian category grid visibility is independent.
+        let polar_category = !value && kind == KeynoteChartKind::Radar;
+        let grid = if numbers_varint(
+            &style,
+            if value {
+                28
+            } else if polar_category {
+                44
+            } else {
+                27
+            },
+            part,
+        )?
+        .unwrap_or(u64::from(polar_category))
+            == 1
+        {
             numbers_first_bytes(&style, if value { 17 } else { 16 }, part)?
                 .map(|bytes| keynote_stroke(bytes, part))
                 .transpose()?
+                .or_else(|| {
+                    polar_category.then(|| (Paint::Solid(0x0000_00ff), 1.0, StrokeStyle::default()))
+                })
         } else {
             None
         };
@@ -14539,23 +15259,26 @@ fn keynote_chart(
             .map(|v| numbers_fixed64(v, 1, part))
             .transpose()?
             .flatten();
+        let symmetric_bounds = minimum
+            .zip(maximum)
+            .is_some_and(|(minimum, maximum)| minimum < 0.0 && maximum == -minimum);
+        let minimum = minimum.map(|value| value as f32);
+        let maximum = maximum.map(|value| value as f32);
         let number_format = numbers_first_bytes(&nonstyle, 42, part)?;
-        let decimals = number_format
-            .map(|v| numbers_varint(v, 2, part))
-            .transpose()?
-            .flatten()
-            .filter(|v| *v <= 15)
-            .map(|v| v as usize);
+        let mut number_format = IworkNumberFormat::parse(number_format, part)?;
         let scale = numbers_varint(&nonstyle, 8, part)?.unwrap_or(0);
-        let percent_format = number_format
-            .map(|v| numbers_varint(v, 1, part))
-            .transpose()?
-            .flatten()
-            == Some(258);
+        if scale == 3 {
+            number_format.kind = 258;
+        }
         let mut axis = IworkChartAxis {
             logarithmic: scale == 2,
+            logarithmic_decades: match numbers_varint(&nonstyle, 4, part)? {
+                Some(0) => None,
+                value => Some(value.unwrap_or(2).min(64) as u32),
+            },
             percent_stacked: scale == 3,
-            percent_format: percent_format || scale == 3,
+            iterated_ticks: symmetric_bounds,
+            automatic_range: None,
             text,
             vertical_labels: !value
                 && keynote_fixed32_field(&style, 9, part)?
@@ -14578,7 +15301,8 @@ fn keynote_chart(
             } else {
                 4
             },
-            minor_count: numbers_varint(&nonstyle, 6, part)?.unwrap_or(0).min(8) as u32,
+            // Native axis panels default to one minor step when field 6 is absent.
+            minor_count: numbers_varint(&nonstyle, 6, part)?.unwrap_or(1).min(8) as u32,
             minor_grid: if value && numbers_varint(&style, 33, part)? == Some(1) {
                 numbers_first_bytes(&style, 23, part)?
                     .map(|bytes| keynote_stroke(bytes, part))
@@ -14602,23 +15326,103 @@ fn keynote_chart(
                 KeynoteTextStyle::default(),
             )?,
             show_axis: numbers_varint(&style, if value { 25 } else { 24 }, part)?.unwrap_or(1) != 0,
+            major_ticks: numbers_varint(&style, if value { 30 } else { 29 }, part)?.unwrap_or(0)
+                != 0,
+            minor_ticks: numbers_varint(&style, if value { 35 } else { 34 }, part)?.unwrap_or(0)
+                != 0,
+            tick_location: numbers_varint(&style, if value { 37 } else { 36 }, part)?
+                .unwrap_or(if value { 3 } else { 2 }),
             show_labels: numbers_varint(&nonstyle, if value { 11 } else { 9 }, part)?.unwrap_or(1)
                 != 0,
+            show_minimum: !value || numbers_varint(&style, 31, part)?.unwrap_or(1) != 0,
+            line: if value
+                && kind == KeynoteChartKind::Radar
+                && numbers_varint(&style, 25, part)?.unwrap_or(1) != 0
+            {
+                numbers_first_bytes(&style, 17, part)?
+                    .map(|bytes| keynote_stroke(bytes, part))
+                    .transpose()?
+            } else {
+                None
+            },
             minimum,
             maximum,
-            decimals,
+            number_format,
         };
-        if axis.logarithmic && numbers_varint(&nonstyle, 5, part)?.is_none() {
+        if value
+            && matches!(
+                kind,
+                KeynoteChartKind::Column
+                    | KeynoteChartKind::Bar
+                    | KeynoteChartKind::Line
+                    | KeynoteChartKind::Area
+            )
+            && scale != 2
+            && scale != 3
+            && minimum.is_none()
+            && maximum.is_none()
+            && matches!(axis.number_format.kind, 256 | 257)
+        {
+            let count = numbers_varint(&nonstyle, 5, part)?;
+            // Area axes use algebraic cumulative boundaries. Column/bar
+            // axes use independent signed totals; DrawingML keeps its own
+            // grouping/axis selection around the shared finite-sum primitive.
+            let stacked_area = stacked && kind == KeynoteChartKind::Area;
+            let extent = if stacked_area {
+                let categories = rows.iter().map(Vec::len).max().unwrap_or(0);
+                (0..categories).fold((0.0_f32, 0.0_f32), |extent, category| {
+                    let mut total = 0.0_f32;
+                    rows.iter().fold(extent, |(low, high), values| {
+                        total += iwork_chart_area_value(values, category);
+                        (low.min(total), high.max(total))
+                    })
+                })
+            } else {
+                iwork_chart_data_extent(&rows, stacked)
+            };
+            let automatic_number =
+                axis.number_format.kind == 256 && axis.number_format.decimals.is_none();
+            let area_precision = match axis.number_format.kind {
+                256 => matches!(axis.number_format.decimals, None | Some(0) | Some(2)),
+                257 => axis.number_format.decimals == Some(2),
+                _ => false,
+            };
+            let automatic = match count {
+                Some(0)
+                    if !stacked
+                        || (stacked_area
+                            && automatic_number
+                            && extent.0 < 0.0
+                            && extent.1 > 0.0) =>
+                {
+                    iwork_chart_auto_range(extent)
+                }
+                None | Some(4) if stacked_area && area_precision => {
+                    iwork_chart_cross_zero_range(extent)
+                }
+                None if stacked && automatic_number => iwork_chart_cross_zero_range(extent),
+                None | Some(4) if !stacked => iwork_chart_cross_zero_range(extent),
+                _ => None,
+            };
+            if let Some((minimum, maximum, intervals)) = automatic {
+                axis.automatic_range = Some((minimum, maximum));
+                axis.major_intervals = intervals;
+                axis.iterated_ticks = count == Some(0);
+            }
+        }
+        if value && symmetric_bounds && numbers_varint(&nonstyle, 5, part)?.is_some() {
+            // On an explicitly symmetric range the native count applies to
+            // each side of zero. Asymmetric and automatic ranges stay separate.
+            axis.major_intervals *= 2;
+        }
+        if axis.logarithmic {
             let (minimum, maximum) = axis.data_range(&rows, stacked);
-            axis.major_intervals =
-                (maximum.log10() - minimum.log10()).round().clamp(1.0, 64.0) as u32;
+            axis.major_intervals = axis.logarithmic_decades.unwrap_or_else(|| {
+                (maximum.log10() - minimum.log10()).round().clamp(1.0, 64.0) as u32
+            });
         }
         Ok(axis)
     };
-    let series_nonstyles = numbers_first_bytes(archive, 19, part)?
-        .map(|bytes| keynote_chart_style_references(bytes, part))
-        .transpose()?
-        .unwrap_or_default();
     let show_data_labels = (0..rows.len())
         .map(|index| {
             let properties = iwork_chart_properties(
@@ -14639,7 +15443,7 @@ fn keynote_chart(
             };
             Ok(numbers_varint(&properties, field, part)?
                 .or(numbers_varint(&properties, 41, part)?)
-                .unwrap_or(0)
+                .unwrap_or(u64::from(kind == KeynoteChartKind::Pie))
                 != 0)
         })
         .collect::<Result<Vec<_>, Diagnostic>>()?;
@@ -14656,16 +15460,12 @@ fn keynote_chart(
             | KeynoteChartKind::Mixed
     ) {
         let scatter = kind == KeynoteChartKind::Scatter;
-        let theme_styles = numbers_references(archive, 17, part)?;
         for index in 0..rows.len() {
-            let properties = iwork_chart_properties(
+            let properties = iwork_chart_series_properties(
                 stylesheet_archives,
-                style_references
-                    .get(index)
-                    .or_else(|| theme_styles.get(index))
-                    .copied()
-                    .unwrap_or(0),
-                IWORK_CHART_SERIES_STYLE_TYPE,
+                &style_references,
+                &theme_styles,
+                index,
                 part,
             )?;
             let nonstyle = iwork_chart_properties(
@@ -14821,6 +15621,10 @@ fn keynote_chart(
                         .is_some()
                         .then_some(line)
                 },
+                bubble_scale: keynote_fixed32_field(&nonstyle, 1, part)?
+                    .filter(|v| v.is_finite() && *v > 0.0)
+                    .unwrap_or(1.0),
+                bubble_diameter: numbers_varint(&nonstyle, 46, part)? == Some(1),
                 trendline: if numbers_varint(&nonstyle, 37, part)? == Some(1)
                     && numbers_varint(&nonstyle, 62, part)? == Some(1)
                 {
@@ -14854,8 +15658,7 @@ fn keynote_chart(
             ))
         })
         .transpose()?;
-    let show_legend = numbers_varint(&chart_nonstyle, 20, part)?
-        .map_or(series_names.len() > 1, |value| value != 0);
+    let show_legend = numbers_varint(&chart_nonstyle, 20, part)?.unwrap_or(0) != 0;
     let legend_geometry = numbers_first_bytes(archive, 3, part)?
         .map(|bytes| keynote_geometry(bytes, part))
         .transpose()?
@@ -14876,10 +15679,27 @@ fn keynote_chart(
     } else {
         None
     };
+    let first_series_properties = iwork_chart_series_properties(
+        stylesheet_archives,
+        &style_references,
+        &theme_styles,
+        0,
+        part,
+    )?;
     Ok(Some(KeynoteChart {
         geometry,
         kind,
         three_d,
+        view_3d: if three_d {
+            Some(chart_3d::View::parse(
+                &chart_nonstyle,
+                &chart_style,
+                kind,
+                part,
+            )?)
+        } else {
+            None
+        },
         doughnut: chart_type == 25,
         hole_ratio: if chart_type == 25 {
             keynote_fixed32_field(&chart_nonstyle, 27, part)?
@@ -14911,12 +15731,7 @@ fn keynote_chart(
         )?,
         pie_label_style: {
             iwork_chart_text_style(
-                &iwork_chart_properties(
-                    stylesheet_archives,
-                    style_references.first().copied().unwrap_or(0),
-                    IWORK_CHART_SERIES_STYLE_TYPE,
-                    part,
-                )?,
+                &first_series_properties,
                 if chart_type == 25 { 29 } else { 23 },
                 &paragraph_styles,
                 stylesheet_archives,
@@ -14929,13 +15744,7 @@ fn keynote_chart(
             )?
         },
         pie_stroke: {
-            let properties = iwork_chart_properties(
-                stylesheet_archives,
-                style_references.first().copied().unwrap_or(0),
-                IWORK_CHART_SERIES_STYLE_TYPE,
-                part,
-            )?;
-            numbers_first_bytes(&properties, 52, part)?
+            numbers_first_bytes(&first_series_properties, 52, part)?
                 .map(|bytes| keynote_stroke(bytes, part))
                 .transpose()?
                 .unwrap_or((Paint::None, 0.0, StrokeStyle::default()))
@@ -14991,6 +15800,7 @@ fn keynote_chart(
         point_styles,
         bubble_sizes,
         radar_rotation: keynote_fixed32_field(&chart_nonstyle, 29, part)?.unwrap_or(0.0),
+        radar_curved_grid: numbers_varint(&chart_style, 29, part)?.unwrap_or(0) != 0,
         radar_fills,
         series_kinds,
         series_axes,
@@ -15067,9 +15877,39 @@ fn keynote_chart_style_references(bytes: &[u8], part: &str) -> Result<Vec<u64>, 
     Ok(references)
 }
 
+fn iwork_chart_series_properties(
+    archives: &[IwaArchive],
+    private: &[u64],
+    theme: &[u64],
+    index: usize,
+    part: &str,
+) -> Result<Vec<u8>, Diagnostic> {
+    let mut properties = iwork_chart_properties(
+        archives,
+        private.get(index).copied().unwrap_or(0),
+        IWORK_CHART_SERIES_STYLE_TYPE,
+        part,
+    )?;
+    let theme_identifier = if theme.is_empty() {
+        0
+    } else {
+        theme[index % theme.len()]
+    };
+    properties.extend_from_slice(&iwork_chart_properties(
+        archives,
+        theme_identifier,
+        IWORK_CHART_SERIES_STYLE_TYPE,
+        part,
+    )?);
+    Ok(properties)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn keynote_chart_series_colors(
     archives: &[IwaArchive],
-    references: &[u64],
+    private: &[u64],
+    theme: &[u64],
+    count: usize,
     kind: KeynoteChartKind,
     three_d: bool,
     part: &str,
@@ -15090,59 +15930,24 @@ fn keynote_chart_series_colors(
         (KeynoteChartKind::Radar, _) => 165,
         (KeynoteChartKind::Mixed, _) => 16,
     };
-    let mut colors = Vec::with_capacity(references.len());
-    for identifier in references {
-        colors.push(
-            keynote_chart_series_color(archives, *identifier, fill_field, part, &mut Vec::new())?
-                .unwrap_or(0),
-        );
+    let mut colors = Vec::with_capacity(count);
+    for index in 0..count {
+        let properties = iwork_chart_series_properties(archives, private, theme, index, part)?;
+        let fill = numbers_first_bytes(&properties, fill_field, part)?.or(numbers_first_bytes(
+            &properties,
+            14,
+            part,
+        )?);
+        let color = fill
+            .map(|fill| numbers_first_bytes(fill, 1, part))
+            .transpose()?
+            .flatten()
+            .map(|color| keynote_color(color, part))
+            .transpose()?
+            .unwrap_or(0);
+        colors.push(color);
     }
     Ok(colors)
-}
-
-fn keynote_chart_series_color(
-    archives: &[IwaArchive],
-    identifier: u64,
-    fill_field: u64,
-    part: &str,
-    path: &mut Vec<u64>,
-) -> Result<Option<u32>, Diagnostic> {
-    if path.len() >= 64 || path.contains(&identifier) {
-        return Ok(None);
-    }
-    let Some(style) = archive_message(archives, identifier, IWORK_CHART_SERIES_STYLE_TYPE, part)?
-    else {
-        return Ok(None);
-    };
-    path.push(identifier);
-    let properties = numbers_first_bytes(&style.payload, 10_000, part)?;
-    let color = properties
-        .map(|properties| {
-            numbers_first_bytes(properties, fill_field, part)?.map_or_else(
-                || numbers_first_bytes(properties, 14, part),
-                |fill| Ok(Some(fill)),
-            )
-        })
-        .transpose()?
-        .flatten()
-        .map(|fill| numbers_first_bytes(fill, 1, part))
-        .transpose()?
-        .flatten()
-        .map(|color| keynote_color(color, part))
-        .transpose()?;
-    let color = if color.is_some() {
-        color
-    } else if let Some(parent) = keynote_nested_message(&style.payload, 1, part)?
-        .map(|base| keynote_style_parent(base, part))
-        .transpose()?
-        .flatten()
-    {
-        keynote_chart_series_color(archives, parent, fill_field, part, path)?
-    } else {
-        None
-    };
-    path.pop();
-    Ok(color)
 }
 
 fn keynote_chart_grid(
@@ -20393,6 +21198,1364 @@ mod tests {
     }
 
     #[test]
+    fn native_pies_preserve_themed_fonts_and_three_dimensional_labels() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-static-charts.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        for unit in [4, 13] {
+            for label in ["33%", "67%"] {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .filter(|o| o.unit_index == unit)
+                        .any(|o| matches!(&o.visual,Visual::TextLayout {visual,..} if
+                        matches!(visual.as_ref(),Visual::RichText {runs,..} if runs.iter().any(|r|
+                            r.text==label && r.font_family=="HelveticaNeue" &&
+                            (r.font_size-40.0).abs()<0.001 && r.color==0xffff_ffff)))),
+                    "unit {unit}: native pie label {label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_chart_formats_preserve_currency_scientific_and_affixes() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-formatting.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        // Extracted from the pinned Apple PDF; the browser regression also
+        // checks its complete label set and artifact hashes.
+        for (index, labels) in [
+            (0, ["(¥1,500.00)", "¥0.00", "¥2,500.00"]),
+            (1, ["-1.50E+03", "0.00E+00", "2.50E+03"]),
+            (2, ["约-1500.0 kg", "约0.0 kg", "约2500.0 kg"]),
+        ] {
+            for label in labels {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .filter(|o| o.unit_index == index)
+                        .any(|o| matches!(&o.visual, Visual::TextLayout {visual, ..}
+                        if matches!(visual.as_ref(), Visual::RichText {runs,..}
+                            if runs.iter().any(|run| run.text == label)))),
+                    "native formatting unit {index}: missing {label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_fraction_formats_preserve_denominators_and_symmetric_ticks() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-formatting.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        // Literal label sets extracted from Apple Keynote's pinned native PDF.
+        for (unit, expected) in [
+            (
+                3,
+                &[
+                    "-2", "-1 5/7", "-1 3/7", "-1 1/7", "-6/7", "-4/7", "-2/7", "0", "2/7", "4/7",
+                    "6/7", "1 1/7", "1 3/7", "1 5/7", "2",
+                ][..],
+            ),
+            (4, &["0", "1/40", "1/20", "3/40", "1/10"][..]),
+            (5, &["0", "1/400", "1/200", "3/400", "1/100"][..]),
+            (
+                6,
+                &[
+                    "-2", "-1 3/4", "-1 2/4", "-1 1/4", "-3/4", "-2/4", "-1/4", "0", "1/4", "2/4",
+                    "3/4", "1 1/4", "1 2/4", "1 3/4", "2",
+                ][..],
+            ),
+            (
+                7,
+                &[
+                    "-2.00", "-1.71", "-1.43", "-1.14", "-0.86", "-0.57", "-0.29", "-0.00", "0.29",
+                    "0.57", "0.86", "1.14", "1.43", "1.71", "2.00",
+                ][..],
+            ),
+            (8, &["-1.00", "-0.25", "0.50", "1.25", "2.00"][..]),
+            (
+                9,
+                &[
+                    "-2.00", "-1.50", "-1.00", "-0.50", "0.00", "0.50", "1.00", "1.50", "2.00",
+                ][..],
+            ),
+        ] {
+            let actual = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| match &o.visual {
+                    Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|text| !matches!(text.as_str(), "Fractions" | "A" | "B" | "C"))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "native fraction/axis unit {unit}");
+        }
+    }
+
+    #[test]
+    fn native_automatic_axes_preserve_one_sided_ranges_small_ticks_and_zero() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-auto-axis.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        // Complete Apple PDF labels, including the retained one-sided heldouts.
+        for (unit, expected) in [
+            (6, &["-2600", "-1950", "-1300", "-650", "0"][..]),
+            (7, &["0", "650", "1300", "1950", "2600"][..]),
+            (13, &["0", "0.075", "0.15", "0.225", "0.3"][..]),
+            (15, &["0", "1", "2", "3", "4"][..]),
+            (19, &["0", "0.073", "0.145", "0.218", "0.29"][..]),
+            (20, &["0", "2", "4", "6", "8"][..]),
+            (26, &["0", "0.25", "0.5", "0.75", "1"][..]),
+            (27, &["0", "0.05", "0.1", "0.15", "0.2"][..]),
+            (29, &["-1", "-0.75", "-0.5", "-0.25", "0"][..]),
+        ] {
+            let actual = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| match &o.visual {
+                    Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|text| !matches!(text.as_str(), "Currency" | "A" | "B" | "C"))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "native automatic axis unit {unit}");
+        }
+    }
+
+    #[test]
+    fn native_cross_zero_axes_preserve_decimal_thresholds_and_three_dimensions() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-cross-axis.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let expected: &[&[&str]] = &[
+            &["-14", "-10.5", "-7", "-3.5", "0", "3.5", "7", "10.5", "14"],
+            &["-16", "-12", "-8", "-4", "0", "4", "8", "12", "16"],
+            &["-22.5", "-15", "-7.5", "0", "7.5", "15", "22.5", "30"],
+            &["-22.5", "-15", "-7.5", "0", "7.5", "15", "22.5", "30"],
+            &[
+                "-2000", "-1500", "-1000", "-500", "0", "500", "1000", "1500", "2000",
+            ],
+            &["-12", "-9", "-6", "-3", "0", "3", "6", "9", "12"],
+            &["-1.4", "-1.05", "-0.7", "-0.35", "0", "0.35", "0.7"],
+            &["-0.15", "-0.075", "0", "0.075", "0.15", "0.225", "0.3"],
+            &["-0.004", "-0.002", "0", "0.002", "0.004", "0.005", "0.007"],
+            &["-6", "-4.5", "-3", "-1.5", "0", "1.5", "3", "4.5", "6"],
+            &["-0.005", "-0.002", "0", "0.002", "0.005", "0.007", "0.009"],
+            &["-2250", "-1500", "-750", "0", "750", "1500", "2250", "3000"],
+            &["-1", "-0.5", "0", "0.5", "1", "1.5", "2"],
+            &["-1.5", "-0.75", "0", "0.75", "1.5", "2.25", "3"],
+            &["-5", "-2.5", "0", "2.5", "5", "7.5", "10"],
+            &["-6", "-3", "0", "3", "6", "9", "12"],
+            &["-20", "-15", "-10", "-5", "0", "5", "10", "15", "20"],
+            &["-22.5", "-15", "-7.5", "0", "7.5", "15", "22.5", "30"],
+            &["-0.2", "-0.1", "0", "0.1", "0.2", "0.3", "0.4"],
+            &["-0.25", "-0.125", "0", "0.125", "0.25", "0.375", "0.5"],
+            &["-2.25", "-1.5", "-0.75", "0", "0.75", "1.5", "2.25", "3"],
+            &["-100", "-50", "0", "50", "100", "150", "200"],
+            &["-150", "-75", "0", "75", "150", "225", "300"],
+            &["-0.015", "-0.008", "0", "0.008", "0.015", "0.023", "0.03"],
+            &["-15", "-7.5", "0", "7.5", "15", "22.5", "30"],
+            &["-15", "-7.5", "0", "7.5", "15", "22.5", "30"],
+            &["-15", "-7.5", "0", "7.5", "15", "22.5", "30"],
+            &["-15", "-7.5", "0", "7.5", "15", "22.5", "30"],
+        ];
+        assert_eq!(document.units.len(), expected.len());
+        for (unit, expected) in expected.iter().enumerate() {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit as u32)
+                .filter_map(|o| match &o.visual {
+                    Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|s| !matches!(s.as_str(), "A" | "B" | "C"))
+                .collect::<Vec<_>>();
+            assert_eq!(labels, *expected, "native cross-zero axis unit {unit}");
+            if unit >= 24 {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .any(|o| o.unit_index == unit as u32 && o.stable_id.contains(":3d-face-"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_cross_zero_axes_preserve_explicit_number_and_currency_formats() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-cross-formats.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let expected: &[&[&str]] = &[
+            &["-15", "-8", "0", "8", "15", "23", "30"],
+            &[
+                "-30.00", "-22.50", "-15.00", "-7.50", "0.00", "7.50", "15.00",
+            ],
+            &[
+                "-¥2,250.00",
+                "-¥1,500.00",
+                "-¥750.00",
+                "¥0.00",
+                "¥750.00",
+                "¥1,500.00",
+                "¥2,250.00",
+                "¥3,000.00",
+            ],
+            &[
+                "-¥3,000.00",
+                "-¥2,250.00",
+                "-¥1,500.00",
+                "-¥750.00",
+                "¥0.00",
+                "¥750.00",
+                "¥1,500.00",
+                "¥2,250.00",
+            ],
+        ];
+        assert_eq!(document.units.len(), expected.len());
+        for (unit, expected) in expected.iter().enumerate() {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit as u32)
+                .filter_map(|o| match &o.visual {
+                    Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|s| !matches!(s.as_str(), "A" | "B" | "C"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                labels, *expected,
+                "native explicit cross-zero format unit {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_auto_major_count_matches_padding_steps_constants_and_signed_zero() {
+        for (bytes, expected) in [
+            (
+                include_bytes!("../../tests/fixtures/auto-count-heldout.key").as_slice(),
+                &[
+                    &[
+                        "-2000", "-1500", "-1000", "-500", "0", "500", "1000", "1500", "2000",
+                        "2500", "3000",
+                    ][..],
+                    &[
+                        "-2000", "-1500", "-1000", "-500", "0", "500", "1000", "1500", "2000",
+                        "2500", "3000",
+                    ][..],
+                    &[
+                        "-2000", "-1500", "-1000", "-500", "0", "500", "1000", "1500", "2000",
+                        "2500", "3000",
+                    ][..],
+                    &[
+                        "-2000", "-1500", "-1000", "-500", "0", "500", "1000", "1500", "2000",
+                        "2500", "3000",
+                    ][..],
+                    &[
+                        "-1500", "-1000", "-500", "0", "500", "1000", "1500", "2000", "2500",
+                    ][..],
+                    &[
+                        "-1500", "-1000", "-500", "0", "500", "1000", "1500", "2000", "2500",
+                    ][..],
+                    &["-150", "-100", "-50", "0", "50", "100", "150", "200", "250"][..],
+                    &["-150", "-100", "-50", "0", "50", "100", "150", "200", "250"][..],
+                    &["-15", "-10", "-5", "0", "5", "10", "15", "20", "25"][..],
+                    &["-15", "-10", "-5", "0", "5", "10", "15", "20", "25"][..],
+                    &["-15", "-10", "-5", "0", "5", "10", "15"][..],
+                    &["0", "0.05", "0.1", "0.15", "0.2", "0.25", "0.3", "0.35"][..],
+                    &["1", "2"][..],
+                    &["0", "1"][..],
+                    &["0.001", "1.001"][..],
+                    &["-8", "-6", "-4", "-2", "0", "2", "4"][..],
+                ][..],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/auto-count.key").as_slice(),
+                &[
+                    &["-15", "-10", "-5", "0", "5", "10", "15", "20", "25"][..],
+                    &[
+                        "-0.15", "-0.1", "-0.05", "-0", "0.05", "0.1", "0.15", "0.2", "0.25",
+                    ][..],
+                    &[
+                        "-3000", "-2500", "-2000", "-1500", "-1000", "-500", "0", "500", "1000",
+                        "1500", "2000",
+                    ][..],
+                    &["0", "500", "1000", "1500", "2000", "2500", "3000"][..],
+                ][..],
+            ),
+        ] {
+            let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+            assert_eq!(document.units.len(), expected.len());
+            for (unit, expected) in expected.iter().enumerate() {
+                let labels = document
+                    .objects
+                    .iter()
+                    .filter(|o| o.unit_index == unit as u32)
+                    .filter_map(|o| match &o.visual {
+                        Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                            Visual::RichText { runs, .. } => {
+                                Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .filter(|s| !matches!(s.as_str(), "A" | "B" | "C"))
+                    .collect::<Vec<_>>();
+                assert_eq!(labels, *expected, "native auto-major count unit {unit}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_single_sided_two_decimal_axes_preserve_number_and_currency_rounding() {
+        for (bytes, expected) in [
+            (
+                include_bytes!("../../tests/fixtures/one-sided-number-two.key").as_slice(),
+                &[
+                    &["0.00", "650.00", "1,300.00", "1,950.00", "2,600.00"][..],
+                    &["-2,600.00", "-1,950.00", "-1,300.00", "-650.00", "0.00"][..],
+                    &["0.00", "0.07", "0.15", "0.22", "0.29"][..],
+                    &["-0.29", "-0.22", "-0.15", "-0.07", "0.00"][..],
+                    &["0.00", "2.00", "4.00", "6.00", "8.00"][..],
+                    &["0.00", "0.25", "0.50", "0.75", "1.00"][..],
+                    &["0.00", "0.05", "0.10", "0.15", "0.20"][..],
+                    &["0.00", "0.03", "0.05", "0.08", "0.10"][..],
+                    &["0.00", "2.25", "4.50", "6.75", "9.00"][..],
+                ][..],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/one-sided-currency.key").as_slice(),
+                &[
+                    &["¥0.00", "¥650.00", "¥1,300.00", "¥1,950.00", "¥2,600.00"][..],
+                    &[
+                        "-¥2,600.00",
+                        "-¥1,950.00",
+                        "-¥1,300.00",
+                        "-¥650.00",
+                        "¥0.00",
+                    ][..],
+                    &["¥0.00", "¥0.07", "¥0.15", "¥0.22", "¥0.29"][..],
+                    &["-¥0.29", "-¥0.22", "-¥0.15", "-¥0.07", "¥0.00"][..],
+                    &["¥0.00", "¥2.00", "¥4.00", "¥6.00", "¥8.00"][..],
+                    &["¥0.00", "¥0.25", "¥0.50", "¥0.75", "¥1.00"][..],
+                    &["¥0.00", "¥0.05", "¥0.10", "¥0.15", "¥0.20"][..],
+                    &["¥0.00", "¥0.03", "¥0.05", "¥0.08", "¥0.10"][..],
+                    &["¥0.00", "¥2.25", "¥4.50", "¥6.75", "¥9.00"][..],
+                ][..],
+            ),
+        ] {
+            let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+            assert_eq!(document.units.len(), expected.len());
+            for (unit, expected) in expected.iter().enumerate() {
+                let labels = document
+                    .objects
+                    .iter()
+                    .filter(|o| o.unit_index == unit as u32)
+                    .filter_map(|o| match &o.visual {
+                        Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                            Visual::RichText { runs, .. } => {
+                                Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .filter(|s| !matches!(s.as_str(), "A" | "B" | "C"))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    labels, *expected,
+                    "native single-sided two-decimal unit {unit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_one_sided_ranges_match_three_dimensions_and_preserve_stack_policy() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-single-sided-types.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 11);
+        for unit in 0..11 {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| match &o.visual {
+                    Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|s| !matches!(s.as_str(), "A" | "B" | "C"))
+                .collect::<Vec<_>>();
+            // Apple uses 2600 for one series, but 3000 for stacks with the
+            // same totals: the two TSCH range policies are not interchangeable.
+            assert_eq!(
+                labels,
+                if unit < 5 {
+                    vec!["0", "650", "1300", "1950", "2600"]
+                } else {
+                    vec!["0", "750", "1500", "2250", "3000"]
+                },
+                "native one-sided type unit {unit}"
+            );
+            if matches!(unit,1..=4|8..=10) {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .any(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_axis_labels_hide_minimum_in_cartesian_radar_and_three_dimensions() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-label-boundaries.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 6);
+        for unit in 0..6 {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| match &o.visual {
+                    Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|text| !matches!(text.as_str(), "Manual Axis 5 to 50" | "A" | "B" | "C"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                labels,
+                if unit == 5 {
+                    &[][..]
+                } else {
+                    &["16", "28", "39", "50"][..]
+                },
+                "native hidden-minimum axis unit {unit}"
+            );
+            if (3..=4).contains(&unit) {
+                assert!(
+                    document
+                        .objects
+                        .iter()
+                        .any(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+                );
+            }
+        }
+    }
+
+    fn native_3d_solid_count(objects: &[crate::model::Object], unit: u32) -> usize {
+        let mut solids: Vec<std::collections::BTreeSet<(i32, i32)>> = Vec::new();
+        for object in objects
+            .iter()
+            .filter(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+        {
+            let Visual::PaintedShape {
+                geometry: Geometry::Path { commands, .. },
+                ..
+            } = &object.visual
+            else {
+                panic!("3D face path");
+            };
+            let mut points = commands
+                .iter()
+                .filter_map(|c| match c {
+                    PathCommand::MoveTo { x, y } | PathCommand::LineTo { x, y } => {
+                        Some(((x * 1000.0).round() as i32, (y * 1000.0).round() as i32))
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut index = 0;
+            while index < solids.len() {
+                if !solids[index].is_disjoint(&points) {
+                    points.extend(solids.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            solids.push(points);
+        }
+        solids.len()
+    }
+
+    #[test]
+    fn native_bar_world_directional_normals_match_signed_axis_colors() {
+        for (bytes, expected) in [
+            (
+                include_bytes!("../../tests/fixtures/3d-world-diffuse-xp.key").as_slice(),
+                [[10_u32, 10, 11], [34, 49, 68], [10, 10, 10]],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/3d-world-diffuse-xm.key").as_slice(),
+                [[9, 9, 9], [9, 9, 9], [85, 133, 190]],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/3d-world-diffuse-yp.key").as_slice(),
+                [[9, 9, 9], [33, 47, 64], [18, 23, 29]],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/3d-world-diffuse-ym.key").as_slice(),
+                [[84, 131, 188], [9, 9, 9], [10, 10, 10]],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/3d-world-diffuse-zp.key").as_slice(),
+                [[9, 9, 9], [9, 9, 9], [10, 10, 10]],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/3d-world-diffuse-zm.key").as_slice(),
+                [[36, 52, 72], [81, 127, 181], [34, 48, 66]],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/3d-world-diffuse-stacked-xm.key").as_slice(),
+                [[9, 9, 9], [9, 9, 9], [84, 132, 189]],
+            ),
+        ] {
+            let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+            let faces = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == 1 && o.stable_id.contains(":3d-face-"))
+                .collect::<Vec<_>>();
+            assert_eq!(faces.len(), 6);
+            for (indices, rgb) in [[0_usize, 1], [3, 4], [2, 5]].into_iter().zip(expected) {
+                for index in indices {
+                    let Visual::PaintedShape {
+                        fill: Paint::Solid(color),
+                        ..
+                    } = faces[index].visual
+                    else {
+                        panic!("native solid face");
+                    };
+                    assert!(
+                        [color >> 24, (color >> 16) & 255, (color >> 8) & 255]
+                            .into_iter()
+                            .zip(rgb)
+                            .all(|(a, b)| a.abs_diff(b) <= 8),
+                        "native world-light face {index}: expected {rgb:?}, got {color:08x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_default_lighting_inherits_six_types_and_preserves_authored_glossy() {
+        let explicit = detect_and_parse(
+            include_bytes!("../../tests/fixtures/3d-six-default-lighting.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let implicit = detect_and_parse(
+            include_bytes!("../../tests/fixtures/3d-six-implicit-lighting.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let faces = |document: &crate::model::Document, unit| {
+            document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+                .map(|o| (o.bounds, o.visual.clone()))
+                .collect::<Vec<_>>()
+        };
+        for unit in 0..6 {
+            assert!(!faces(&implicit, unit).is_empty());
+            assert_eq!(
+                faces(&implicit, unit),
+                faces(&explicit, unit + 6),
+                "native missing/explicit Default identity, type {unit}"
+            );
+        }
+        assert_ne!(
+            faces(&explicit, 3),
+            faces(&explicit, 9),
+            "authored Glossy must retain its distinct lighting"
+        );
+    }
+
+    #[test]
+    fn native_saturated_point_light_preserves_bar_cap_diffuse_color() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/3d-center-intensity-four.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let caps = document
+            .objects
+            .iter()
+            .filter(|o| {
+                o.unit_index == 1
+                    && (o.stable_id.ends_with(":3d-face-2") || o.stable_id.ends_with(":3d-face-5"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(caps.len(), 2);
+        for cap in caps {
+            let Visual::PaintedShape {
+                fill: Paint::Solid(color),
+                ..
+            } = cap.visual
+            else {
+                panic!("native solid cap");
+            };
+            assert!(
+                [color >> 24, (color >> 16) & 255, (color >> 8) & 255]
+                    .into_iter()
+                    .zip([89, 139, 199])
+                    .all(|(a, b)| a.abs_diff(b) <= 8),
+                "native fourfold point-light cap color, found {color:08x}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_disabled_lights_keep_dark_visible_bar_geometry() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/3d-light-off-unique.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let colors = document
+            .objects
+            .iter()
+            .filter(|o| o.unit_index == 1 && o.stable_id.contains(":3d-face-"))
+            .filter_map(|o| match o.visual {
+                Visual::PaintedShape {
+                    fill: Paint::Solid(color),
+                    ..
+                } => Some(color),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            colors.len(),
+            6,
+            "two native opaque bars retain their six visible faces"
+        );
+        assert!(
+            colors.iter().all(|color| {
+                let rgb = [color >> 24, (color >> 16) & 255, (color >> 8) & 255];
+                rgb.iter().all(|c| c.abs_diff(9) <= 8) && rgb[0] == rgb[1] && rgb[1] == rgb[2]
+            }),
+            "Apple native all-disabled lights keep dark achromatic faces"
+        );
+    }
+
+    #[test]
+    fn native_implicit_and_explicit_default_bar_lighting_preserve_equal_faces() {
+        for bytes in [
+            include_bytes!("../../tests/fixtures/3d-default-lighting.key").as_slice(),
+            include_bytes!("../../tests/fixtures/3d-default-lighting-stack-source.key").as_slice(),
+        ] {
+            let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+            let faces = |unit| {
+                document
+                    .objects
+                    .iter()
+                    .filter(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+                    .map(|o| (o.bounds, &o.visual))
+                    .collect::<Vec<_>>()
+            };
+            assert!(!faces(0).is_empty());
+            assert_eq!(
+                faces(0),
+                faces(1),
+                "native implicit Default and explicit Default have byte-identical PNGs"
+            );
+            // Independent 5x5 native PNG patches on top/front/right interiors;
+            // preserve the existing native visual channel tolerance of eight.
+            for expected in [[18_u32, 24, 30], [86, 135, 194], [55, 83, 117]] {
+                assert!(
+                    faces(0).iter().any(|(_, visual)| {
+                        let Visual::PaintedShape {
+                            fill: Paint::Solid(color),
+                            ..
+                        } = visual
+                        else {
+                            return false;
+                        };
+                        [color >> 24, (color >> 16) & 255, (color >> 8) & 255]
+                            .into_iter()
+                            .zip(expected)
+                            .all(|(a, b)| a.abs_diff(b) <= 8)
+                    }),
+                    "native bar diffuse face color {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_cartesian_ticks_preserve_positions_and_contentless_minor_marks() {
+        for (bytes, counts, empty_counts) in [
+            (
+                include_bytes!("../../tests/fixtures/axis-tick-boundaries.key").as_slice(),
+                &[7, 7, 15, 6, 19][..],
+                &[0, 0, 4, 0, 0][..],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/axis-tick-horizontal.key").as_slice(),
+                &[11, 11, 15][..],
+                &[0, 0, 4][..],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/axis-tick-logarithmic.key").as_slice(),
+                &[25, 25][..],
+                &[16, 0][..],
+            ),
+            (
+                include_bytes!("../../tests/fixtures/axis-tick-logarithmic-ranges.key").as_slice(),
+                &[16, 34, 25, 16, 25][..],
+                &[0, 0, 0, 0, 0][..],
+            ),
+        ] {
+            let document = detect_and_parse(bytes, Limits::default()).unwrap().unwrap();
+            assert_eq!(document.units.len(), counts.len());
+            for (unit, &expected) in counts.iter().enumerate() {
+                let mut lines = 0;
+                let mut empty = 0;
+                for object in document
+                    .objects
+                    .iter()
+                    .filter(|o| o.unit_index == unit as u32)
+                {
+                    let mut visual = &object.visual;
+                    while let Visual::StrokeStyle { visual: inner, .. } = visual {
+                        visual = inner;
+                    }
+                    if let Visual::PaintedShape {
+                        stroke: Paint::Solid(255),
+                        geometry: Geometry::Path { commands, .. },
+                        ..
+                    } = visual
+                    {
+                        let mut previous = None;
+                        for command in commands {
+                            match command {
+                                PathCommand::MoveTo { x, y } => previous = Some((*x, *y)),
+                                PathCommand::LineTo { x, y } => {
+                                    lines += 1;
+                                    if previous == Some((*x, *y)) {
+                                        empty += 1;
+                                    }
+                                    previous = Some((*x, *y));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                assert_eq!(lines, expected, "native Cartesian tick line count {unit}");
+                assert_eq!(
+                    empty, empty_counts[unit],
+                    "outside minor marks have no native length"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_logarithmic_decades_and_authored_bounds_preserve_tick_labels() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/axis-tick-logarithmic-ranges.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        for (unit, expected) in [
+            &["1", "100"][..],
+            &["1", "10", "100", "1000"][..],
+            &["10", "100", "1000"][..],
+            &["10", "100"][..],
+            &["1", "10", "100"][..],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut labels = Vec::new();
+            for o in document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit as u32)
+            {
+                let mut v = &o.visual;
+                while let Visual::TextLayout { visual, .. } = v {
+                    v = visual;
+                }
+                if let Visual::RichText { runs, .. } = v {
+                    let label = runs.iter().map(|r| r.text.as_str()).collect::<String>();
+                    if !["Jan", "Feb", "Mar"].contains(&label.as_str()) {
+                        labels.push(label);
+                    }
+                }
+            }
+            let mut expected = expected.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+            labels.sort();
+            expected.sort();
+            assert_eq!(labels, expected, "native log axis unit {unit}");
+        }
+    }
+
+    #[test]
+    fn native_stacked_area_axis_precision_and_major_count_boundaries() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/stack-cross-boundaries.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 5);
+        for unit in 0..5 {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| {
+                    let mut visual = &o.visual;
+                    while let Visual::TextLayout { visual: inner, .. } = visual {
+                        visual = inner;
+                    }
+                    match visual {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    }
+                })
+                .filter(|s| !matches!(s.as_str(), "A" | "B" | "C" | "D"))
+                .collect::<Vec<_>>();
+            let expected = match unit {
+                1 => vec!["-8.00", "-4.00", "0.00", "4.00", "8.00", "12.00", "16.00"],
+                2 => vec![
+                    "-¥8.00", "-¥4.00", "¥0.00", "¥4.00", "¥8.00", "¥12.00", "¥16.00",
+                ],
+                4 => vec!["-10", "-5", "0", "5", "10", "15", "20"],
+                _ => vec!["-8", "-4", "0", "4", "8", "12", "16"],
+            };
+            assert_eq!(labels, expected, "native stacked area axis boundary {unit}");
+        }
+    }
+
+    #[test]
+    fn native_sparse_negative_stacked_area_keeps_both_halves() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/stack-sparse-negative.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 4);
+        for unit in 0..4 {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| {
+                    let mut visual = &o.visual;
+                    while let Visual::TextLayout { visual: inner, .. } = visual {
+                        visual = inner;
+                    }
+                    match visual {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    }
+                })
+                .filter(|s| !matches!(s.as_str(), "A" | "B" | "C" | "D"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                labels,
+                ["-10", "-8", "-5", "-3", "0", "3", "5", "8", "10"],
+                "native sparse negative stack {unit}"
+            );
+        }
+        let blue=document.objects.iter().find(|o|o.unit_index==2 && matches!(o.source.locator, SourceLocator::Iwork {kind:"chart-series",..}) && {
+            let mut v=&o.visual;
+            while let Visual::TextLayout {visual,..}|Visual::StrokeStyle {visual,..}=v {v=visual;}
+            matches!(v,Visual::PaintedShape {fill:Paint::Solid(color),..} if (*color>>24)<20 && ((*color>>8)&255)>200)
+        }).expect("native blue stacked area");
+        let mut visual = &blue.visual;
+        while let Visual::StrokeStyle { visual: inner, .. } = visual {
+            visual = inner;
+        }
+        let Visual::PaintedShape {
+            geometry: Geometry::Path { commands, .. },
+            ..
+        } = visual
+        else {
+            panic!("area path")
+        };
+        assert!(commands.iter().any(|c|matches!(c,PathCommand::LineTo {x,y} if (*x-blue.bounds.width*2.0/3.0).abs()<1.5 && (*y-blue.bounds.height/2.0).abs()<1.5)),"native category C returns to zero");
+    }
+
+    #[test]
+    fn native_stacked_area_extent_follows_cumulative_boundaries() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/stack-opposite-signs.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 6);
+        for unit in 0..6 {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| {
+                    let mut visual = &o.visual;
+                    while let Visual::TextLayout { visual: inner, .. } = visual {
+                        visual = inner;
+                    }
+                    match visual {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    }
+                })
+                .filter(|text| !matches!(text.as_str(), "A" | "B" | "C" | "D"))
+                .collect::<Vec<_>>();
+            let expected = if unit % 3 == 2 {
+                &["-20", "-15", "-10", "-5", "0", "5", "10", "15", "20"][..]
+            } else {
+                &[
+                    "-30", "-22.5", "-15", "-7.5", "0", "7.5", "15", "22.5", "30",
+                ][..]
+            };
+            assert_eq!(labels, expected, "native opposite signs stack unit {unit}");
+        }
+    }
+
+    #[test]
+    fn native_stacked_cross_zero_axes_share_symmetric_and_asymmetric_bounds() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/stack-cross-axis.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 12);
+        for unit in 0..12 {
+            let labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| {
+                    let mut visual = &o.visual;
+                    while let Visual::TextLayout { visual: inner, .. } = visual {
+                        visual = inner;
+                    }
+                    match visual {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    }
+                })
+                .filter(|text| !matches!(text.as_str(), "A" | "B" | "C" | "D"))
+                .collect::<Vec<_>>();
+            let expected = if unit < 6 {
+                &["-16", "-12", "-8", "-4", "0", "4", "8", "12", "16"][..]
+            } else {
+                &["-8", "-4", "0", "4", "8", "12", "16"][..]
+            };
+            assert_eq!(
+                labels, expected,
+                "native stacked automatic cross-zero unit {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_signed_three_dimensional_area_retains_front_faces_after_cancellation() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/3d-signed-area.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 5);
+        for (unit, minimum_coverage) in [(0, 0.2), (1, 0.2), (2, 0.5), (3, 0.1), (4, 0.2)] {
+            let (mut left, mut top, mut right, mut bottom) = (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            );
+            let mut area = 0.0;
+            for object in document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+            {
+                let Visual::PaintedShape {
+                    geometry: Geometry::Path { commands, .. },
+                    ..
+                } = &object.visual
+                else {
+                    panic!("3D face");
+                };
+                let points = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        PathCommand::MoveTo { x, y } | PathCommand::LineTo { x, y } => Some((
+                            f64::from(x + object.bounds.x),
+                            f64::from(y + object.bounds.y),
+                        )),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for &(x, y) in &points {
+                    left = left.min(x);
+                    right = right.max(x);
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                }
+                area += points
+                    .iter()
+                    .zip(points.iter().cycle().skip(1))
+                    .take(points.len())
+                    .map(|(a, b)| a.0 * b.1 - a.1 * b.0)
+                    .sum::<f64>()
+                    .abs()
+                    / 2.0;
+            }
+            assert!(
+                area / ((right - left) * (bottom - top)) > minimum_coverage,
+                "native signed area front body, unit {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_zero_three_dimensional_area_has_no_plates_or_empty_layer_colors() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/3d-zero-area.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 5);
+        let faces = |unit| {
+            document
+                .objects
+                .iter()
+                .filter(move |o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+        };
+        assert_eq!(faces(0).count(), 0, "native zero area has no volume");
+        assert!(
+            faces(2).next().is_some(),
+            "native zero line remains visible"
+        );
+        for (unit, blue) in [(1, true), (3, false)] {
+            assert!(
+                faces(unit).all(|o| {
+                    let Visual::PaintedShape {
+                        fill: Paint::Solid(color),
+                        ..
+                    } = &o.visual
+                    else {
+                        panic!("native 3D filled face");
+                    };
+                    let r = (color >> 24) as i16;
+                    let g = ((color >> 16) & 255) as i16;
+                    let b = ((color >> 8) & 255) as i16;
+                    if blue {
+                        !(b - r > 40 && b - g > 15)
+                    } else {
+                        !(g - r > 15 && g - b > 40)
+                    }
+                }),
+                "native zero layer has no colored plate, unit {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_three_dimensional_sparse_line_bridges_and_area_keeps_zero_categories() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-3d-sparse-area.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 3);
+        // Apple native 3D line has both series: Alpha A-C-D and Beta B-D.
+        // The 2D line control breaks at blanks instead; do not unify them.
+        assert_eq!(
+            native_3d_solid_count(&document.objects, 1),
+            2,
+            "native sparse 3D line retains both bridged series"
+        );
+        for unit in [0, 2] {
+            // The native area profiles visit all four category positions,
+            // including the zero valley at B and the stacked boundary at C.
+            let profiles = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+                .filter(|o| {
+                    matches!(&o.visual,
+                    Visual::PaintedShape {geometry: Geometry::Path {commands, ..}, ..}
+                    if commands.len() >= 9)
+                })
+                .count();
+            assert_eq!(
+                profiles, 2,
+                "native sparse area retains both four-category faces {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_three_dimensional_series_gap_and_stacked_area_contact() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-3d-series-gap.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 7);
+        // Apple native 0% joins identical line/area profiles. Nonzero gaps
+        // separate the solid meshes; the stacked area has a shared boundary.
+        for (unit, count) in [1, 2, 2, 1, 2, 2, 1].into_iter().enumerate() {
+            assert_eq!(
+                native_3d_solid_count(&document.objects, unit as u32),
+                count,
+                "native series contact unit {unit}"
+            );
+        }
+        // Native 100% and 200% are separately authored, not one fixed gap.
+        for (a, b) in [(1, 2), (4, 5)] {
+            let faces = |unit| {
+                document
+                    .objects
+                    .iter()
+                    .filter(|o| o.unit_index == unit && o.stable_id.contains(":3d-face-"))
+                    .map(|o| &o.visual)
+                    .collect::<Vec<_>>()
+            };
+            assert_ne!(faces(a), faces(b), "native gap 100% versus 200%");
+        }
+    }
+
+    #[test]
+    fn native_clipped_three_dimensional_columns_and_bars_have_two_solids() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-3d-clipped.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 4);
+        for unit in 0..4 {
+            let count = native_3d_solid_count(&document.objects, unit);
+            // All four Apple native 3D rasters contain only B=20 and C=40;
+            // A=5 lies below the authored minimum 10 and produces no solid.
+            assert_eq!(count, 2, "native clipped 3D unit {unit}");
+        }
+    }
+
+    #[test]
+    fn native_radar_value_axis_replaces_only_the_first_category_spoke() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-radar-value-axis.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 2);
+        for unit in 0..2 {
+            let mut gray = 0;
+            let mut black = 0;
+            for object in document.objects.iter().filter(|o| o.unit_index == unit) {
+                if let Visual::StrokeStyle { visual, .. } = &object.visual {
+                    if let Visual::PaintedShape {
+                        geometry: Geometry::Path { commands, .. },
+                        fill: Paint::None,
+                        stroke: Paint::Solid(color),
+                        ..
+                    } = visual.as_ref()
+                    {
+                        if commands.len() == 2 {
+                            if *color == 0x0000_00ff {
+                                black += 1;
+                            } else {
+                                gray += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            // Apple PDF: gray value axis + B/C spokes, or A/B/C spokes.
+            assert_eq!((gray, black), if unit == 0 { (1, 2) } else { (0, 3) });
+        }
+    }
+
+    #[test]
+    fn native_radar_category_labels_follow_the_authored_visibility() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-radar-labels.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 3);
+        for unit in 0..3 {
+            let mut labels = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| match &o.visual {
+                    Visual::TextLayout { visual, .. } => match visual.as_ref() {
+                        Visual::RichText { runs, .. } => {
+                            Some(runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .filter(|s| s != "Manual Axis 5 to 50")
+                .collect::<Vec<_>>();
+            labels.sort();
+            assert_eq!(
+                labels,
+                if unit == 0 {
+                    vec!["16", "28", "39", "50", "A", "B", "C"]
+                } else {
+                    vec!["16", "28", "39", "50"]
+                },
+                "native Radar labels unit {unit}"
+            );
+            let spokes = document.objects.iter().filter(|o| o.unit_index == unit)
+                .filter(|o| matches!(&o.visual, Visual::StrokeStyle { visual, .. }
+                    if matches!(visual.as_ref(),Visual::PaintedShape { fill:Paint::None,stroke:Paint::Solid(0x0000_00ff),.. }))).count();
+            assert_eq!(
+                spokes,
+                if unit == 2 { 0 } else { 2 },
+                "native Radar radial lines unit {unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_radar_grid_preserves_curved_and_disabled_settings() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-radar-grid.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(document.units.len(), 3);
+        for (unit, count) in [(0, 4), (1, 4), (2, 0)] {
+            let grids = document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit)
+                .filter_map(|o| match &o.visual {
+                    Visual::StrokeStyle { visual, .. } => match visual.as_ref() {
+                        Visual::PaintedShape {
+                            geometry,
+                            fill: Paint::None,
+                            stroke: Paint::Solid(_),
+                            ..
+                        } if matches!(geometry, Geometry::Ellipse)
+                            || matches!(geometry, Geometry::Path { commands, .. } if commands.len() > 2) => Some((o.bounds, geometry)),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(grids.len(), count, "native Radar grid unit {unit}");
+            if unit == 1 {
+                for (index, (b, geometry)) in grids.iter().enumerate() {
+                    assert!(matches!(geometry, Geometry::Ellipse));
+                    // Apple PDF circles: center (338.523,261.913) pt;
+                    // radius increments 34.4717 pt. No fitted alignment.
+                    let radius = (index + 1) as f32 * 34.4717 * 4.0 / 3.0;
+                    assert!((b.x + b.width / 2.0 - 338.523 * 4.0 / 3.0).abs() < 1.5);
+                    assert!((b.y + b.height / 2.0 - 261.913 * 4.0 / 3.0).abs() < 1.5);
+                    assert!((b.width / 2.0 - radius).abs() < 1.5);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn native_chart_boundaries_preserve_log_percent_and_sparse_data() {
         let document = detect_and_parse(
             include_bytes!("../../tests/fixtures/iwork-chart-boundaries.key"),
@@ -20443,6 +22606,95 @@ mod tests {
                 }
             }
             check(&object.visual);
+        }
+    }
+
+    #[test]
+    fn native_pages_anchored_chart_keeps_body_relative_plot_origin() {
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-static-matrix-floating.pages"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        // Colored vectors directly extracted from the pinned Apple PDF.
+        for [x, y, width, height] in [
+            [212.0, 404.0, 48.0, 78.66667],
+            [380.0, 244.0, 48.0, 238.66667],
+            [546.6667, 324.0, 48.0, 158.66667],
+            [260.0, 324.0, 48.0, 158.66667],
+            [428.0, 404.0, 46.66667, 78.66667],
+            [594.6667, 165.33333, 48.0, 317.33333],
+        ] {
+            assert!(
+                document.objects.iter().any(|o| {
+                    let b = o.bounds;
+                    o.unit_index == 0
+                        && matches!(
+                            o.source.locator,
+                            SourceLocator::Iwork {
+                                kind: "chart-series",
+                                ..
+                            }
+                        )
+                        && [
+                            b.x - x,
+                            b.y - y,
+                            b.x + b.width - x - width,
+                            b.y + b.height - y - height,
+                        ]
+                        .iter()
+                        .all(|v| v.abs() < 1.5)
+                }),
+                "missing native anchored bar at {x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_bubbles_preserve_negative_visibility_dimension_and_minimum() {
+        // Apple Keynote 15.4 exports of this exact fixture are pinned in
+        // iwork-chart-oracles/edge-cases. Values are native PDF points * 4/3.
+        let document = detect_and_parse(
+            include_bytes!("../../tests/fixtures/iwork-chart-edge-cases.key"),
+            Limits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let bubbles = |unit| {
+            document
+                .objects
+                .iter()
+                .filter(|o| o.unit_index == unit && o.stable_id.contains(":bubble-"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bubbles(1).len(), 2, "negative values are hidden by default");
+        for unit in [8, 9] {
+            assert_eq!(
+                bubbles(unit).len(),
+                3,
+                "explicit negative bubbles must survive"
+            );
+        }
+        for (unit, expected) in [
+            (8, [337.33334, 373.33334, 72.0, 72.0]),
+            (9, [348.0, 384.0, 50.666668, 50.666668]),
+        ] {
+            let b = bubbles(unit)[0].bounds;
+            for error in [
+                b.x - expected[0],
+                b.y - expected[1],
+                b.x + b.width - expected[0] - expected[2],
+                b.y + b.height - expected[1] - expected[3],
+            ] {
+                assert!(error.abs() < 1.5, "native bubble mode {unit}: {error}");
+            }
+        }
+        for bubble in &bubbles(7)[..2] {
+            assert!(
+                (bubble.bounds.width - 28.0 / 3.0).abs() < 0.001,
+                "tiny positive sizes retain the native seven-point minimum"
+            );
         }
     }
 
@@ -21057,7 +23309,7 @@ mod tests {
                         ..
                     }
                 ) && object.bounds.width < 15.0
-                    && object.bounds.height > 12.0
+                    && object.bounds.height >= 12.0
             })
             .collect::<Vec<_>>();
         assert_eq!(bars.len(), 18);
@@ -21270,10 +23522,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(bars.len(), 2);
-        assert!((bars[0].bounds.height / bars[1].bounds.height - 10.0 / 58.0).abs() < 0.0001);
-        // Native reference: geometry is the plot frame and gap=219% of a bar.
+        // Apple rounds filled bar edges to document points. The two bars in
+        // the pinned PDF have a (72,72) print translation; their heights are
+        // 26 and 153 points, rather than an unquantized 10/58 ratio.
+        for (bar, (x, y, width, height)) in bars
+            .iter()
+            .zip([(194.0, 264.0, 51.0, 26.0), (358.0, 137.0, 52.0, 153.0)])
+        {
+            for (actual, expected) in [
+                (bar.bounds.x, x),
+                (bar.bounds.y, y),
+                (bar.bounds.width, width),
+                (bar.bounds.height, height),
+            ] {
+                assert!((actual - expected * super::IWORK_POINT_TO_CSS_PIXEL).abs() < 0.001);
+            }
+        }
+        // Geometry is the authored plot frame and gap=219% of a bar.
         let plot_width = 329.476_96 * super::IWORK_POINT_TO_CSS_PIXEL;
-        assert!((bars[0].bounds.width - plot_width / 2.0 / 3.19).abs() < 0.01);
         let Visual::StrokeStyle { visual, .. } = &chart.visual else {
             panic!("chart background style missing")
         };
@@ -24376,11 +26642,15 @@ trailer << /Root 1 0 R >>
             ));
         }
         chart_archive.extend(protobuf_message(19, &nonstyles));
+        // The native default hides the legend. This case explicitly authors one.
+        chart_archive.extend(protobuf_message(10, &protobuf_reference(204)));
+        let chart_nonstyle = protobuf_message(10_000, &protobuf_varint(20, 1));
         let mut chart = protobuf_message(1, &keynote_drawable(120.0, 100.0, 700.0, 420.0));
         chart.extend_from_slice(&protobuf_message(10_000, &chart_archive));
         let slide = iwa_stream(&[
             iwa_archive(200, 5, &slide, &[201]),
             iwa_archive(201, 5_021, &chart, &[]),
+            iwa_archive(204, super::IWORK_CHART_TITLE_TYPE, &chart_nonstyle, &[]),
             iwa_archive(202, super::IWORK_CHART_SERIES_NONSTYLE_TYPE, &labels, &[]),
             iwa_archive(203, super::IWORK_CHART_SERIES_NONSTYLE_TYPE, &labels, &[]),
         ]);
@@ -24421,7 +26691,7 @@ trailer << /Root 1 0 R >>
             )));
         }
         assert_eq!(
-            super::keynote_chart_range(&[vec![0.29, 0.29, 0.24]], false),
+            super::keynote_chart_range(&[vec![0.29, 0.29, 0.24]], false, false),
             (0.0, 0.3)
         );
         crate::protocol::encode(&document).expect("native Keynote chart should encode");
@@ -24437,79 +26707,140 @@ trailer << /Root 1 0 R >>
             let row = protobuf_message(1, &protobuf_fixed64(1, value));
             grid.extend_from_slice(&protobuf_message(3, &row));
         }
-        let mut archive = protobuf_varint(1, 16);
-        archive.extend_from_slice(&protobuf_varint(5, 1));
-        archive.extend_from_slice(&protobuf_message(7, &grid));
-        archive.extend_from_slice(&protobuf_message(10, &protobuf_reference(77)));
-        let mut styles = protobuf_varint(1, 3);
-        for (index, identifier) in [80, 81, 82].into_iter().enumerate() {
-            let mut entry = protobuf_varint(1, index as u64);
-            entry.extend_from_slice(&protobuf_message(2, &protobuf_reference(identifier)));
-            styles.extend_from_slice(&protobuf_message(2, &entry));
-        }
-        archive.extend_from_slice(&protobuf_message(18, &styles));
-        let mut payload = protobuf_message(1, &keynote_drawable(0.0, 0.0, 300.0, 300.0));
-        payload.extend_from_slice(&protobuf_message(10_000, &archive));
-        let mut title_properties = protobuf_varint(21, 1);
-        title_properties.extend_from_slice(&protobuf_message(23, b"Presidential Approval Rating"));
-        let title = protobuf_message(10_000, &title_properties);
-        let object_archives = vec![super::IwaArchive {
-            identifier: 77,
-            messages: vec![super::IwaMessage {
-                message_type: super::IWORK_CHART_TITLE_TYPE,
-                payload: title,
-                data_references: Vec::new(),
-            }],
-        }];
-        let style_archives = [0x6666_66ff, 0xb3b3_b3ff, 0x8080_80ff]
-            .into_iter()
-            .enumerate()
-            .map(|(index, color)| super::IwaArchive {
-                identifier: 80 + index as u64,
+        for chart_type in [5, 16] {
+            let mut archive = protobuf_varint(1, chart_type);
+            archive.extend_from_slice(&protobuf_varint(5, 1));
+            archive.extend_from_slice(&protobuf_message(7, &grid));
+            archive.extend_from_slice(&protobuf_message(10, &protobuf_reference(77)));
+            let mut styles = protobuf_varint(1, 3);
+            for (index, identifier) in [80, 81, 82].into_iter().enumerate() {
+                let mut entry = protobuf_varint(1, index as u64);
+                entry.extend_from_slice(&protobuf_message(2, &protobuf_reference(identifier)));
+                styles.extend_from_slice(&protobuf_message(2, &entry));
+            }
+            archive.extend_from_slice(&protobuf_message(18, &styles));
+            let mut payload = protobuf_message(1, &keynote_drawable(0.0, 0.0, 300.0, 300.0));
+            payload.extend_from_slice(&protobuf_message(10_000, &archive));
+            let mut title_properties = protobuf_varint(21, 1);
+            title_properties
+                .extend_from_slice(&protobuf_message(23, b"Presidential Approval Rating"));
+            let title = protobuf_message(10_000, &title_properties);
+            let object_archives = vec![super::IwaArchive {
+                identifier: 77,
                 messages: vec![super::IwaMessage {
-                    message_type: super::IWORK_CHART_SERIES_STYLE_TYPE,
-                    payload: protobuf_message(
-                        10_000,
-                        &protobuf_message(10, &protobuf_message(1, &keynote_color_message(color))),
-                    ),
+                    message_type: super::IWORK_CHART_TITLE_TYPE,
+                    payload: title,
                     data_references: Vec::new(),
                 }],
-            })
-            .collect::<Vec<_>>();
-        let chart = super::keynote_chart(
-            &payload,
-            &object_archives,
-            &style_archives,
-            "Index/Slide.iwa",
-        )
-        .unwrap()
-        .unwrap();
-        let mut objects = Vec::new();
-        super::keynote_push_chart(
-            chart,
-            42,
-            0,
-            "Index/Slide.iwa",
-            Limits::default(),
-            &mut objects,
-            0.0,
-            0.0,
-            0,
-        )
-        .unwrap();
+            }];
+            let style_archives = [0x6666_66ff, 0xb3b3_b3ff, 0x8080_80ff]
+                .into_iter()
+                .enumerate()
+                .map(|(index, color)| super::IwaArchive {
+                    identifier: 80 + index as u64,
+                    messages: vec![super::IwaMessage {
+                        message_type: super::IWORK_CHART_SERIES_STYLE_TYPE,
+                        payload: protobuf_message(
+                            10_000,
+                            &[
+                                protobuf_message(
+                                    10,
+                                    &protobuf_message(1, &keynote_color_message(color)),
+                                ),
+                                protobuf_message(
+                                    17,
+                                    &protobuf_message(1, &keynote_color_message(color)),
+                                ),
+                            ]
+                            .concat(),
+                        ),
+                        data_references: Vec::new(),
+                    }],
+                })
+                .collect::<Vec<_>>();
+            let chart = super::keynote_chart(
+                &payload,
+                &object_archives,
+                &style_archives,
+                "Index/Slide.iwa",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(chart.series.len(), 1);
+            assert_eq!(chart.series[0], [0.37, 0.59, 0.04]);
+            for (index, color) in [0x6666_66ff, 0xb3b3_b3ff, 0x8080_80ff]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(super::keynote_chart_color(&chart, index), color);
+            }
+            let mut objects = Vec::new();
+            super::keynote_push_chart(
+                chart,
+                42,
+                0,
+                "Index/Slide.iwa",
+                Limits::default(),
+                &mut objects,
+                0.0,
+                0.0,
+                0,
+            )
+            .unwrap();
 
-        assert_eq!(objects.len(), 8);
-        for (index, color) in [0x6666_66ff, 0xb3b3_b3ff, 0x8080_80ff]
-            .into_iter()
-            .enumerate()
-        {
-            assert!(matches!(
-                objects[2 + index * 2].visual,
-                Visual::PaintedShape {
-                    fill: Paint::Solid(actual),
-                    ..
-                } if actual == color
-            ));
+            if chart_type == 5 {
+                assert_eq!(objects.len(), 8);
+            } else {
+                assert!(objects.iter().any(|o| o.stable_id.contains(":3d-face-")));
+            }
+            for (index, color) in [0x6666_66ff, 0xb3b3_b3ff, 0x8080_80ff]
+                .into_iter()
+                .enumerate()
+            {
+                if chart_type == 5 {
+                    assert!(matches!(objects[2 + index * 2].visual,
+                    Visual::PaintedShape { fill: Paint::Solid(actual), .. } if actual == color));
+                }
+            }
+            if chart_type == 16 {
+                // Native missing Default lights shade the three materials;
+                // an exact unlit fill-color assertion is not a valid 3D oracle.
+                let mut top_colors = objects
+                    .iter()
+                    .filter_map(|o| {
+                        if !o.stable_id.contains(":3d-face-") {
+                            return None;
+                        }
+                        let Visual::PaintedShape {
+                            geometry: Geometry::Path { commands, .. },
+                            fill: Paint::Solid(color),
+                            ..
+                        } = &o.visual
+                        else {
+                            return None;
+                        };
+                        (commands.len() > 5).then_some(*color)
+                    })
+                    .collect::<Vec<_>>();
+                top_colors.sort_unstable();
+                top_colors.dedup();
+                assert_eq!(
+                    top_colors.len(),
+                    3,
+                    "three distinct grayscale slice tops remain visible"
+                );
+                assert!(
+                    top_colors
+                        .iter()
+                        .all(|c| c >> 24 == ((c >> 16) & 255)
+                            && ((c >> 16) & 255) == ((c >> 8) & 255))
+                );
+            }
+            for label in ["37%", "59%", "4%"] {
+                assert!(objects.iter().any(|o| matches!(&o.visual,
+                Visual::TextLayout {visual, ..} if matches!(visual.as_ref(),
+                    Visual::RichText {runs, ..} if runs.iter().any(|r| r.text == label)))));
+            }
         }
         let hidden = protobuf_message(
             10_000,

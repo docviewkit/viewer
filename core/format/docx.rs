@@ -22990,7 +22990,10 @@ impl Layout<'_> {
         );
         Ok(effects.wrap(
             visual,
-            drawing.picture_clip.clone().filter(|geometry| *geometry != Geometry::Rectangle),
+            drawing
+                .picture_clip
+                .clone()
+                .filter(|geometry| *geometry != Geometry::Rectangle),
         ))
     }
 
@@ -25690,7 +25693,9 @@ fn drawing_visual_at_bounds(drawing: &Drawing, bounds: Rect, mut visual: Visual)
             }
             Visual::Layer { visual, .. }
             | Visual::Effect { visual, .. }
-            | Visual::AdvancedEffect { visual, .. } => offset_groups(visual, x, y, scale_x, scale_y),
+            | Visual::AdvancedEffect { visual, .. } => {
+                offset_groups(visual, x, y, scale_x, scale_y)
+            }
             _ => {}
         }
     }

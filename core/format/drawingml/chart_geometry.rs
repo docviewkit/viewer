@@ -152,47 +152,10 @@ pub(super) fn chart_project_3d(
     y: f32,
     z: f32,
 ) -> (f32, f32) {
-    let (sx, cx) = f32::from(view.rot_x).to_radians().sin_cos();
-    let (sy, cy) = f32::from(view.rot_y).to_radians().sin_cos();
     let height = view.height_percent.map_or(plot.height / plot.width.max(1.0), |v| f32::from(v).max(5.0) / 100.0);
     let depth = f32::from(view.depth_percent.unwrap_or(100)).max(20.0) / 100.0;
-    let project = |x: f32, y: f32, z: f32| {
-        let (x, y, z) = (x - 0.5, (y - 0.5) * height, (z - 0.5) * depth);
-        let distance = (z * cy - x * sy) * cx + y * sx;
-        let perspective = if view.right_angle_axes {
-            0.0
-        } else {
-            f32::from(view.perspective) / 240.0
-        };
-        let scale = 1.0 / (1.0 + distance * perspective).max(0.1);
-        (
-            (x * cy + z * sy) * scale,
-            (-y * cx + (x * sy - z * cy) * sx) * scale,
-        )
-    };
-    let (mut left, mut top, mut right, mut bottom) = (
-        f32::INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-    );
-    for x in [0.0, 1.0] {
-        for y in [0.0, 1.0] {
-            for z in [0.0, 1.0] {
-                let (u, v) = project(x, y, z);
-                left = left.min(u);
-                right = right.max(u);
-                top = top.min(v);
-                bottom = bottom.max(v);
-            }
-        }
-    }
-    let scale = (plot.width / (right - left).max(0.01)).min(plot.height / (bottom - top).max(0.01));
-    let (u, v) = project(x, y, z);
-    (
-        plot.x + plot.width / 2.0 + (u - (left + right) / 2.0) * scale,
-        plot.y + plot.height / 2.0 + (v - (top + bottom) / 2.0) * scale,
-    )
+    crate::format::chart_project_volume(plot, [f32::from(view.rot_x), f32::from(view.rot_y)], [height,depth],
+        if view.right_angle_axes { 0.0 } else { f32::from(view.perspective) / 240.0 }, [x,y,z], 1.0)
 }
 
 // All faces use the same camera as the floor and the axes.  A screen-space

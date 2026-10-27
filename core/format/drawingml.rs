@@ -1649,21 +1649,7 @@ fn transform_saturation(color: u32, multiplier: f32, offset: f32) -> u32 {
     )
 }
 
-fn srgb_to_linear(component: f32) -> f32 {
-    if component <= 0.040_45 {
-        component / 12.92
-    } else {
-        ((component + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-pub(super) fn linear_to_srgb(component: f32) -> f32 {
-    if component <= 0.003_130_8 {
-        component * 12.92
-    } else {
-        1.055 * component.powf(1.0 / 2.4) - 0.055
-    }
-}
+pub(super) use super::{linear_to_srgb, srgb_to_linear};
 
 pub(super) fn numeric_attribute(
     attributes: &[XmlAttribute<'_>],

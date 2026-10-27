@@ -27,6 +27,58 @@ fn group_decimal_digits(rendered: &str) -> String {
     grouped
 }
 
+// Category stacks share finite, signed f32 accumulation. Axis quantization,
+// area prefix stacking and axis/series selection remain adapter semantics.
+#[cfg(any(
+    feature = "native-formats",
+    feature = "legacy-office-formats",
+    feature = "iwork-formats"
+))]
+fn chart_stacked_data_extent<'a>(series: impl Iterator<Item = &'a [f32]> + Clone) -> (f32, f32) {
+    let categories = series.clone().map(<[f32]>::len).max().unwrap_or(0);
+    (0..categories).fold((0.0_f32, 0.0_f32), |(minimum, maximum), category| {
+        let (negative, positive) = series
+            .clone()
+            .filter_map(|values| values.get(category).copied())
+            .filter(|value| value.is_finite())
+            .fold((0.0_f32, 0.0_f32), |(negative, positive), value| {
+                if value < 0.0 {
+                    (negative + value, positive)
+                } else {
+                    (negative, positive + value)
+                }
+            });
+        (minimum.min(negative), maximum.max(positive))
+    })
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "native-formats",
+        feature = "legacy-office-formats",
+        feature = "iwork-formats"
+    )
+))]
+#[test]
+fn signed_stack_extents_isolate_sparse_and_nonfinite_cells() {
+    let rows = [
+        vec![f32::NAN, 10.0, f32::INFINITY, 6.0],
+        vec![-10.0, f32::NAN, -4.0],
+        vec![-2.0, 5.0],
+    ];
+    assert_eq!(
+        chart_stacked_data_extent(rows.iter().map(Vec::as_slice)),
+        (-12.0, 15.0)
+    );
+    assert_eq!(chart_stacked_data_extent(std::iter::empty()), (0.0, 0.0));
+    let rows = [vec![f32::MAX], vec![f32::MAX]];
+    assert_eq!(
+        chart_stacked_data_extent(rows.iter().map(Vec::as_slice)),
+        (0.0, f32::INFINITY)
+    );
+}
+
 /// Remaining leading space when adjacent paragraph margins overlap.
 #[cfg(any(
     feature = "native-formats",
@@ -39,12 +91,18 @@ fn collapsed_paragraph_space_before(before: f32, previous_after: f32) -> f32 {
 #[cfg(any(
     feature = "native-formats",
     feature = "legacy-office-formats",
+    feature = "iwork-formats"
+))]
+use crate::model::Rect;
+#[cfg(any(
+    feature = "native-formats",
+    feature = "legacy-office-formats",
     feature = "iwork-formats",
     feature = "odf-formats"
 ))]
 use crate::model::{FillRule, Geometry, PathCommand};
 #[cfg(any(feature = "native-formats", feature = "legacy-office-formats"))]
-use crate::model::{PathFillMode, PathLayer, Rect};
+use crate::model::{PathFillMode, PathLayer};
 #[cfg(feature = "native-formats")]
 pub mod docx;
 #[cfg(any(feature = "native-formats", feature = "legacy-office-formats"))]
@@ -3467,6 +3525,104 @@ fn chart_linear_regression_preserves_finite_pairs_and_degenerate_cases() {
 
 #[cfg(any(
     feature = "native-formats",
+    feature = "legacy-office-formats",
+    feature = "iwork-formats"
+))]
+pub(super) fn chart_camera_point(
+    rotation: [f32; 2],
+    aspect: [f32; 2],
+    point: [f32; 3],
+    depth_y_sign: f32,
+) -> [f32; 3] {
+    let (sx, cx) = rotation[0].to_radians().sin_cos();
+    let (sy, cy) = rotation[1].to_radians().sin_cos();
+    let [x, y, z] = [
+        point[0] - 0.5,
+        (point[1] - 0.5) * aspect[0],
+        (point[2] - 0.5) * aspect[1],
+    ];
+    [
+        x * cy + z * sy,
+        -y * cx + (x * sy - z * cy) * sx,
+        (z * cy - x * sy) * cx + depth_y_sign * y * sx,
+    ]
+}
+
+// Camera math is shared; adapters determine the protocol's angles, physical
+// proportions and perspective. Fitting the full volume keeps all faces, grids
+// and labels in a single coordinate system.
+#[cfg(any(
+    feature = "native-formats",
+    feature = "legacy-office-formats",
+    feature = "iwork-formats"
+))]
+pub(super) fn chart_project_volume(
+    plot: Rect,
+    rotation: [f32; 2],
+    aspect: [f32; 2],
+    perspective: f32,
+    point: [f32; 3],
+    depth_y_sign: f32,
+) -> (f32, f32) {
+    let project = |point| {
+        let [u, v, distance] = chart_camera_point(rotation, aspect, point, depth_y_sign);
+        let scale = 1.0 / (1.0 + distance * perspective).max(0.1);
+        (u * scale, v * scale)
+    };
+    let (mut left, mut top, mut right, mut bottom) = (
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    );
+    for x in [0.0, 1.0] {
+        for y in [0.0, 1.0] {
+            for z in [0.0, 1.0] {
+                let (u, v) = project([x, y, z]);
+                left = left.min(u);
+                right = right.max(u);
+                top = top.min(v);
+                bottom = bottom.max(v);
+            }
+        }
+    }
+    let scale = (plot.width / (right - left).max(0.01)).min(plot.height / (bottom - top).max(0.01));
+    let (u, v) = project(point);
+    (
+        plot.x + plot.width / 2.0 + (u - (left + right) / 2.0) * scale,
+        plot.y + plot.height / 2.0 + (v - (top + bottom) / 2.0) * scale,
+    )
+}
+
+#[cfg(any(
+    feature = "native-formats",
+    feature = "legacy-office-formats",
+    feature = "iwork-formats"
+))]
+pub(super) fn srgb_to_linear(component: f32) -> f32 {
+    if component <= 0.040_45 {
+        component / 12.92
+    } else {
+        ((component + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+#[cfg(any(
+    feature = "native-formats",
+    feature = "legacy-office-formats",
+    feature = "iwork-formats",
+    feature = "xps-formats"
+))]
+pub(super) fn linear_to_srgb(component: f32) -> f32 {
+    if component <= 0.003_130_8 {
+        component * 12.92
+    } else {
+        1.055 * component.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+#[cfg(any(
+    feature = "native-formats",
     feature = "iwork-formats",
     feature = "legacy-office-formats"
 ))]
@@ -3475,6 +3631,86 @@ fn chart_linear_regression_preserves_finite_pairs_and_degenerate_cases() {
 pub(super) fn logarithmic_axis_ratio(value: f32, minimum: f32, maximum: f32) -> Option<f32> {
     (value > 0.0 && minimum > 0.0 && maximum > minimum)
         .then(|| (value.ln() - minimum.ln()) / (maximum.ln() - minimum.ln()))
+}
+
+// Integer multiples within each logarithmic power interval share the same
+// coordinate semantics in DrawingML and TSCH. Bases and range policies stay
+// with the adapters; retain DrawingML's existing 1000-tick resource bound.
+#[cfg(any(
+    feature = "native-formats",
+    feature = "iwork-formats",
+    feature = "legacy-office-formats"
+))]
+pub(super) fn logarithmic_axis_minor_ticks(
+    minimum: f32,
+    maximum: f32,
+    base: f32,
+) -> Vec<(f32, f32)> {
+    if !minimum.is_finite()
+        || !maximum.is_finite()
+        || !base.is_finite()
+        || minimum <= 0.0
+        || maximum <= minimum
+        || !(2.0..=1000.0).contains(&base)
+    {
+        return Vec::new();
+    }
+    let mut ticks = Vec::new();
+    for exponent in (minimum.log(base).floor() as i32)..=(maximum.log(base).ceil() as i32) {
+        for multiplier in 2..(base.ceil() as u32).min(1000) {
+            let value = base.powi(exponent) * multiplier as f32;
+            if value > minimum && value < maximum {
+                if let Some(ratio) = logarithmic_axis_ratio(value, minimum, maximum) {
+                    ticks.push((value, ratio));
+                }
+                if ticks.len() == 1000 {
+                    return ticks;
+                }
+            }
+        }
+    }
+    ticks
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "native-formats",
+        feature = "iwork-formats",
+        feature = "legacy-office-formats"
+    )
+))]
+#[test]
+fn logarithmic_minor_ticks_preserve_native_decades_clipping_and_budget() {
+    let ticks = logarithmic_axis_minor_ticks(1.0, 100.0, 10.0);
+    assert_eq!(
+        ticks.iter().map(|(value, _)| *value).collect::<Vec<_>>(),
+        (2..10)
+            .chain((2..10).map(|v| v * 10))
+            .map(|v| v as f32)
+            .collect::<Vec<_>>()
+    );
+    assert!((ticks[0].1 - 0.150515).abs() < 1e-6);
+    assert_eq!(
+        logarithmic_axis_minor_ticks(2.0, 20.0, 3.0)
+            .iter()
+            .map(|(v, _)| *v)
+            .collect::<Vec<_>>(),
+        vec![6.0, 18.0]
+    );
+    assert!(logarithmic_axis_minor_ticks(1.0, 16.0, 2.0).is_empty());
+    for (minimum, maximum, base) in [
+        (0.0, 10.0, 10.0),
+        (10.0, 1.0, 10.0),
+        (1.0, f32::INFINITY, 10.0),
+        (1.0, 10.0, 1.01),
+    ] {
+        assert!(logarithmic_axis_minor_ticks(minimum, maximum, base).is_empty());
+    }
+    assert_eq!(
+        logarithmic_axis_minor_ticks(1e-30, 1e30, 1000.0).len(),
+        1000
+    );
 }
 
 #[cfg(all(

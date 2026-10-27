@@ -35,7 +35,7 @@ import { OfficeEngineError } from "./types.js";
 
 const MAGIC = 0x3144564f;
 const MIN_VERSION = 3;
-const VERSION = 78;
+const VERSION = 79;
 const NONE = 0xffff_ffff;
 const MAX_VISUAL_DEPTH = 64;
 const MAX_PATH_COMMANDS = 65_536;
@@ -1470,7 +1470,9 @@ function readVisual(reader: Reader, kind: number, version: number, depth = 0): S
       reader.u8(),
       "compound line",
     );
-    const alignment = enumValue(["center", "inset"] as const, reader.u8(), "line alignment");
+    const alignmentCode = reader.u8();
+    const strokeAdjust = version >= 79 && (alignmentCode & 0x80) !== 0;
+    const alignment = enumValue(["center", "inset"] as const, version >= 79 ? alignmentCode & 0x7f : alignmentCode, "line alignment");
     const miterLimit = reader.f32();
     const dashOffset = version >= 71 ? reader.f32() : 0;
     const dashCount = reader.u32();
@@ -1483,7 +1485,7 @@ function readVisual(reader: Reader, kind: number, version: number, depth = 0): S
     reader.skip(3);
     return {
       kind: "stroke-style",
-      style: { cap, join, compound, alignment, miterLimit, dash, dashOffset },
+      style: { cap, join, compound, alignment, miterLimit, dash, dashOffset, ...(strokeAdjust ? {strokeAdjust:true} : {}) },
       visual: readVisual(reader, nestedKind, version, depth + 1),
     };
   }

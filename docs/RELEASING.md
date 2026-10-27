@@ -98,6 +98,22 @@ force-push over public history or move old version tags.
 
 ## Retry
 
+The public source checkout excludes `tests/` and its local document corpus.
+The source workflow's test steps therefore require that corpus and cannot
+currently complete from a public checkout alone. Do not upload the corpus or
+skip local checks to publish a release.
+
+For a release verified with the retained local corpus, run the full local gate
+and prepare the artifacts from the final tagged source with
+`--native-visual-status not-certified` unless reviewed release suites passed.
+Retain the check logs, source commit and artifact hashes. Create a draft release
+on that tag, upload the same seven assets listed in `release.yml`, and dispatch
+the existing `publish.yml` with its `tag` and `release_id` inputs. Its checksum,
+npm, Pages and public-release steps still apply. Release notes must identify
+the local build and validation, the unavailable source-CI test corpus, and any
+unfinished native visual acceptance; do not claim a GitHub-hosted source build
+or full native certification.
+
 If a downstream service fails after artifacts have been built, run the source
 workflow manually with the existing source tag. Draft assets can be replaced
 until publication completes, and an already published npm version is not
@@ -114,8 +130,11 @@ git clone https://github.com/docviewkit/viewer.git
 cd viewer
 npm ci
 rustup target add wasm32-unknown-unknown
-npm test
+npm run build
 ```
+
+`npm test` additionally requires the retained local `tests/` corpus described
+above; it is not included in the public checkout.
 
 `npm run build` produces ESM declarations, source maps, the document and image-codec Worker modules, the base Wasm, the optional native format-pack Wasm binaries (with iWork and PDF sharing one binary), and the required local font assets.
 

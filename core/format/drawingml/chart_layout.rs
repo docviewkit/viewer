@@ -2339,31 +2339,12 @@ impl Chart {
             .filter(|series| self.series_uses_primary_value_axis(series))
             .any(|series| series.grouping == ChartGrouping::Stacked);
         let (mut minimum, mut maximum) = if stacked {
-            let category_count = self
-                .series
-                .iter()
-                .filter(|series| self.series_uses_primary_value_axis(series))
-                .map(|series| series.values.len())
-                .max()
-                .unwrap_or(0);
-            let stacked_bounds =
-                (0..category_count).fold((0.0_f32, 0.0_f32), |(minimum, maximum), index| {
-                    let (negative, positive) = self
-                        .series
-                        .iter()
-                        .filter(|series| self.series_uses_primary_value_axis(series))
-                        .filter(|series| series.grouping == ChartGrouping::Stacked)
-                        .filter_map(|series| series.values.get(index).copied())
-                        .filter(|value| value.is_finite())
-                        .fold((0.0_f32, 0.0_f32), |(negative, positive), value| {
-                            if value < 0.0 {
-                                (negative + value, positive)
-                            } else {
-                                (negative, positive + value)
-                            }
-                        });
-                    (minimum.min(negative), maximum.max(positive))
-                });
+            let stacked_bounds = super::chart_stacked_data_extent(
+                self.series.iter()
+                    .filter(|series| self.series_uses_primary_value_axis(series))
+                    .filter(|series| series.grouping == ChartGrouping::Stacked)
+                    .map(|series| series.values.as_slice()),
+            );
             self.series
                 .iter()
                 .filter(|series| self.series_uses_primary_value_axis(series))
@@ -3331,20 +3312,7 @@ impl ChartValueAxis {
         let (minimum, maximum, major) = range;
         if maximum <= minimum || (!self.minor_gridlines && self.minor_tick_mark == ChartAxisTickMark::None) { return Vec::new(); }
         if let Some(base) = self.log_base {
-            if minimum <= 0.0 { return Vec::new(); }
-            let mut ticks = Vec::new();
-            for exponent in (minimum.log(base).floor() as i32)..=(maximum.log(base).ceil() as i32) {
-                for multiplier in 2..(base.ceil() as u32).min(1000) {
-                    let value = base.powi(exponent) * multiplier as f32;
-                    if value > minimum && value < maximum {
-                        if let Some(ratio) = crate::format::logarithmic_axis_ratio(value, minimum, maximum) {
-                            ticks.push((value, ratio));
-                        }
-                        if ticks.len() == 1000 { return ticks; }
-                    }
-                }
-            }
-            return ticks;
+            return crate::format::logarithmic_axis_minor_ticks(minimum, maximum, base);
         }
         let minor = self.minor_unit.unwrap_or(major / 5.0);
         if !minor.is_finite() || minor <= 0.0 || major <= 0.0 { return Vec::new(); }
