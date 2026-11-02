@@ -2261,6 +2261,7 @@ export class DocViewKitViewerElement extends HTMLElement {
     workspace.addEventListener("wheel", (event) => this.#handleWheel(event), { passive: false });
     workspace.addEventListener("scroll", () => {
       this.#queueSheetScroll();
+      this.#syncOutlinePosition();
       this.#clearObjectHover();
     }, { passive: true });
     workspace.addEventListener("click", (event) => void this.#selectObjectAt(event));
@@ -4428,6 +4429,7 @@ export class DocViewKitViewerElement extends HTMLElement {
       button.className = "outline-button";
       button.dataset.unitIndex = String(item.unitIndex);
       button.dataset.outlineIndex = String(index);
+      if (item.y !== undefined) button.dataset.outlineY = String(item.y);
       button.dataset.outlineParent = String(parent);
       button.setAttribute("role", "treeitem");
       button.setAttribute("aria-level", String(ancestors.length + 1));
@@ -4462,6 +4464,7 @@ export class DocViewKitViewerElement extends HTMLElement {
           const top = workspace.scrollTop + page.getBoundingClientRect().top
             - workspace.getBoundingClientRect().top + item.y * scale;
           workspace.scrollTo({ top, behavior: "auto" });
+          this.#syncOutlinePosition();
         });
         this.#updateNavigationSelection();
       });
@@ -4685,6 +4688,28 @@ export class DocViewKitViewerElement extends HTMLElement {
     this.#element<HTMLElement>(".shell").dataset.navigation = String(visible);
   }
 
+  #syncOutlinePosition(): void {
+    if (this.#pageMode !== "continuous" || this.#navigationMode !== "outline") return;
+    const buttons = this.#root.querySelectorAll<HTMLElement>(".outline-button[data-outline-y]");
+    if (buttons.length === 0) return;
+    const top = this.#workspace().scrollTop + 2;
+    let selection = -1;
+    let closest = -Infinity;
+    buttons.forEach((button) => {
+      const page = this.#continuousPages.get(Number(button.dataset.unitIndex));
+      if (page === undefined) return;
+      const position = page.element.offsetTop + Number(button.dataset.outlineY) * page.scale;
+      if (position <= top && position >= closest) {
+        closest = position;
+        selection = Number(button.dataset.outlineIndex);
+      }
+    });
+    if (selection >= 0 && selection !== this.#outlineSelection) {
+      this.#outlineSelection = selection;
+      this.#updateNavigationSelection();
+    }
+  }
+
   #updateNavigationSelection(): void {
     if (this.#info?.kind !== "spreadsheet" && this.#navigationMode === "thumbnails"
       && (this.#unitIndex < this.#navigationStart || this.#unitIndex >= this.#navigationEnd)) {
@@ -4704,7 +4729,9 @@ export class DocViewKitViewerElement extends HTMLElement {
       button.inert = button.hidden;
     }
     const retainedOutline = outlineButtons[this.#outlineSelection];
-    if (outlineButtons.length > 0 && Number(retainedOutline?.dataset.unitIndex) !== this.#unitIndex) {
+    if (outlineButtons.length > 0
+      && !(this.#pageMode === "continuous" && outlineButtons.some((button) => button.dataset.outlineY !== undefined))
+      && Number(retainedOutline?.dataset.unitIndex) !== this.#unitIndex) {
       this.#outlineSelection = outlineButtons.findIndex(
         (button) => Number(button.dataset.unitIndex) === this.#unitIndex,
       );
