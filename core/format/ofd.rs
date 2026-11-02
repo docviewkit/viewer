@@ -1183,6 +1183,7 @@ fn collect_outline(node: &Node, level: u32, page_ids: &[String], outline: &mut V
                 title: title.to_owned(),
                 unit_index: unit_index as u32,
                 level,
+                y: None,
             });
         }
         collect_outline(item, level.saturating_add(1), page_ids, outline);

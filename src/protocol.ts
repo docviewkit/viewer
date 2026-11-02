@@ -35,7 +35,7 @@ import { OfficeEngineError } from "./types.js";
 
 const MAGIC = 0x3144564f;
 const MIN_VERSION = 3;
-const VERSION = 79;
+const VERSION = 80;
 const NONE = 0xffff_ffff;
 const MAX_VISUAL_DEPTH = 64;
 const MAX_PATH_COMMANDS = 65_536;
@@ -2408,7 +2408,8 @@ function validateScene(
       || item.unitIndex < 0
       || item.unitIndex >= units.length
       || !Number.isInteger(item.level)
-      || item.level < 0) {
+      || item.level < 0
+      || (item.y !== undefined && !Number.isFinite(item.y))) {
       invalid("document outline contains an invalid item");
     }
   }
@@ -2630,11 +2631,11 @@ export function decodeSnapshot(bytes: Uint8Array): SceneDocument {
       throw new OfficeEngineError("CORE_PROTOCOL_INVALID", "Invalid document outline count");
     }
     for (let index = 0; index < outlineCount; index += 1) {
-      outline.push({
-        title: reader.string(),
-        unitIndex: reader.u32(),
-        level: reader.u32(),
-      });
+      const title = reader.string();
+      const unitIndex = reader.u32();
+      const level = reader.u32();
+      const y = version >= 80 ? reader.f32() : -1;
+      outline.push({ title, unitIndex, level, ...(y === -1 ? {} : { y }) });
     }
   }
   const embeddedFonts: SceneEmbeddedFont[] = [];

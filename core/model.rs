@@ -2000,6 +2000,7 @@ pub struct OutlineItem {
     pub title: String,
     pub unit_index: u32,
     pub level: u32,
+    pub y: Option<f32>,
 }
 
 #[derive(Clone, Debug)]

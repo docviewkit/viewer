@@ -23203,6 +23203,7 @@ impl Layout<'_> {
                 title: paragraph.text.trim().to_owned(),
                 unit_index,
                 level: u32::from(level),
+                y: Some(bounds.y),
             });
         }
         if parent_numeric_id.is_none() && paragraph.frame.is_none() {
@@ -31319,6 +31320,8 @@ mod tests {
         assert_eq!(document.outline.len(), 1);
         assert_eq!(document.outline[0].title, "Heading");
         assert_eq!(document.outline[0].level, 2);
+        let heading = document.objects.iter().find(|object| object.text.as_deref() == Some("Heading")).unwrap();
+        assert_eq!(document.outline[0].y, Some(heading.bounds.y));
     }
 
     #[test]

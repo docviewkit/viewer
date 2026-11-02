@@ -436,6 +436,8 @@ export interface DocumentOutlineItem {
   readonly title: string;
   readonly unitIndex: number;
   readonly level: number;
+  /** Vertical position within the unit, when the format provides one. */
+  readonly y?: number;
 }
 
 export interface DocumentInfo {

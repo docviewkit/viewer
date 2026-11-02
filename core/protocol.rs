@@ -9,7 +9,7 @@ use crate::model::{
 };
 
 const MAGIC: u32 = 0x3144_564f;
-const VERSION: u16 = 79;
+const VERSION: u16 = 80;
 const NONE: u32 = u32::MAX;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_VISUAL_DEPTH: usize = 64;
@@ -3661,7 +3661,7 @@ fn encoded_length<'a>(
             return Err(ProtocolError::InvalidValue);
         }
         add_length(&mut total, string_length(&item.title)?)?;
-        add_length(&mut total, 8)?;
+        add_length(&mut total, 12)?;
     }
 
     let _: u32 = document
@@ -3883,6 +3883,7 @@ pub fn encode(document: &Document) -> Result<Vec<u8>, ProtocolError> {
         writer.string(&item.title)?;
         writer.u32(item.unit_index);
         writer.u32(item.level);
+        writer.f32(item.y.unwrap_or(-1.0));
     }
 
     writer.u32(

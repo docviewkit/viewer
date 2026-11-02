@@ -3362,6 +3362,7 @@ fn collect_outline_siblings(
                     title,
                     unit_index,
                     level,
+                    y: None,
                 });
             }
         }

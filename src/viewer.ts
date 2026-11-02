@@ -1635,6 +1635,7 @@ export class DocViewKitViewerElement extends HTMLElement {
   #navigationEnd = -1;
   #navigationMode: ViewerNavigationMode = "thumbnails";
   #outlineSelection = -1;
+  #outlineNavigationRevision = 0;
   readonly #collapsedOutline = new Set<number>();
   #navigationTransitionRevision = 0;
   #navigationTransitioning = false;
@@ -4310,6 +4311,7 @@ export class DocViewKitViewerElement extends HTMLElement {
     if (unitIndex < 0 || unitIndex >= (this.#info?.units.length ?? 0)) return;
     if (unitIndex === this.#unitIndex) {
       if (this.#pageMode === "continuous") await this.#revealContinuousUnit(unitIndex);
+      else if (this.#rendered?.unit.index !== unitIndex) await this.#renderCurrent();
       return;
     }
     const transitionDirection = Math.sign(unitIndex - this.#unitIndex);
@@ -4334,6 +4336,8 @@ export class DocViewKitViewerElement extends HTMLElement {
   #buildNavigation(): void {
     const list = this.#element<HTMLElement>(".unit-list");
     const tabs = this.#element<HTMLElement>(".sheet-tabs");
+    this.#element<HTMLElement>(".stage-wrap").style.paddingBottom = "";
+    this.#element<HTMLElement>(".continuous-view").style.paddingBottom = "";
     list.replaceChildren();
     this.#collapsedOutline.clear();
     tabs.replaceChildren();
@@ -4443,7 +4447,22 @@ export class DocViewKitViewerElement extends HTMLElement {
           return;
         }
         this.#outlineSelection = index;
-        void this.#selectUnit(item.unitIndex);
+        const revision = ++this.#outlineNavigationRevision;
+        const document = this.#document;
+        void this.#selectUnit(item.unitIndex).then(() => {
+          if (revision !== this.#outlineNavigationRevision || document !== this.#document || item.y === undefined) return;
+          const workspace = this.#workspace();
+          const container = this.#element<HTMLElement>(this.#pageMode === "continuous" ? ".continuous-view" : ".stage-wrap");
+          container.style.paddingBottom = `${workspace.clientHeight}px`;
+          const page = this.#pageMode === "continuous"
+            ? this.#continuousPages.get(item.unitIndex)?.element : this.#root.querySelector<HTMLElement>(".stage");
+          const scale = this.#pageMode === "continuous"
+            ? this.#continuousPages.get(item.unitIndex)?.scale : this.#rendered?.scale;
+          if (page === undefined || page === null || scale === undefined) return;
+          const top = workspace.scrollTop + page.getBoundingClientRect().top
+            - workspace.getBoundingClientRect().top + item.y * scale;
+          workspace.scrollTo({ top, behavior: "auto" });
+        });
         this.#updateNavigationSelection();
       });
       fragment.append(button);
