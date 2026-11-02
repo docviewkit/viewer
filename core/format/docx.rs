@@ -1821,6 +1821,7 @@ struct Styles {
     default_style_id: Option<String>,
     definitions: HashMap<String, ParagraphStyleDefinition>,
     character_definitions: HashMap<String, ParagraphStyleDefinition>,
+    hyperlink_style_ids: HashSet<String>,
     default_table_style_id: Option<String>,
     table_definitions: HashMap<String, TableStyleDefinition>,
 }
@@ -4442,7 +4443,7 @@ impl Table {
         let band_row = row.saturating_sub(usize::from(self.style_first_row));
         for (enabled, condition) in [
             (
-                self.style_horizontal_bands,
+                self.style_horizontal_bands && !(self.style_first_row && first_row),
                 if band_row % 2 == 0 {
                     "band1Horz"
                 } else {
@@ -8003,7 +8004,8 @@ fn parse_document_xml_with_styles(
                     }
                     "rStyle" if current_character_style_mut(&mut paragraph).is_some() => {
                         let style_id = required_attribute(&attributes, "val", part)?;
-                        if !style_id.eq_ignore_ascii_case("Hyperlink")
+                        if !(style_id.eq_ignore_ascii_case("Hyperlink")
+                            || styles.hyperlink_style_ids.contains(&style_id))
                             || !complex_fields
                                 .iter()
                                 .any(|field| is_toc_field(&field.instruction))
@@ -11929,6 +11931,11 @@ fn parse_styles_xml(
                                     conditional_styles: HashMap::new(),
                                 });
                             }
+                        }
+                    }
+                    "name" if style.as_ref().is_some_and(|current| matches!(current.kind, StyleKind::Character)) => {
+                        if optional_attribute(&attributes, "val", part)?.is_some_and(|name| name.eq_ignore_ascii_case("Hyperlink")) {
+                            styles.hyperlink_style_ids.insert(style.as_ref().unwrap().id.clone());
                         }
                     }
                     "basedOn" if style.is_some() => {
@@ -33895,6 +33902,108 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn toc_named_hyperlink_and_unshaded_header_keep_inherited_colors() {
+        let theme = super::DocxTheme::default();
+        let styles = super::parse_styles_xml(&mut Vec::new(), br#"<w:styles xmlns:w="w">
+          <w:style w:type="character" w:styleId="alias"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0000FF"/></w:rPr></w:style>
+          <w:style w:type="table" w:styleId="T"><w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:fill="D3DFEE"/></w:tcPr></w:tblStylePr></w:style>
+        </w:styles>"#, Limits::default(), "word/styles.xml", &theme).unwrap();
+        let xml = br#"<w:document xmlns:w="w"><w:body>
+          <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:rStyle w:val="alias"/></w:rPr><w:t>Entry</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+          <w:p><w:r><w:rPr><w:rStyle w:val="alias"/></w:rPr><w:t>Link</w:t></w:r></w:p>
+          <w:tbl><w:tblPr><w:tblStyle w:val="T"/><w:tblLook w:firstRow="1" w:noHBand="0"/></w:tblPr><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid>
+          <w:tr><w:tc><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>Body</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+          </w:body></w:document>"#;
+        let parsed = super::parse_document_xml_with_styles(
+            xml,
+            Limits::default(),
+            PART,
+            Vec::new(),
+            &styles,
+            &theme,
+        )
+        .unwrap();
+        let super::Block::Paragraph(toc) = &parsed.blocks[0] else {
+            panic!("missing TOC")
+        };
+        let super::Block::Paragraph(link) = &parsed.blocks[1] else {
+            panic!("missing link")
+        };
+        let super::Block::Table(table) = &parsed.blocks[2] else {
+            panic!("missing table")
+        };
+        assert_eq!(toc.runs[0].style.color, 0x000000ff);
+        assert_eq!(link.runs[0].style.color, 0x0000ffff);
+        assert!(!matches!(
+            table.rows[0].cells[0].fill,
+            Paint::Solid(0xd3dfeeff)
+        ));
+        assert!(matches!(
+            table.rows[1].cells[0].fill,
+            Paint::Solid(0xd3dfeeff)
+        ));
+    }
+
+    #[test]
+    fn supplied_tsp_toc_and_table_header_colors() {
+        let Ok(bytes) = std::fs::read("tests/fixtures/tsp-development-operation.docx") else {
+            return; // Private customer fixture is kept locally, outside the repository.
+        };
+        let package = Package::open(&bytes, Limits::default()).unwrap();
+        let mut diagnostics = Vec::new();
+        let theme = super::resolve_docx_theme(&package, PART, &mut diagnostics).unwrap();
+        let styles = super::resolve_styles(&package, PART, &theme, &mut diagnostics).unwrap();
+        let xml = package.required_part(PART).unwrap();
+        let parsed = super::parse_document_xml_with_styles(
+            &xml,
+            Limits::default(),
+            PART,
+            Vec::new(),
+            &styles,
+            &theme,
+        )
+        .unwrap();
+        let toc = parsed
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                super::Block::Paragraph(p) if p.text.contains("1 Document Overview") => Some(p),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        let table = parsed
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                super::Block::Table(t)
+                    if t.rows
+                        .iter()
+                        .flat_map(|r| &r.cells)
+                        .flat_map(|c| c.paragraphs())
+                        .any(|p| p.text == "Terminology") =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert!(
+            !matches!(table.rows[0].cells[0].fill, Paint::Solid(0xd3dfeeff)),
+            "header must not inherit body band fill"
+        );
+        assert!(
+            matches!(table.rows[1].cells[0].fill, Paint::Solid(0xd3dfeeff)),
+            "body shading remains"
+        );
+        assert_eq!(
+            toc.runs[0].style.color, 0x000000ff,
+            "TOC link inherits paragraph color"
+        );
     }
 
     #[test]
