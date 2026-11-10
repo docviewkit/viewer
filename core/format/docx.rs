@@ -31320,7 +31320,11 @@ mod tests {
         assert_eq!(document.outline.len(), 1);
         assert_eq!(document.outline[0].title, "Heading");
         assert_eq!(document.outline[0].level, 2);
-        let heading = document.objects.iter().find(|object| object.text.as_deref() == Some("Heading")).unwrap();
+        let heading = document
+            .objects
+            .iter()
+            .find(|object| object.text.as_deref() == Some("Heading"))
+            .unwrap();
         assert_eq!(document.outline[0].y, Some(heading.bounds.y));
     }
 
