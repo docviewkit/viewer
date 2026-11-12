@@ -1567,6 +1567,7 @@ impl PreparedPptx {
     pub(crate) fn materialize_unit_with_budget(
         &self,
         unit_index: u32,
+        initial_units: &[crate::model::Unit],
         materialized_image_bytes: usize,
     ) -> Result<(Document, usize), Diagnostic> {
         let package = Package::open_with_cache(&self.bytes, self.limits, self.cache.clone())?;
@@ -1576,6 +1577,7 @@ impl PreparedPptx {
             &self.content_types,
             &self.font_metrics,
             unit_index,
+            initial_units,
             materialized_image_bytes,
         )?;
         document
@@ -2863,6 +2865,7 @@ mod tests {
             &content_types,
             &crate::font_metrics::FontMetricTable::default(),
             2,
+            &initial.document.units,
             initial.materialized_image_bytes,
         )
         .unwrap();
@@ -2870,6 +2873,7 @@ mod tests {
             !deferred.objects.is_empty()
                 && deferred.objects.iter().all(|object| object.unit_index == 2)
         );
+        assert_eq!(deferred.units, initial.document.units);
         assert!(materialized_image_bytes > initial.materialized_image_bytes);
     }
 

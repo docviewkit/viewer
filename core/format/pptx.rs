@@ -373,6 +373,7 @@ pub(super) fn parse_unit(
     content_types: &ContentTypes,
     font_metrics: &FontMetricTable,
     unit_index: u32,
+    initial_units: &[Unit],
     materialized_image_bytes: usize,
 ) -> Result<(Document, usize), Diagnostic> {
     parse_with_mode(
@@ -381,17 +382,17 @@ pub(super) fn parse_unit(
         Vec::new(),
         content_types,
         font_metrics,
-        PptxParseMode::Unit(unit_index),
+        PptxParseMode::Unit(unit_index, initial_units),
         materialized_image_bytes,
     )
     .map(|initial| (initial.document, initial.materialized_image_bytes))
 }
 
 #[derive(Clone, Copy)]
-enum PptxParseMode {
+enum PptxParseMode<'a> {
     Complete,
     Initial,
-    Unit(u32),
+    Unit(u32, &'a [Unit]),
 }
 
 fn parse_with_mode(
@@ -400,7 +401,7 @@ fn parse_with_mode(
     diagnostics: Vec<Diagnostic>,
     content_types: &ContentTypes,
     font_metrics: &FontMetricTable,
-    mode: PptxParseMode,
+    mode: PptxParseMode<'_>,
     materialized_image_bytes: usize,
 ) -> Result<PptxInitial, Diagnostic> {
     let presentation = package.required_part(main_part)?;
@@ -531,48 +532,55 @@ fn parse_with_mode(
                 format!("multiple slides reference the same package part {slide_part}"),
             ));
         }
-        let slide_properties = presentation_part_properties(package, slide_part)?;
-        let (speaker_notes, speaker_notes_part, speaker_note_paragraphs) =
-            parse_speaker_notes(package, slide_part, &state.default_theme)?;
-        let slide_number = first_slide_number.saturating_add(index as u32);
-        units.push(Unit {
-            kind: UnitKind::Slide,
-            index: index as u32,
-            id: format!("unit:{index}"),
-            name: slide_properties
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("Slide {slide_number}")),
-            width: slide_width,
-            height: slide_height,
-            rows: 0,
-            columns: 0,
-            frozen_rows: 0,
-            frozen_columns: 0,
-            frozen_width: 0.0,
-            frozen_height: 0.0,
-            row_axis: crate::model::SheetAxis::default(),
-            column_axis: crate::model::SheetAxis::default(),
-            show_grid_lines: false,
-            tab_color: None,
-            sheet: None,
-            slide: Some(SlideMetadata {
-                source_id: source_id.clone(),
-                source_part: Some(slide_part.to_owned()),
-                speaker_notes,
-                speaker_notes_part,
-                speaker_note_paragraphs,
-                number: slide_number,
-                hidden: !slide_properties.shown,
-            }),
-        });
         let unit_index = index as u32;
+        if let PptxParseMode::Unit(target, _) = mode
+            && target != unit_index
+        {
+            continue;
+        }
+        let slide_properties = presentation_part_properties(package, slide_part)?;
+        if !matches!(mode, PptxParseMode::Unit(..)) {
+            let (speaker_notes, speaker_notes_part, speaker_note_paragraphs) =
+                parse_speaker_notes(package, slide_part, &state.default_theme)?;
+            let slide_number = first_slide_number.saturating_add(index as u32);
+            units.push(Unit {
+                kind: UnitKind::Slide,
+                index: index as u32,
+                id: format!("unit:{index}"),
+                name: slide_properties
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Slide {slide_number}")),
+                width: slide_width,
+                height: slide_height,
+                rows: 0,
+                columns: 0,
+                frozen_rows: 0,
+                frozen_columns: 0,
+                frozen_width: 0.0,
+                frozen_height: 0.0,
+                row_axis: crate::model::SheetAxis::default(),
+                column_axis: crate::model::SheetAxis::default(),
+                show_grid_lines: false,
+                tab_color: None,
+                sheet: None,
+                slide: Some(SlideMetadata {
+                    source_id: source_id.clone(),
+                    source_part: Some(slide_part.to_owned()),
+                    speaker_notes,
+                    speaker_notes_part,
+                    speaker_note_paragraphs,
+                    number: slide_number,
+                    hidden: !slide_properties.shown,
+                }),
+            });
+        }
         let materialize = match mode {
             PptxParseMode::Complete => true,
             PptxParseMode::Initial => {
                 unit_index == 0 || presentation_part_contains_table(package, slide_part)?
             }
-            PptxParseMode::Unit(target) => unit_index == target,
+            PptxParseMode::Unit(..) => true,
         };
         if materialize {
             loaded_units.insert(unit_index);
@@ -595,13 +603,19 @@ fn parse_with_mode(
             )?;
         }
     }
+    // The initial parse already validated the package and populated every slide's
+    // metadata and notes. A lazy delta carries the same unit table without
+    // parsing those parts again while a new slide is coming into view.
+    if let PptxParseMode::Unit(_, initial_units) = mode {
+        units = initial_units.to_vec();
+    }
     if units.is_empty() {
         return Err(format_error(
             main_part,
             "presentation contains no readable slides",
         ));
     }
-    let embedded_fonts = if matches!(mode, PptxParseMode::Unit(_)) {
+    let embedded_fonts = if matches!(mode, PptxParseMode::Unit(..)) {
         Vec::new()
     } else {
         super::embedded_font::extract_pptx(

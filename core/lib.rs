@@ -876,15 +876,17 @@ pub extern "C" fn ov_document_load_unit(handle: u32, unit_index: u32) -> u32 {
         if unit_index as usize >= stored.document.units.len() {
             return 0;
         }
-        let (mut parsed, materialized_image_bytes) = match lazy
-            .prepared
-            .materialize_unit_with_budget(unit_index, lazy.materialized_image_bytes)
-        {
-            Ok((document, materialized_image_bytes)) if !document.fatal => {
-                (document, materialized_image_bytes)
-            }
-            _ => return 0,
-        };
+        let (mut parsed, materialized_image_bytes) =
+            match lazy.prepared.materialize_unit_with_budget(
+                unit_index,
+                &stored.document.units,
+                lazy.materialized_image_bytes,
+            ) {
+                Ok((document, materialized_image_bytes)) if !document.fatal => {
+                    (document, materialized_image_bytes)
+                }
+                _ => return 0,
+            };
         let Some(next_count) = stored
             .document
             .objects
