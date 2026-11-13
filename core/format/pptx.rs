@@ -495,6 +495,7 @@ fn parse_with_mode(
         default_theme,
         default_text_styles,
         theme_cache,
+        part_properties_cache: HashMap::new(),
     };
     let mut parsed_slide_parts = HashSet::new();
     let mut loaded_units = BTreeSet::new();
@@ -541,7 +542,7 @@ fn parse_with_mode(
         let slide_properties = presentation_part_properties(package, slide_part)?;
         if !matches!(mode, PptxParseMode::Unit(..)) {
             let (speaker_notes, speaker_notes_part, speaker_note_paragraphs) =
-                parse_speaker_notes(package, slide_part, &state.default_theme)?;
+                parse_speaker_notes(package, slide_part, &mut state)?;
             let slide_number = first_slide_number.saturating_add(index as u32);
             units.push(Unit {
                 kind: UnitKind::Slide,
@@ -578,7 +579,7 @@ fn parse_with_mode(
         let materialize = match mode {
             PptxParseMode::Complete => true,
             PptxParseMode::Initial => {
-                unit_index == 0 || presentation_part_contains_table(package, slide_part)?
+                unit_index == 0 || slide_properties.has_table
             }
             PptxParseMode::Unit(..) => true,
         };
@@ -642,21 +643,6 @@ fn parse_with_mode(
         loaded_units,
         materialized_image_bytes,
     })
-}
-
-fn presentation_part_contains_table(package: &Package<'_>, part: &str) -> Result<bool, Diagnostic> {
-    let bytes = package.required_part(part)?;
-    let mut contains_table = false;
-    parse_xml(&bytes, package.limits(), |event| {
-        if let XmlEvent::StartElement { name, .. } = event
-            && local_name(name) == "tbl"
-        {
-            contains_table = true;
-        }
-        Ok(())
-    })
-    .map_err(|error| with_part(error, part))?;
-    Ok(contains_table)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3493,9 +3479,32 @@ struct PptxParseState {
     default_theme: PptxTheme,
     default_text_styles: Vec<ParagraphStyle>,
     theme_cache: HashMap<String, PptxTheme>,
+    part_properties_cache: HashMap<String, PresentationPartProperties>,
 }
 
 impl PptxParseState {
+    fn theme(&mut self, package: &Package<'_>, part: &str) -> Result<PptxTheme, Diagnostic> {
+        if let Some(theme) = self.theme_cache.get(part) {
+            return Ok(theme.clone());
+        }
+        let theme = parse_pptx_theme(package, part)?;
+        self.theme_cache.insert(part.to_owned(), theme.clone());
+        Ok(theme)
+    }
+
+    fn inherited_properties(
+        &mut self,
+        package: &Package<'_>,
+        part: &str,
+    ) -> Result<PresentationPartProperties, Diagnostic> {
+        if let Some(properties) = self.part_properties_cache.get(part) {
+            return Ok(properties.clone());
+        }
+        let properties = presentation_part_properties(package, part)?;
+        self.part_properties_cache.insert(part.to_owned(), properties.clone());
+        Ok(properties)
+    }
+
     fn take_z(&mut self) -> i32 {
         let z = self.next_z;
         self.next_z = self.next_z.saturating_add(1);
@@ -3505,6 +3514,7 @@ impl PptxParseState {
 #[derive(Clone, Debug)]
 struct PresentationPartProperties {
     has_background: bool,
+    has_table: bool,
     show_master_shapes: bool,
     shown: bool,
     name: Option<String>,
@@ -3628,23 +3638,17 @@ fn parse_slide(
         &mut state.diagnostics,
     )?);
     let theme = if let Some(theme_part) = theme_part {
-        if let Some(theme) = state.theme_cache.get(&theme_part) {
-            theme.clone()
-        } else {
-            let theme = parse_pptx_theme(package, &theme_part)?;
-            state.theme_cache.insert(theme_part, theme.clone());
-            theme
-        }
+        state.theme(package, &theme_part)?
     } else {
         state.default_theme.clone()
     };
     let layout_properties = layout_part
         .as_deref()
-        .map(|layout_part| presentation_part_properties(package, layout_part))
+        .map(|layout_part| state.inherited_properties(package, layout_part))
         .transpose()?;
     let master_properties = master_part
         .as_deref()
-        .map(|master_part| presentation_part_properties(package, master_part))
+        .map(|master_part| state.inherited_properties(package, master_part))
         .transpose()?;
     let mut color_map = default_color_map();
     if let Some(mapping) = master_properties
@@ -3779,7 +3783,7 @@ type SpeakerNotes = (Option<String>, Option<String>, Vec<SpeakerNoteParagraph>);
 fn parse_speaker_notes(
     package: &Package<'_>,
     slide_part: &str,
-    theme: &PptxTheme,
+    state: &mut PptxParseState,
 ) -> Result<SpeakerNotes, Diagnostic> {
     let relationships = package.relationships(Some(slide_part))?;
     let Some(relationship) = relationships
@@ -3799,7 +3803,7 @@ fn parse_speaker_notes(
             !relationship.external && relationship.type_uri.ends_with("/notesMaster")
         })
         .map(|relationship| relationship.target.as_str());
-    let mut resolved_theme = theme.clone();
+    let mut resolved_theme = state.default_theme.clone();
     if let Some(notes_master_part) = notes_master_part {
         let notes_master_relationships = package.relationships(Some(notes_master_part))?;
         if let Some(theme_part) = notes_master_relationships
@@ -3809,9 +3813,9 @@ fn parse_speaker_notes(
             })
             .map(|relationship| relationship.target.as_str())
         {
-            resolved_theme = parse_pptx_theme(package, theme_part)?;
+            resolved_theme = state.theme(package, theme_part)?;
         }
-        if let Some(color_map) = presentation_part_properties(package, notes_master_part)?.color_map
+        if let Some(color_map) = state.inherited_properties(package, notes_master_part)?.color_map
         {
             resolved_theme = resolved_theme.with_color_map(color_map);
         }
@@ -5828,6 +5832,7 @@ fn presentation_part_properties(
     let bytes = package.required_part(part)?;
     let mut properties = PresentationPartProperties {
         has_background: false,
+        has_table: false,
         show_master_shapes: true,
         shown: true,
         name: None,
@@ -5855,6 +5860,8 @@ fn presentation_part_properties(
                 string_attribute(&attributes, "name", part)?.filter(|value| !value.is_empty());
         } else if local == "bg" {
             properties.has_background = true;
+        } else if local == "tbl" {
+            properties.has_table = true;
         } else if matches!(local, "clrMap" | "overrideClrMapping") {
             let mut mapping = default_color_map();
             for key in [
@@ -9220,6 +9227,7 @@ pub(super) fn parse_ooxml_diagram_data(
         default_theme: PptxTheme::default(),
         default_text_styles: vec![ParagraphStyle::default(); TEXT_LEVEL_COUNT],
         theme_cache: HashMap::new(),
+        part_properties_cache: HashMap::new(),
     };
     if try_push_pptx_diagram_drawing(
         package,
@@ -9275,6 +9283,7 @@ pub(super) fn parse_ooxml_locked_canvases(
         default_theme: theme.clone(),
         default_text_styles: vec![ParagraphStyle::default(); TEXT_LEVEL_COUNT],
         theme_cache: HashMap::new(),
+        part_properties_cache: HashMap::new(),
     };
     parse_presentation_part(
         package,
@@ -23584,6 +23593,8 @@ mod tests {
             default_theme: super::PptxTheme::default(),
             default_text_styles: vec![super::ParagraphStyle::default(); super::TEXT_LEVEL_COUNT],
             theme_cache: std::collections::HashMap::new(),
+            part_properties_cache: std::collections::HashMap::new(),
+
         };
         let result = parse_slide(
             package,
