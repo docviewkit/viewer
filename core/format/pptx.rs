@@ -578,9 +578,7 @@ fn parse_with_mode(
         }
         let materialize = match mode {
             PptxParseMode::Complete => true,
-            PptxParseMode::Initial => {
-                unit_index == 0 || slide_properties.has_table
-            }
+            PptxParseMode::Initial => unit_index == 0 || slide_properties.has_table,
             PptxParseMode::Unit(..) => true,
         };
         if materialize {
@@ -3501,7 +3499,8 @@ impl PptxParseState {
             return Ok(properties.clone());
         }
         let properties = presentation_part_properties(package, part)?;
-        self.part_properties_cache.insert(part.to_owned(), properties.clone());
+        self.part_properties_cache
+            .insert(part.to_owned(), properties.clone());
         Ok(properties)
     }
 
@@ -3815,7 +3814,9 @@ fn parse_speaker_notes(
         {
             resolved_theme = state.theme(package, theme_part)?;
         }
-        if let Some(color_map) = state.inherited_properties(package, notes_master_part)?.color_map
+        if let Some(color_map) = state
+            .inherited_properties(package, notes_master_part)?
+            .color_map
         {
             resolved_theme = resolved_theme.with_color_map(color_map);
         }
@@ -23594,7 +23595,6 @@ mod tests {
             default_text_styles: vec![super::ParagraphStyle::default(); super::TEXT_LEVEL_COUNT],
             theme_cache: std::collections::HashMap::new(),
             part_properties_cache: std::collections::HashMap::new(),
-
         };
         let result = parse_slide(
             package,
