@@ -515,11 +515,10 @@ const TEMPLATE = `
       background: var(--dv-surface-muted);
       overflow: hidden;
       transition: background-color var(--dv-motion-state) var(--dv-ease-toggle),
-        border-color var(--dv-motion-fast) var(--dv-ease-toggle),
-        box-shadow var(--dv-motion-fast) var(--dv-ease-toggle);
+        border-color var(--dv-motion-fast) var(--dv-ease-toggle);
     }
     .search:not([hidden]) { animation: control-in var(--dv-motion-state) var(--dv-ease-out); }
-    .search:focus-within { border-color: var(--dv-focus); box-shadow: 0 0 0 1px var(--dv-focus); }
+    .search:focus-within { border-color: var(--dv-focus); outline: 2px solid var(--dv-focus); outline-offset: 1px; }
     .search .icon-button { flex-basis: 32px; width: 32px; height: 32px; border-radius: 6px; }
     .search > .icon { flex: 0 0 22px; margin-inline-start: 8px; }
     .search-input { min-width: 0; flex: 1; height: 100%; padding-inline: 8px 4px; border: 0; outline: 0; color: inherit; background: transparent; }
@@ -2243,6 +2242,8 @@ export class DocViewKitViewerElement extends HTMLElement {
     zoomInput.addEventListener("focus", () => zoomInput.select());
     zoomInput.addEventListener("change", () => this.#commitZoomInput());
     zoomInput.addEventListener("keydown", (event) => {
+      // WebKit can finish composition before dispatching the confirming key.
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Enter") {
         event.preventDefault();
         this.#commitZoomInput();
@@ -2317,6 +2318,7 @@ export class DocViewKitViewerElement extends HTMLElement {
   }
 
   #handleKeydown(event: KeyboardEvent): void {
+    if (event.isComposing || event.keyCode === 229) return;
     const target = event.composedPath()[0];
     const editing = (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
       && !target.classList.contains("object-clipboard");

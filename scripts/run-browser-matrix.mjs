@@ -352,9 +352,12 @@ try {
         return {
           inputOutlineStyle: getComputedStyle(input).outlineStyle,
           searchBoxShadow: search instanceof HTMLElement ? getComputedStyle(search).boxShadow : "none",
+          searchOutlineStyle: search instanceof HTMLElement ? getComputedStyle(search).outlineStyle : "none",
+          searchOutlineWidth: search instanceof HTMLElement ? parseFloat(getComputedStyle(search).outlineWidth) : 0,
         };
       });
-      if (searchFocus.inputOutlineStyle !== "none" || searchFocus.searchBoxShadow === "none") {
+      if (searchFocus.inputOutlineStyle !== "none" || searchFocus.searchBoxShadow !== "none"
+        || searchFocus.searchOutlineStyle === "none" || searchFocus.searchOutlineWidth < 2) {
         throw new Error(`${name} showed nested search focus rings: ${JSON.stringify(searchFocus)}`);
       }
       await searchInput.fill("视觉基线");
