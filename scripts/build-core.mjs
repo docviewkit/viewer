@@ -132,4 +132,12 @@ for (const build of builds) {
     { cwd: root, stdio: "inherit" },
   );
   if (wasmOpt.status !== 0) process.exit(wasmOpt.status ?? 1);
+  if (build.features === undefined) {
+    // A second size-focused pass removes duplicated core code after -O3.
+    const sizeOpt = spawnSync(wasmOptCommand, [
+      "-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int",
+      output, "-o", output,
+    ], { cwd: root, stdio: "inherit" });
+    if (sizeOpt.status !== 0) process.exit(sizeOpt.status ?? 1);
+  }
 }
